@@ -1,41 +1,127 @@
-# DevShot Orchestrator — ARM64 (Raspberry Pi / ARM64 KVM)
+# =============================================================================
+# DevShot Orchestrator — ARM64 Xen VM orchestrator
 #
-# Cross-compiles Xen + kernel on x86, builds arm64 rootfs without chroot.
-# First boot inside QEMU completes package configuration.
-# Uses pre-built Go binary from bin/.
+# Compiles Xen hypervisor + tools/libs, patched QEMU-Xen (required for TCG),
+# Linux kernel, and Dom0 rootfs from source. Consumes a pre-built Go agent
+# from bin/devshot-agent-linux-arm64 — no Go source in the build context.
 #
-# Build:  docker build -t anticipatercom/devshot:arm64 -f docker/Dockerfile.dom0-arm .
-# Run:    docker run -d --privileged --device /dev/kvm -e DEVSHOT_SERVER_ID=... -e DEVSHOT_HMAC_SECRET=... -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com anticipatercom/devshot:arm64
+# Single source of truth for both local dev (scripts/dev.sh compiles the Go
+# binary into bin/ then runs this Dockerfile) and CI (build-images.yml in
+# devshot-agent does the same).
+#
+# NOTE: Cross-compiles ARM64 kernel/Xen from an x86 builder stage — works
+# on any Docker host regardless of the host arch.
+#
+# Build:
+#   docker buildx build --platform linux/arm64 \
+#     -t anticipatercom/devshot:arm64 -f docker/Dockerfile.dom0-arm .
+#
+# Run:
+#   docker run -d --privileged \
+#     -e DEVSHOT_SERVER_ID=... -e DEVSHOT_HMAC_SECRET=... \
+#     -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
+#     anticipatercom/devshot:arm64
+# =============================================================================
 
-# ─── Stage 1: Cross-compile Xen hypervisor for ARM64 ──────────────────────
+# ─── Stage 1: Build Xen hypervisor + tools/libs ────────────────────────────
 FROM debian:bookworm AS xen-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV CROSS_COMPILE=aarch64-linux-gnu-
-ENV XEN_TARGET_ARCH=arm64
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y \
-    build-essential crossbuild-essential-arm64 \
+    build-essential \
     bison flex python3 python3-dev \
     uuid-dev libglib2.0-dev libpixman-1-dev \
     libyajl-dev libfdt-dev libssl-dev \
+    gcc-aarch64-linux-gnu \
     git wget bc iasl pkg-config libncurses-dev
 
 WORKDIR /build
 
-RUN --mount=type=cache,target=/build/xen,id=xen-src-arm \
+RUN --mount=type=cache,target=/build/xen,id=xen-src \
     if [ ! -d /build/xen/.git ]; then \
         git clone --depth 1 --branch RELEASE-4.17.5 \
             https://xenbits.xen.org/git-http/xen.git /build/xen; \
     fi && \
     cd /build/xen && \
-    make -C xen XEN_TARGET_ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig && \
+    if [ ! -f xen/.config ]; then make -C xen XEN_TARGET_ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig; fi && \
     make -C xen XEN_TARGET_ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) && \
-    cp xen/xen /tmp/xen-arm64
+    cp xen/xen /tmp/xen-arm64 && \
+    ./configure --disable-docs --disable-stubdom && \
+    make -C tools/include install && \
+    make -C tools/libs install && \
+    ldconfig && \
+    make -C tools/firmware -j$(nproc) 2>/dev/null || true && \
+    make -C tools/firmware install 2>/dev/null || true && \
+    mkdir -p /tmp/xen-firmware && \
+    (cp -a /usr/local/lib/xen/boot/* /tmp/xen-firmware/ 2>/dev/null || true) && \
+    find /usr/local/include /usr/local/lib -name 'xen*' -o -name 'libxen*' -o -name '_libxl*' | \
+        tar czf /tmp/xen-dev.tar.gz -T -
 
-# ─── Stage 2: Cross-compile Linux kernel for ARM64 ────────────────────────
+# ─── Stage 2: Build QEMU with Xen device model ─────────────────────────────
+FROM debian:bookworm AS qemu-xen-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y \
+    build-essential python3 ninja-build pkg-config \
+    libglib2.0-dev libpixman-1-dev libfdt-dev \
+    libyajl-dev zlib1g-dev libaio-dev \
+    git flex bison
+
+WORKDIR /build
+
+COPY --from=xen-builder /tmp/xen-dev.tar.gz /tmp/xen-dev.tar.gz
+RUN tar xzf /tmp/xen-dev.tar.gz -C / && ldconfig && rm /tmp/xen-dev.tar.gz
+
+RUN --mount=type=cache,target=/build/qemu-xen,id=qemu-xen-src \
+    if [ ! -d /build/qemu-xen/.git ]; then \
+        git clone --depth 1 --branch stable-4.17 \
+            https://xenbits.xen.org/git-http/qemu-xen.git /build/qemu-xen; \
+    fi && \
+    cd /build/qemu-xen && rm -rf build && \
+    ./configure \
+        --target-list=aarch64-softmmu \
+        --enable-xen \
+        --disable-docs \
+        --disable-guest-agent \
+        --disable-guest-agent-msi \
+        --disable-brlapi \
+        --disable-curl \
+        --disable-curses \
+        --disable-sdl \
+        --disable-gtk \
+        --disable-opengl \
+        --enable-vnc \
+        --disable-spice \
+        --disable-virglrenderer \
+        --disable-smartcard \
+        --disable-usb-redir \
+        --disable-libusb \
+        --disable-vhost-user \
+        --disable-capstone \
+        --disable-libssh \
+        --disable-glusterfs \
+        --disable-rbd \
+        --disable-rdma \
+        --disable-vde \
+        --disable-nettle \
+        --disable-gcrypt \
+        --disable-gnutls \
+        --disable-tpm \
+        --disable-live-block-migration \
+        --disable-replication \
+        --disable-numa \
+        --disable-membarrier \
+        --disable-debug-info \
+    && make -j$(nproc) && \
+    cp build/qemu-system-aarch64 /tmp/qemu-system-aarch64-xen
+
+# ─── Stage 3: Build Linux kernel (Dom0) ────────────────────────────────────
 FROM debian:bookworm AS kernel-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -43,13 +129,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y \
-    build-essential crossbuild-essential-arm64 \
-    bc bison flex libssl-dev libelf-dev \
+    build-essential bc bison flex \
+    libssl-dev libelf-dev \
+    gcc-aarch64-linux-gnu \
     git wget cpio
 
 WORKDIR /build
 
-RUN --mount=type=cache,target=/build/linux,id=linux-src-arm \
+RUN --mount=type=cache,target=/build/linux,id=linux-src \
     if [ ! -d /build/linux/.git ]; then \
         git clone --depth 1 --branch linux-6.1.y \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /build/linux; \
@@ -71,10 +158,6 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-arm \
         --enable CONFIG_VIRTIO_NET \
         --enable CONFIG_VIRTIO_PCI \
         --enable CONFIG_VIRTIO_MMIO \
-        --enable CONFIG_9P_FS \
-        --enable CONFIG_9P_FS_POSIX_ACL \
-        --enable CONFIG_NET_9P \
-        --enable CONFIG_NET_9P_VIRTIO \
         --enable CONFIG_EXT4_FS \
         --enable CONFIG_TMPFS \
         --enable CONFIG_DEVTMPFS \
@@ -113,7 +196,7 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-arm \
     mkdir -p /tmp/modules && \
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=/tmp/modules modules_install
 
-# ─── Stage 3: Build Dom0 rootfs (no chroot — first boot completes setup) ──
+# ─── Stage 4: Build Dom0 rootfs (Debian Bookworm) ──────────────────────────
 FROM debian:bookworm AS rootfs-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -121,93 +204,186 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y \
-    debootstrap qemu-utils e2fsprogs
+    debootstrap qemu-utils e2fsprogs kpartx
 
 WORKDIR /build
 
-# First stage only — extracts arm64 packages without running any arm64 code
-RUN --mount=type=cache,target=/var/cache/bootstrap,id=debootstrap-arm \
-    debootstrap --arch=arm64 --foreign \
-    --include=systemd,systemd-sysv,sudo,iproute2,bridge-utils,dnsmasq,net-tools,iputils-ping,curl,wget,vim-tiny,ca-certificates,gnupg,less,procps,kmod,udev,e2fsprogs,xfsprogs,parted,qemu-utils,iptables,nftables,conntrack,tmux,clamav,clamav-daemon,clamav-freshclam,yara \
+RUN --mount=type=cache,target=/var/cache/bootstrap,id=debootstrap \
+    debootstrap \
+    --include=systemd,systemd-sysv,openssh-server,sudo,iproute2,bridge-utils,dnsmasq,net-tools,iputils-ping,curl,wget,vim-tiny,ca-certificates,gnupg,less,procps,kmod,udev,e2fsprogs,xfsprogs,parted,qemu-utils,iptables,nftables,conntrack,clamav,clamav-daemon,clamav-freshclam,yara \
     bookworm /rootfs http://deb.debian.org/debian
 
-# Kernel modules
+RUN chroot /rootfs bash -c ' \
+    echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list && \
+    echo "deb http://deb.debian.org/debian bookworm-updates main" >> /etc/apt/sources.list && \
+    echo "deb http://security.debian.org/debian-security bookworm-security main" >> /etc/apt/sources.list && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        xen-utils-common xen-tools \
+        bridge-utils dnsmasq openssh-server tmux \
+        sudo iproute2 net-tools iputils-ping \
+        curl wget vim-tiny ca-certificates \
+        procps kmod udev systemd systemd-sysv \
+        python3 qemu-utils nbd-client \
+        libpixman-1-0 \
+    && rm -rf /var/lib/apt/lists/*'
+
+COPY --from=qemu-xen-builder /tmp/qemu-system-aarch64-xen /rootfs/usr/bin/qemu-system-aarch64
+RUN chmod +x /rootfs/usr/bin/qemu-system-aarch64
+
+COPY --from=xen-builder /tmp/xen-dev.tar.gz /tmp/xen-dev.tar.gz
+RUN tar xzf /tmp/xen-dev.tar.gz -C /rootfs && \
+    chroot /rootfs ldconfig && \
+    rm /tmp/xen-dev.tar.gz
+
+COPY --from=xen-builder /tmp/xen-firmware/ /tmp/xen-firmware/
+RUN mkdir -p /rootfs/usr/lib/xen/boot /rootfs/usr/local/lib/xen/boot && \
+    cp -a /tmp/xen-firmware/* /rootfs/usr/lib/xen/boot/ 2>/dev/null || true && \
+    cp -a /tmp/xen-firmware/* /rootfs/usr/local/lib/xen/boot/ 2>/dev/null || true && \
+    rm -rf /tmp/xen-firmware
+
 COPY --from=kernel-builder /tmp/modules/lib/modules /rootfs/lib/modules
 
-# Write all config files directly (no chroot needed)
-RUN set -eux && \
-    R=/rootfs && \
-    # Create all directories first (debootstrap --foreign doesn't create them all)
-    mkdir -p "$R/etc/network/interfaces.d" "$R/etc/sysctl.d" "$R/etc/default" \
-             "$R/usr/local/bin" "$R/etc/systemd/system/multi-user.target.wants" \
-             "$R/etc/sudoers.d" "$R/usr/libexec" "$R/usr/lib/xen/bin" \
-             "$R/opt/devshot" "$R/xen/guests" "$R/etc/xen/guests" \
-             "$R/etc/xen/auto" "$R/xen/boot" "$R/xen/configs" \
-             "$R/home/devshot/workspace" "$R/etc/apt" && \
-    # Hostname + networking
-    echo "xen-dom0" > "$R/etc/hostname" && \
-    echo "127.0.0.1 localhost xen-dom0" > "$R/etc/hosts" && \
-    echo "nameserver 10.0.2.3" > "$R/etc/resolv.conf" && \
-    printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n' > "$R/etc/network/interfaces" && \
-    printf 'auto xenbr0\niface xenbr0 inet static\n    bridge_ports none\n    address 10.10.0.1\n    netmask 255.255.0.0\n' > "$R/etc/network/interfaces.d/xenbr0" && \
-    echo "net.ipv4.ip_forward=1" > "$R/etc/sysctl.d/99-xen.conf" && \
-    # Xen toolstack
-    echo "TOOLSTACK=xl" > "$R/etc/default/xen" && \
-    # NAT script
-    printf '#!/bin/bash\ndepmod -a 2>/dev/null || true\nmodprobe bridge 2>/dev/null || true\nmodprobe nbd nbds_max=1024 2>/dev/null || true\nif ! ip link show xenbr0 >/dev/null 2>&1; then\n    ip link add xenbr0 type bridge\n    ip addr add 10.10.0.1/16 dev xenbr0\n    ip link set xenbr0 up\nfi\niptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE\niptables -C FORWARD -i xenbr0 -o eth0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i xenbr0 -o eth0 -j ACCEPT\niptables -C FORWARD -i eth0 -o xenbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i eth0 -o xenbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n' > "$R/usr/local/bin/xen-nat.sh" && \
-    chmod +x "$R/usr/local/bin/xen-nat.sh" && \
-    # Systemd units
-    printf '[Unit]\nDescription=Xen NAT for DomU internet access\nAfter=network.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/xen-nat.sh\nRemainAfterExit=yes\n\n[Install]\nWantedBy=multi-user.target\n' > "$R/etc/systemd/system/xen-nat.service" && \
-    printf '[Unit]\nDescription=DevShot Agent (Dom0 orchestrator)\nAfter=xen-nat.service\nRequires=xen-nat.service\n\n[Service]\nEnvironmentFile=/xen/agent.env\nEnvironment=XS_REAL=1\nExecStart=/opt/devshot/agent\nRestart=always\nRestartSec=5\nStandardOutput=append:/xen/orchestrator.log\nStandardError=append:/xen/orchestrator.log\n\n[Install]\nWantedBy=multi-user.target\n' > "$R/etc/systemd/system/devshot-agent.service" && \
-    # Enable services via symlinks (no systemctl needed)
-    ln -sf /etc/systemd/system/xen-nat.service "$R/etc/systemd/system/multi-user.target.wants/xen-nat.service" && \
-    ln -sf /etc/systemd/system/devshot-agent.service "$R/etc/systemd/system/multi-user.target.wants/devshot-agent.service" && \
-    # Sudoers
-    echo "devshot ALL=(ALL) NOPASSWD: ALL" > "$R/etc/sudoers.d/devshot" && \
-    chmod 440 "$R/etc/sudoers.d/devshot" && \
-    # Xen device model symlinks
-    ln -sf /usr/bin/qemu-system-aarch64 "$R/usr/libexec/xen-qemu-system-i386" && \
-    ln -sf /usr/bin/qemu-system-aarch64 "$R/usr/lib/xen/bin/qemu-system-i386" && \
-    # 9p mounts
-    echo "xen_shared /xen 9p trans=virtio,version=9p2000.L,nofail 0 0" >> "$R/etc/fstab" && \
-    echo "orchestrator /opt/devshot 9p trans=virtio,version=9p2000.L,nofail 0 0" >> "$R/etc/fstab" && \
-    # APT sources for first-boot
-    printf 'deb http://deb.debian.org/debian bookworm main\ndeb http://deb.debian.org/debian bookworm-updates main\ndeb http://security.debian.org/debian-security bookworm-security main\n' > "$R/etc/apt/sources.list" && \
-    # First-boot script: completes debootstrap + installs extra packages + creates user
-    printf '#!/bin/bash\nset -e\nif [ -f /debootstrap/debootstrap ]; then\n  echo "=== First boot: completing debootstrap ==="\n  /debootstrap/debootstrap --second-stage\n  apt-get update\n  DEBIAN_FRONTEND=noninteractive apt-get install -y xen-utils-common xen-tools bridge-utils dnsmasq openssh-server python3 qemu-utils nbd-client libpixman-1-0\n  useradd -m -s /bin/bash -d /home/devshot devshot 2>/dev/null || true\n  passwd -d devshot 2>/dev/null || true\n  update-alternatives --set iptables /usr/sbin/iptables-legacy 2>/dev/null || true\n  systemctl enable xencommons 2>/dev/null || true\n  systemctl disable ssh 2>/dev/null || true\n  rm -f /etc/systemd/system/multi-user.target.wants/devshot-firstboot.service\n  echo "=== First boot complete ==="\nfi\n' > "$R/usr/local/bin/devshot-firstboot.sh" && \
-    chmod +x "$R/usr/local/bin/devshot-firstboot.sh" && \
-    printf '[Unit]\nDescription=DevShot first-boot setup\nBefore=devshot-agent.service\nConditionPathExists=/debootstrap/debootstrap\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/devshot-firstboot.sh\nRemainAfterExit=yes\n\n[Install]\nWantedBy=multi-user.target\n' > "$R/etc/systemd/system/devshot-firstboot.service" && \
-    ln -sf /etc/systemd/system/devshot-firstboot.service "$R/etc/systemd/system/multi-user.target.wants/devshot-firstboot.service"
+COPY roles/dom0/files/configure-dom0.sh /tmp/configure-dom0.sh
+RUN chmod +x /tmp/configure-dom0.sh && /tmp/configure-dom0.sh /rootfs xen-dom0
 
-# Convert rootfs to qcow2
-RUN mke2fs -t ext4 -d /rootfs -r 1 -N 0 -m 5 -L '' -O ^64bit /tmp/disk.raw 4G && \
-    qemu-img convert -f raw -O qcow2 -c /tmp/disk.raw /tmp/dom0-rootfs-arm.qcow2 && \
+RUN mkdir -p /rootfs/xen/guests /rootfs/etc/xen/guests /rootfs/etc/xen/auto /rootfs/xen/boot /rootfs/xen/configs
+
+# ClamAV: download virus signatures outside chroot (chroot has no DNS), then copy in
+RUN apt-get update && apt-get install -y clamav 2>/dev/null && \
+    freshclam --stdout --datadir=/tmp/clamav-db || echo "freshclam failed (non-fatal)" && \
+    mkdir -p /rootfs/var/lib/clamav && \
+    cp /tmp/clamav-db/*.cvd /rootfs/var/lib/clamav/ 2>/dev/null || true && \
+    rm -rf /tmp/clamav-db
+
+# ClamAV: configure clamd daemon + enable at boot
+RUN chroot /rootfs bash -c ' \
+    mkdir -p /var/log/clamav && chown clamav:clamav /var/log/clamav && \
+    chown -R clamav:clamav /var/lib/clamav && \
+    sed -i "s/^Example/#Example/" /etc/clamav/clamd.conf && \
+    systemctl enable clamav-daemon 2>/dev/null || true'
+
+# YARA: deploy rules
+COPY yara_rules /rootfs/opt/devshot/yara_rules
+
+# Convert rootfs to qcow2 using mke2fs -d (no loop mount / no privileged needed)
+RUN cd /rootfs && tar czf /build/dom0-rootfs.tar.gz . && \
+    apt-get update && apt-get install -y qemu-utils && \
+    mke2fs -t ext4 -d /rootfs -r 1 -N 0 -m 5 -L '' -O ^64bit /tmp/disk.raw 4G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/disk.raw /tmp/dom0-rootfs.qcow2 && \
     rm /tmp/disk.raw
 
-# ─── Stage 4: Final image ─────────────────────────────────────────────────
-# Pinned to linux/arm64 so Docker Hub's amd64 Automated Build agent still
-# produces a real arm64 image. Earlier stages stay unpinned and run natively
-# on the amd64 agent so the Xen/kernel cross-compile stays fast; only this
-# final stage's apt-get runs under qemu-user arm64 emulation.
-FROM --platform=linux/arm64 debian:bookworm
+# (No Go builder stage — agent is pre-compiled into bin/devshot-agent-linux-arm64
+#  by scripts/dev.sh locally or by build-agent.yml in CI. This Dockerfile
+#  never sees Go source.)
+
+# ─── Stage 5: Build DomU guest base image (Alpine rootfs for pool VMs) ────
+# Uses native arm64 Alpine to install packages (QEMU user-mode handles cross-arch),
+# then exports rootfs as tarball. Config files that Docker bind-mounts read-only
+# (/etc/hosts, /etc/hostname, /etc/resolv.conf) are patched in the converter stage.
+FROM --platform=linux/arm64 alpine:3.19 AS domu-rootfs
+
+RUN apk add --no-cache \
+    alpine-base openssh openrc e2fsprogs xe-guest-utilities \
+    iputils sudo tmux curl bash openssl
+
+# SSH config + host keys
+RUN mkdir -p /etc/ssh && \
+    printf 'Port 22\nPermitRootLogin yes\nPasswordAuthentication yes\nPubkeyAuthentication yes\nAuthorizedKeysFile .ssh/authorized_keys\nSubsystem sftp /usr/lib/ssh/sftp-server\n' > /etc/ssh/sshd_config && \
+    ssh-keygen -A 2>/dev/null || true
+
+# Root password (random) + SSH dir
+RUN HASH=$(openssl passwd -6 "$(openssl rand -hex 16)") && \
+    sed -i "s|^root:.*|root:${HASH}:18000:0:99999:7:::|" /etc/shadow && \
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
+    touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+
+# Devshot user (unprivileged, passwordless sudo — disposable sandbox).
+# Account is unlocked with a random, unknown password so sudo NOPASSWD works
+# without leaving an empty password that would allow passwordless console/SSH
+# login. A human can set a real password later if interactive access is needed.
+RUN adduser -D -s /bin/sh -h /home/devshot devshot && \
+    mkdir -p /home/devshot/workspace && \
+    chown -R devshot:devshot /home/devshot && \
+    mkdir -p /etc/sudoers.d && \
+    echo "devshot ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/devshot && \
+    chmod 440 /etc/sudoers.d/devshot && \
+    grep -q "^#includedir /etc/sudoers.d" /etc/sudoers 2>/dev/null || echo "#includedir /etc/sudoers.d" >> /etc/sudoers && \
+    RANDPW=$(head -c 32 /dev/urandom | base64 | tr -d '/+= \n') && \
+    echo "devshot:${RANDPW}" | chpasswd && \
+    unset RANDPW
+
+# OpenRC services
+RUN mkdir -p /etc/runlevels/sysinit /etc/runlevels/boot /etc/runlevels/default && \
+    for svc in devfs dmesg mdev hwdrivers; do ln -sf /etc/init.d/$svc /etc/runlevels/sysinit/$svc 2>/dev/null || true; done && \
+    for svc in hostname networking bootmisc syslog; do ln -sf /etc/init.d/$svc /etc/runlevels/boot/$svc 2>/dev/null || true; done && \
+    ln -sf /etc/init.d/sshd /etc/runlevels/default/sshd
+
+# Network + inittab + xennet init + agent init (files Docker doesn't bind-mount)
+RUN mkdir -p /etc/network && \
+    printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet manual\n' > /etc/network/interfaces && \
+    printf '::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\ntty0::respawn:/sbin/getty 38400 tty0\nhvc0::respawn:/sbin/getty 38400 hvc0\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n' > /etc/inittab && \
+    echo '/dev/xvda / ext4 rw,relatime 0 1' > /etc/fstab && \
+    printf '#!/sbin/openrc-run\n\nname="xennet"\ndescription="Configure eth0 from xenstore-assigned IP"\n\ndepend() {\n    need net\n    before networking sshd domu-agent\n    after devfs mdev\n}\n\nstart() {\n    local ip=""\n    local attempts=0\n    while [ -z "$ip" ] && [ $attempts -lt 50 ]; do\n        ip=$(xenstore-read "data/ip" 2>/dev/null) || ip=""\n        if [ -z "$ip" ]; then\n            attempts=$((attempts + 1))\n            usleep 100000 2>/dev/null || sleep 0.1\n        fi\n    done\n    if [ -z "$ip" ]; then\n        ewarn "No IP found in xenstore, falling back to 10.10.0.100"\n        ip="10.10.0.100"\n    fi\n    ebegin "Configuring eth0 with ${ip}"\n    ip addr flush dev eth0 2>/dev/null\n    ip addr add ${ip}/16 dev eth0\n    ip link set eth0 up\n    ip route add default via 10.10.0.1 dev eth0 2>/dev/null\n    eend $?\n}\n' > /etc/init.d/xennet && \
+    chmod 755 /etc/init.d/xennet && \
+    ln -sf /etc/init.d/xennet /etc/runlevels/boot/xennet
+
+# Minimal agent binary for pool VMs (terminal, benchmark, VNC desktop, tunnel).
+# Security monitoring and command execution are handled by dom0.
+# KVM VMs use agentless xl console proxy instead.
+RUN mkdir -p /opt/devshot
+COPY bin/devshot-agent-linux-arm64 /opt/devshot/agent
+RUN chmod 755 /opt/devshot/agent && \
+    chmod 700 /opt/devshot && \
+    printf '#!/bin/sh\nexport XS_REAL=1\nSELF_DOMID="$(xenstore-read /local/domain/self/domid 2>/dev/null || true)"\nif [ -n "$SELF_DOMID" ]; then\n  export DOMID="$SELF_DOMID"\nfi\nexec /opt/devshot/agent\n' > /opt/devshot/start-agent.sh && \
+    chmod 755 /opt/devshot/start-agent.sh && \
+    printf '#!/sbin/openrc-run\n\nname="devshot-agent"\ndescription="DevShot Agent"\ncommand="/opt/devshot/start-agent.sh"\npidfile="/run/${RC_SVCNAME}.pid"\ncommand_background="yes"\noutput_log="/var/log/devshot-agent.log"\nerror_log="/var/log/devshot-agent.log"\ncommand_user="root"\n\ndepend() {\n    need net\n    after networking\n}\n' > /etc/init.d/devshot-agent && \
+    chmod 755 /etc/init.d/devshot-agent && \
+    ln -sf /etc/init.d/devshot-agent /etc/runlevels/default/devshot-agent
+
+# Export rootfs as tarball (exclude Docker-managed pseudo-filesystems)
+RUN tar czf /tmp/domu-rootfs.tar.gz --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' -C / .
+
+# ─── Stage 5c: Convert DomU rootfs to qcow2 (on x86, no emulation needed) ─
+FROM debian:bookworm AS domu-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=domu-rootfs /tmp/domu-rootfs.tar.gz /tmp/domu-rootfs.tar.gz
+
+# Extract rootfs, patch Docker-managed files, then create qcow2 disk image
+RUN mkdir -p /domu/rootfs && \
+    tar xzf /tmp/domu-rootfs.tar.gz -C /domu/rootfs && \
+    rm /tmp/domu-rootfs.tar.gz && \
+    echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
+    echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
+    echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
+    mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/domu-disk.raw 2G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/domu-disk.raw /tmp/devshot-guest-base.qcow2 && \
+    rm -rf /tmp/domu-disk.raw /domu/rootfs
+
+# ─── Stage 6: Final image ──────────────────────────────────────────────────
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    qemu-system-arm qemu-utils \
+    qemu-system-arm qemu-efi-aarch64 qemu-utils \
     socat netcat-openbsd tmux \
-    curl ca-certificates bash tini openssl \
+    curl ca-certificates bash tini \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Xen hypervisor + kernel + rootfs (from build stages)
 RUN mkdir -p /xen/boot /xen/configs /xen/work /xen/guests /etc/xen/guests /var/lib/xen/guests
-COPY --from=xen-builder    /tmp/xen-arm64              /xen/xen
-COPY --from=kernel-builder /tmp/Image-dom0              /xen/Image
-COPY --from=kernel-builder /tmp/Image-dom0              /xen/boot/Image-domu
-COPY --from=rootfs-builder /tmp/dom0-rootfs-arm.qcow2   /xen/dom0-rootfs.qcow2
+COPY --from=xen-builder      /tmp/xen-arm64                   /xen/xen
+COPY --from=kernel-builder   /tmp/Image-dom0                   /xen/Image
+COPY --from=kernel-builder   /tmp/Image-dom0                   /xen/boot/Image-domu
+COPY --from=rootfs-builder   /tmp/dom0-rootfs.qcow2            /xen/dom0-rootfs.qcow2
+COPY --from=domu-converter   /tmp/devshot-guest-base.qcow2     /xen/devshot-guest-base.qcow2
+COPY                         roles/dom0/files/boot-xen.sh      /xen/boot-xen.sh
+RUN chmod +x /xen/boot-xen.sh
 
-# boot-xen.sh — inlined
-RUN printf '#!/bin/bash\nset -e\necho "=== DevShot Xen Boot ==="\nfor f in /xen/xen /xen/Image /xen/dom0-rootfs.qcow2; do\n    if [ ! -f "$f" ]; then echo "ERROR: $f not found."; exit 1; fi\ndone\nif [ ! -f /xen/dom0-rootfs-work.qcow2 ]; then\n    qemu-img create -f qcow2 -b /xen/dom0-rootfs.qcow2 -F qcow2 /xen/dom0-rootfs-work.qcow2\nfi\nqemu-system-aarch64 -accel tcg,thread=multi -machine virt,gic-version=3,virtualization=true -cpu max -smp "${XEN_CPUS:-2}" -m "${XEN_MEM:-4096}" -display none -daemonize -kernel /xen/xen -append "dom0_mem=1024M,max:1024M loglvl=all guest_loglvl=all console=dtuart" -device guest-loader,addr=0x49000000,kernel=/xen/Image,bootargs="console=hvc0 root=/dev/vda rw earlyprintk=xenboot" -drive file=/xen/dom0-rootfs-work.qcow2,format=qcow2,if=none,id=hd0 -device virtio-blk-device,drive=hd0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -fsdev local,id=xen_fs,path=/xen,security_model=none -device virtio-9p-device,fsdev=xen_fs,mount_tag=xen_shared -fsdev local,id=orch_fs,path=/opt/devshot,security_model=none -device virtio-9p-device,fsdev=orch_fs,mount_tag=orchestrator -monitor unix:/tmp/qemu-monitor.sock,server,nowait -serial unix:/tmp/qemu-console.sock,server,nowait -pidfile /tmp/qemu.pid\necho "QEMU started"\ntail -f /dev/null\n' > /xen/boot-xen.sh && \
-    chmod +x /xen/boot-xen.sh
-
-# Pre-built Go agent binary
+# Go agent binary
 WORKDIR /opt/devshot
 COPY bin/devshot-agent-linux-arm64 ./agent
 
@@ -215,11 +391,12 @@ COPY bin/devshot-agent-linux-arm64 ./agent
 COPY docker/entrypoint-dom0-arm.sh ./entrypoint.sh
 RUN chmod +x /opt/devshot/entrypoint.sh
 
+# Tunables
 ENV PORT=7200 \
     BIND_HOST=0.0.0.0 \
-    POOL_SIZE=1 \
+    POOL_SIZE=2 \
     VM_MEM=256 \
-    XEN_MEM=3072 \
+    XEN_MEM=4096 \
     XEN_CPUS=4 \
     LOG_LEVEL=info
 
