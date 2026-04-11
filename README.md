@@ -1,6 +1,13 @@
 # DevShot Agent
 
-Pre-built agents and orchestrator binaries for DevShot.
+Pre-built orchestrator images and Go agent binaries for DevShot.
+
+This repo is **auto-generated** on every push to
+[devshotcom/devshot](https://github.com/devshotcom/devshot)'s `main`
+branch. Do not edit files here directly — they will be overwritten.
+The Docker images published to Docker Hub (`anticipatercom/devshot:*`)
+are built from this repo by `.github/workflows/build-images.yml`
+on Docker Build Cloud.
 
 ## Quick Install
 
@@ -8,52 +15,193 @@ Pre-built agents and orchestrator binaries for DevShot.
 curl -fsSL https://devshot.com/install.sh | bash
 ```
 
-## Binaries
+Or grab a copy-paste `docker run` from
+[console.devshot.com](https://console.devshot.com) → **Servers** →
+**Add Server** — it selects the right image for your host.
+
+## Docker Images
+
+Published to Docker Hub by `.github/workflows/build-images.yml` on every push.
+
+### Dom0 orchestrator (multi-VM, full Xen hypervisor)
+
+Single privileged container that runs Xen and spawns guest VMs
+on demand. Use this for `server_type: 'multi'` servers.
+
+| Tag | Platform | KVM | Source Dockerfile |
+|---|---|---|---|
+| `anticipatercom/devshot:amd64` | Linux x86_64 (bare-metal, cloud VMs) | required (`--device /dev/kvm`) | `docker/Dockerfile.dom0-x86` |
+| `anticipatercom/devshot:arm64` | Linux ARM64 (Raspberry Pi, Graviton, Ampere) | required (`--device /dev/kvm`) | `docker/Dockerfile.dom0-arm` |
+| `anticipatercom/devshot:arm64-mac` | Apple Silicon via Docker Desktop | not used (TCG software emulation) | `docker/Dockerfile.dom0-arm` |
+
+### DomU standalone (single-VM, no Xen)
+
+Lightweight container running just the Go DomU agent. Use this
+for `server_type: 'single'` servers — one VM, direct tunnel,
+no hypervisor. Both images ship as a single multi-arch manifest
+covering `linux/amd64` and `linux/arm64`.
+
+| Tag | Contents | Source Dockerfile |
+|---|---|---|
+| `anticipatercom/devshot_domu:latest` | Alpine + Go agent, terminal only | `docker/Dockerfile.domU` |
+| `anticipatercom/devshot_desktop:latest` | Alpine + Go agent + Openbox + tigervnc + noVNC (port 6080) | `docker/Dockerfile.domU-desktop` |
+
+Every build also publishes an immutable `<tag>-<sha>` tag
+(e.g. `amd64-1a2b3c4d` for dom0, or `<sha>` on the domU repos)
+so you can pin a specific commit.
+
+### Pull
+
+```bash
+# Dom0 orchestrator
+docker pull anticipatercom/devshot:amd64      # Linux x86_64
+docker pull anticipatercom/devshot:arm64      # Linux ARM64 (Pi, Graviton)
+docker pull anticipatercom/devshot:arm64-mac  # Apple Silicon Docker Desktop
+
+# DomU standalone
+docker pull anticipatercom/devshot_domu:latest     # terminal only
+docker pull anticipatercom/devshot_desktop:latest  # + VNC desktop
+```
+
+### Build locally
+
+```bash
+# Dom0 orchestrator (one per target arch — cross-compiles Xen + kernel)
+docker build -t anticipatercom/devshot:amd64 -f docker/Dockerfile.dom0-x86 .
+docker build -t anticipatercom/devshot:arm64 -f docker/Dockerfile.dom0-arm .
+
+# DomU standalone (multi-arch from a single Dockerfile)
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t anticipatercom/devshot_domu:latest -f docker/Dockerfile.domU .
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t anticipatercom/devshot_desktop:latest -f docker/Dockerfile.domU-desktop .
+```
+
+The dom0 Dockerfiles cross-compile Xen + the Linux kernel from
+upstream source, then copy the pre-built Go agent from `bin/`.
+The final stage is pinned to its target platform so the manifest
+is correct even when the build runs on a different host arch.
+The domU Dockerfiles are plain `alpine + bin/devshot-agent-linux-$TARGETARCH`.
+
+## Run
+
+### Linux (x86_64 or ARM64) — hardware virtualization
+
+```bash
+docker run -d \
+  --name devshot-orchestrator \
+  --privileged --device /dev/kvm --network=host \
+  --restart=unless-stopped \
+  -e DEVSHOT_SERVER_ID=<your-server-id> \
+  -e DEVSHOT_HMAC_SECRET=<your-hmac-secret> \
+  -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
+  anticipatercom/devshot:amd64   # or :arm64 on Pi / Graviton
+```
+
+Requires `/dev/kvm` (check with `ls /dev/kvm` and `lsmod | grep kvm`).
+
+### macOS (Apple Silicon) — Docker Desktop, TCG
+
+```bash
+docker run -d \
+  --name devshot-orchestrator \
+  --privileged --network=host \
+  --restart=unless-stopped \
+  -e DEVSHOT_SERVER_ID=<your-server-id> \
+  -e DEVSHOT_HMAC_SECRET=<your-hmac-secret> \
+  -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
+  anticipatercom/devshot:arm64-mac
+```
+
+No `/dev/kvm` (Docker Desktop doesn't expose it). Xen and guest
+VMs run under QEMU TCG software emulation — slower than a real
+Linux host but fine for local testing.
+
+### Windows (WSL2)
+
+Run from **inside WSL2** (not PowerShell). Requires Windows 11
+with nested virtualization enabled:
+
+```powershell
+# Host PowerShell, as admin, once:
+Set-VMProcessor -VMName WSL -ExposeVirtualizationExtensions \$true
+wsl --shutdown
+```
+
+Then inside WSL2:
+
+```bash
+ls /dev/kvm   # must exist
+docker run -d \
+  --name devshot-orchestrator \
+  --privileged --device /dev/kvm --network=host \
+  --restart=unless-stopped \
+  -e DEVSHOT_SERVER_ID=<your-server-id> \
+  -e DEVSHOT_HMAC_SECRET=<your-hmac-secret> \
+  -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
+  anticipatercom/devshot:amd64
+```
+
+### DomU standalone (`server_type: 'single'`)
+
+No Xen, no `/dev/kvm`, no `--network=host`. Just a container
+with the Go agent talking directly to the tunnel:
+
+```bash
+docker run -d \
+  --name devshot-domu \
+  --restart=unless-stopped \
+  -e DEVSHOT_SERVER_ID=<your-server-id> \
+  -e DEVSHOT_HMAC_SECRET=<your-hmac-secret> \
+  -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
+  anticipatercom/devshot_domu:latest
+```
+
+### DomU desktop (browser VNC on port 6080)
+
+Same as `devshot_domu` plus Openbox + tigervnc + noVNC. Open
+`http://localhost:6080/vnc.html` after starting:
+
+```bash
+docker run -d \
+  --name devshot-desktop \
+  --restart=unless-stopped \
+  -p 6080:6080 \
+  -e DEVSHOT_SERVER_ID=<your-server-id> \
+  -e DEVSHOT_HMAC_SECRET=<your-hmac-secret> \
+  -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
+  anticipatercom/devshot_desktop:latest
+```
+
+Omit the `DEVSHOT_*` env vars to run as a purely local desktop
+with no tunnel.
+
+## Standalone Go Agent Binaries
+
+If you want the Go agent without the Xen orchestrator layer
+(e.g. running directly on a Linux host you already provision):
 
 | File | Platform |
 |---|---|
 | `bin/devshot-agent-linux-amd64` | Linux x86_64 |
 | `bin/devshot-agent-linux-arm64` | Linux ARM64 |
 
-## Docker Images
-
-```bash
-docker pull devshotcom/devshot-orchestrator:x86
-docker pull devshotcom/devshot-orchestrator:arm64
-```
-
-Or build locally:
-
-```bash
-docker build -t devshot-orchestrator:x86 -f docker/Dockerfile.dom0-x86 .
-docker build -t devshot-orchestrator:arm64 -f docker/Dockerfile.dom0-arm .
-```
-
-## Run
-
-```bash
-docker run -d \
-  --name devshot-orchestrator \
-  --privileged --device /dev/kvm \
-  --restart=unless-stopped \
-  -e DEVSHOT_SERVER_ID=<your-server-id> \
-  -e DEVSHOT_HMAC_SECRET=<your-hmac-secret> \
-  -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
-  devshotcom/devshot-orchestrator:x86
-```
+Stripped (`-ldflags="-s -w"`), statically linked (`CGO_ENABLED=0`).
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `DEVSHOT_SERVER_ID` | Yes | Server UUID from console |
-| `DEVSHOT_HMAC_SECRET` | Yes | HMAC key from console |
-| `DEVSHOT_TUNNEL_URL` | Yes | WebSocket tunnel URL |
-| `POOL_SIZE` | No | Concurrent VMs (default: 1) |
-| `VM_MEM` | No | Per-VM memory in MB (default: 256) |
-| `XEN_MEM` | No | Hypervisor memory in MB (default: 4096) |
-| `XEN_CPUS` | No | Hypervisor CPUs (default: 4) |
+| `DEVSHOT_SERVER_ID` | yes | Server UUID from console.devshot.com |
+| `DEVSHOT_HMAC_SECRET` | yes | HMAC key from console.devshot.com |
+| `DEVSHOT_TUNNEL_URL` | yes | Control-plane WebSocket URL (prod: `wss://console.devshot.com`) |
+| `POOL_SIZE` | no | Concurrent VMs (default: `1`) |
+| `VM_MEM` | no | Per-VM memory in MB (default: `256`) |
+| `XEN_MEM` | no | Hypervisor memory in MB (default: `4096`) |
+| `XEN_CPUS` | no | Hypervisor CPUs (default: `4`) |
 
 ## Build Info
 
-Auto-deployed by CI. Last built: 2026-04-11T01:38:52Z
+Auto-deployed by CI from [devshotcom/devshot@f861ae2090035f39254d13f2286568dbad2e292b](https://github.com/devshotcom/devshot/commit/f861ae2090035f39254d13f2286568dbad2e292b).
+
+Last built: 2026-04-11T15:14:55Z

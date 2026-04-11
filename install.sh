@@ -33,10 +33,10 @@ detect_platform() {
       PLATFORM="mac"
       if [ "$ARCH" = "arm64" ]; then
         DOCKER_ARCH="arm64"
-        IMAGE_TAG="arm64"
+        IMAGE_TAG="arm64-mac"
       else
         DOCKER_ARCH="amd64"
-        IMAGE_TAG="x86"
+        IMAGE_TAG="amd64"
       fi
       ;;
     Linux)
@@ -46,7 +46,7 @@ detect_platform() {
       fi
       if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
         DOCKER_ARCH="amd64"
-        IMAGE_TAG="x86"
+        IMAGE_TAG="amd64"
       elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
         DOCKER_ARCH="arm64"
         IMAGE_TAG="arm64"
@@ -57,7 +57,7 @@ detect_platform() {
     MINGW*|MSYS*|CYGWIN*)
       PLATFORM="windows"
       DOCKER_ARCH="amd64"
-      IMAGE_TAG="x86"
+      IMAGE_TAG="amd64"
       ;;
     *)
       fatal "Unsupported OS: $OS"
@@ -70,7 +70,7 @@ detect_platform() {
   echo "════════════════════════════════════════════════════════"
   echo "  Platform:     $PLATFORM ($ARCH)"
   echo "  Docker arch:  $DOCKER_ARCH"
-  echo "  Image:        devshotcom/devshot:$IMAGE_TAG"
+  echo "  Image:        anticipatercom/devshot:$IMAGE_TAG"
   echo "════════════════════════════════════════════════════════"
   echo ""
 }
@@ -100,7 +100,10 @@ install_mac() {
   fi
   ok "Colima installed"
 
-  # Start Colima with x86_64 (Rosetta) for KVM-ready x86 Xen
+  # Start Colima with x86_64 (Rosetta) for KVM-ready x86 Xen.
+  # Note: Colima runs an x86_64 Linux VM — even on Apple Silicon — so we
+  # always pull the :amd64 tag here. (The console paste path uses Docker
+  # Desktop on Apple Silicon instead, which pulls :arm64-mac.)
   if ! colima status &>/dev/null; then
     info "Starting Colima (x86_64 via Rosetta)..."
     if [ "$ARCH" = "arm64" ]; then
@@ -113,16 +116,15 @@ install_mac() {
         --cpu 4 \
         --memory 8 \
         --disk 60
-      IMAGE_TAG="x86"
     else
       # Intel Mac
       colima start \
         --cpu 4 \
         --memory 8 \
         --disk 60
-      IMAGE_TAG="x86"
     fi
   fi
+  IMAGE_TAG="amd64"
   ok "Colima running"
 
   # Check KVM inside Colima
@@ -211,7 +213,7 @@ install_wsl() {
     fi
   fi
 
-  IMAGE_TAG="x86"
+  IMAGE_TAG="amd64"
 }
 
 # ── Windows (native) ────────────────────────────────────────────────────────
@@ -234,7 +236,7 @@ install_windows() {
 # ── Pull or build image ─────────────────────────────────────────────────────
 
 pull_image() {
-  local image="devshotcom/devshot:${IMAGE_TAG}"
+  local image="anticipatercom/devshot:${IMAGE_TAG}"
 
   info "Pulling Docker image: ${image}..."
   if docker pull "$image" 2>/dev/null; then
@@ -275,7 +277,7 @@ configure_orchestrator() {
 }
 
 start_orchestrator() {
-  local image="devshotcom/devshot:${IMAGE_TAG}"
+  local image="anticipatercom/devshot:${IMAGE_TAG}"
   local container_name="devshot-orchestrator"
 
   # Stop existing container

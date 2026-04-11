@@ -1,0 +1,168 @@
+name: Build & Push Orchestrator Images
+
+# Source of truth: apps/agent/docker/build-images.yml in the devshotcom/devshot
+# monorepo. The monorepo's build-agent.yml workflow copies this file to
+# .github/workflows/build-images.yml in the devshot-agent repo each time it
+# pushes a new deploy artifact — so this workflow actually runs there.
+#
+# Triggered every time CI in the monorepo pushes new binaries + Dockerfiles
+# to the devshot-agent repo. Builds every publishable tag from the
+# Dockerfiles using Docker Build Cloud (native linux/arm64 builder, no
+# qemu-user emulation of the final stage).
+#
+# Tags produced:
+#   anticipatercom/devshot:amd64           — Dom0 orchestrator, Linux x86_64 (KVM)
+#   anticipatercom/devshot:arm64           — Dom0 orchestrator, Linux ARM64 (Pi, Graviton)
+#   anticipatercom/devshot:arm64-mac       — Dom0 orchestrator, Apple Silicon Docker Desktop (TCG)
+#   anticipatercom/devshot_domu:latest     — Standalone DomU (terminal), multi-arch manifest
+#   anticipatercom/devshot_desktop:latest  — Standalone DomU + VNC desktop, multi-arch manifest
+#
+# The :arm64 and :arm64-mac dom0 tags are built from the same Dockerfile
+# (Dockerfile.dom0-arm); they exist as distinct tags so the install script
+# can route Mac users to a build we explicitly validated for Docker Desktop.
+#
+# The domU images ship as single multi-arch manifest lists (amd64 + arm64)
+# because the Dockerfiles are just `alpine + pre-built Go binary` — buildx
+# picks the right binary per platform via ARG TARGETARCH, no separate jobs.
+#
+# Required repo secrets (configure in devshot-agent repo Settings → Secrets):
+#   DOCKERHUB_USERNAME — Docker Hub user with push access to anticipatercom
+#   DOCKERHUB_TOKEN    — Docker Hub access token
+#
+# Required Docker Build Cloud setup (one-time, in the Docker Hub UI):
+#   1. Subscribe to Docker Build Cloud on the anticipatercom org
+#   2. Create a builder named "devshot": `docker buildx create --driver cloud anticipatercom/devshot`
+#   3. If you rename the builder, update BUILDX_CLOUD_ENDPOINT below.
+#
+# IMPORTANT: Disable Docker Hub Automated Builds on anticipatercom/devshot,
+# anticipatercom/devshot_domu, and anticipatercom/devshot_desktop before
+# merging this. Otherwise Docker Hub will race this workflow every push
+# and clobber the tags with single-platform amd64-manifest builds from
+# its classic amd64-only build agents.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  BUILDX_CLOUD_ENDPOINT: anticipatercom/devshot
+
+jobs:
+  # ── Dom0 orchestrator: Linux x86_64 ────────────────────────────────────
+  build-dom0-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          version: "lab:latest"
+          driver: cloud
+          endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
+          install: true
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.dom0-x86
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          tags: |
+            anticipatercom/devshot:amd64
+            anticipatercom/devshot:amd64-${{ github.sha }}
+
+  # ── Dom0 orchestrator: Linux ARM64 (+ arm64-mac alias) ─────────────────
+  build-dom0-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          version: "lab:latest"
+          driver: cloud
+          endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
+          install: true
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.dom0-arm
+          platforms: linux/arm64
+          provenance: false
+          push: true
+          tags: |
+            anticipatercom/devshot:arm64
+            anticipatercom/devshot:arm64-${{ github.sha }}
+            anticipatercom/devshot:arm64-mac
+            anticipatercom/devshot:arm64-mac-${{ github.sha }}
+
+  # ── DomU standalone: multi-arch manifest (amd64 + arm64) ──────────────
+  build-domu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          version: "lab:latest"
+          driver: cloud
+          endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
+          install: true
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.domU
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          push: true
+          tags: |
+            anticipatercom/devshot_domu:latest
+            anticipatercom/devshot_domu:${{ github.sha }}
+
+  # ── DomU desktop (VNC + noVNC): multi-arch manifest (amd64 + arm64) ───
+  build-domu-desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          version: "lab:latest"
+          driver: cloud
+          endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
+          install: true
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.domU-desktop
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          push: true
+          tags: |
+            anticipatercom/devshot_desktop:latest
+            anticipatercom/devshot_desktop:${{ github.sha }}

@@ -1,0 +1,57 @@
+# DevShot DomU — standalone single-VM container (deploy variant)
+#
+# Runs the Go DomU agent with direct tunnel connection. No Xen, no QEMU,
+# no orchestrator. Used for `server_type: 'single'` servers — a single
+# VM's worth of terminal access over the DevShot tunnel.
+#
+# Multi-arch: a single `docker buildx build --platform linux/amd64,linux/arm64 ...`
+# produces a manifest list covering both architectures. TARGETARCH is set
+# by buildx per platform and selects the right pre-built Go binary from bin/.
+#
+# Required env vars at runtime:
+#   DEVSHOT_SERVER_ID    — UUID from the DevShot console
+#   DEVSHOT_HMAC_SECRET  — HMAC key from the DevShot console
+#   DEVSHOT_TUNNEL_URL   — Tunnel WebSocket URL (wss://console.devshot.com)
+#
+# Build:  docker buildx build --platform linux/amd64,linux/arm64 \
+#           -t anticipatercom/devshot_domu:latest \
+#           -f docker/Dockerfile.domU .
+# Run:    docker run -d --name my-domu \
+#           -e DEVSHOT_SERVER_ID=... -e DEVSHOT_HMAC_SECRET=... \
+#           -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
+#           anticipatercom/devshot_domu:latest
+
+FROM alpine:3.19
+
+RUN apk add --no-cache tmux openssl tini bash sudo
+
+WORKDIR /opt/devshot
+
+# Pre-built Go DomU agent. TARGETARCH is 'amd64' or 'arm64' (buildx sets it).
+ARG TARGETARCH
+COPY bin/devshot-agent-linux-${TARGETARCH} ./agent
+
+# Unprivileged user for command execution.
+# Random, unknown password — unlocks the account (sudo NOPASSWD works) without
+# leaving it `!`-locked or empty-passworded.
+RUN adduser -D -s /bin/sh -h /home/devshot devshot \
+ && echo "devshot ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/devshot \
+ && chmod 440 /etc/sudoers.d/devshot \
+ && mkdir -p /home/devshot/workspace \
+ && chown -R devshot:devshot /home/devshot \
+ && mkdir -p /tmp/xenstore \
+ && chmod 700 /opt/devshot /opt/devshot/agent \
+ && RANDPW=$(head -c 32 /dev/urandom | base64 | tr -d '/+= \n') \
+ && echo "devshot:${RANDPW}" | chpasswd \
+ && unset RANDPW
+
+COPY docker/entrypoint-domU.sh ./entrypoint.sh
+RUN chmod +x /opt/devshot/entrypoint.sh
+
+ENV DOMID=1 \
+    XS_ROOT=/tmp/xenstore \
+    RUN_AS_USER=devshot \
+    LOG_LEVEL=info
+
+ENTRYPOINT ["tini", "--"]
+CMD ["/opt/devshot/entrypoint.sh"]

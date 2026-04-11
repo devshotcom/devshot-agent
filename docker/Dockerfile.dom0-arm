@@ -4,8 +4,8 @@
 # First boot inside QEMU completes package configuration.
 # Uses pre-built Go binary from bin/.
 #
-# Build:  docker build -t devshotcom/devshot-orchestrator:arm64 -f docker/Dockerfile.dom0-arm .
-# Run:    docker run -d --privileged --device /dev/kvm -e DEVSHOT_SERVER_ID=... -e DEVSHOT_HMAC_SECRET=... -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com devshotcom/devshot-orchestrator:arm64
+# Build:  docker build -t anticipatercom/devshot:arm64 -f docker/Dockerfile.dom0-arm .
+# Run:    docker run -d --privileged --device /dev/kvm -e DEVSHOT_SERVER_ID=... -e DEVSHOT_HMAC_SECRET=... -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com anticipatercom/devshot:arm64
 
 # ─── Stage 1: Cross-compile Xen hypervisor for ARM64 ──────────────────────
 FROM debian:bookworm AS xen-builder

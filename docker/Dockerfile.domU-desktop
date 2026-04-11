@@ -1,0 +1,268 @@
+# DevShot DomU Desktop — Alpine container with Openbox + VNC + noVNC (deploy variant)
+#
+# Standalone desktop accessible via browser (noVNC on port 6080). Also
+# runs the Go DomU agent for remote access via the DevShot tunnel.
+#
+# Multi-arch: a single `docker buildx build --platform linux/amd64,linux/arm64 ...`
+# produces a manifest list covering both architectures. TARGETARCH is set
+# by buildx per platform and selects the right pre-built Go binary from bin/.
+#
+# Standalone (no tunnel):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -t anticipatercom/devshot_desktop:latest \
+#     -f docker/Dockerfile.domU-desktop .
+#   docker run -d -p 6080:6080 --name my-desktop anticipatercom/devshot_desktop:latest
+#   Open http://localhost:6080/vnc.html
+#
+# With tunnel:
+#   docker run -d -p 6080:6080 -e DEVSHOT_SERVER_ID=... -e DEVSHOT_HMAC_SECRET=... \
+#     -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
+#     anticipatercom/devshot_desktop:latest
+
+FROM alpine:3.19
+
+RUN apk add --no-cache \
+    # Base (same as terminal DomU)
+    tmux openssl tini bash sudo \
+    # VNC server (Xvnc = X server + VNC combined)
+    tigervnc \
+    # Browser-based VNC access (websockify proxies WS→TCP, novnc serves the HTML client)
+    websockify novnc \
+    # Desktop environment
+    openbox tint2 \
+    # Compositor (shadows, transparency, smooth rendering)
+    picom \
+    # Desktop apps
+    pcmanfm xterm \
+    # Desktop infrastructure
+    dbus dbus-x11 \
+    # GTK theme + icons
+    greybird-themes-gtk2 greybird-themes-gtk3 numix-themes-openbox \
+    adwaita-icon-theme papirus-icon-theme \
+    # Fonts
+    font-noto font-noto-emoji \
+    # Wallpaper setter
+    feh
+
+WORKDIR /opt/devshot
+
+# Pre-built Go DomU agent. TARGETARCH is 'amd64' or 'arm64' (buildx sets it).
+ARG TARGETARCH
+COPY bin/devshot-agent-linux-${TARGETARCH} ./agent
+
+# Unprivileged user with desktop home.
+# Random, unknown password — unlocks the account (sudo NOPASSWD works) without
+# leaving it `!`-locked or empty-passworded.
+RUN adduser -D -s /bin/bash -h /home/devshot devshot \
+ && echo "devshot ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/devshot \
+ && chmod 440 /etc/sudoers.d/devshot \
+ && mkdir -p /home/devshot/workspace /home/devshot/.vnc /home/devshot/.config/openbox \
+ && chown -R devshot:devshot /home/devshot \
+ && mkdir -p /tmp/xenstore /tmp/.X11-unix \
+ && chmod 1777 /tmp/.X11-unix \
+ && chmod 700 /opt/devshot /opt/devshot/agent \
+ && RANDPW=$(head -c 32 /dev/urandom | base64 | tr -d '/+= \n') \
+ && echo "devshot:${RANDPW}" | chpasswd \
+ && unset RANDPW
+
+# GTK theme — dark, clean, macOS-inspired
+RUN mkdir -p /home/devshot/.config/gtk-3.0 \
+ && printf '[Settings]\ngtk-theme-name=Greybird-dark\ngtk-icon-theme-name=Papirus-Dark\ngtk-font-name=Noto Sans 10\ngtk-decoration-layout=close,minimize,maximize:\ngtk-application-prefer-dark-theme=true\n' \
+    > /home/devshot/.config/gtk-3.0/settings.ini \
+ && printf 'gtk-theme-name="Greybird-dark"\ngtk-icon-theme-name="Papirus-Dark"\ngtk-font-name="Noto Sans 10"\n' \
+    > /home/devshot/.gtkrc-2.0
+
+# Openbox config — clean window decorations, CML button layout (close/max/min on left like macOS)
+RUN mkdir -p /home/devshot/.config/openbox /home/devshot/.config/tint2 \
+ && printf '<?xml version="1.0" encoding="UTF-8"?>\n\
+<openbox_config xmlns="http://openbox.org/3.4/rc">\n\
+  <theme><name>Numix</name>\n\
+    <titleLayout>CLIMD</titleLayout>\n\
+    <cornerRadius>8</cornerRadius>\n\
+    <font place="ActiveWindow"><name>Noto Sans</name><size>10</size><weight>Bold</weight></font>\n\
+    <font place="InactiveWindow"><name>Noto Sans</name><size>9</size><weight>Normal</weight></font>\n\
+    <font place="MenuHeader"><name>Noto Sans</name><size>10</size><weight>Bold</weight></font>\n\
+    <font place="MenuItem"><name>Noto Sans</name><size>10</size><weight>Normal</weight></font>\n\
+  </theme>\n\
+  <desktops><number>2</number><names><name>Desktop</name><name>Work</name></names></desktops>\n\
+  <resize><drawContents>yes</drawContents></resize>\n\
+  <placement><policy>Smart</policy><center>yes</center></placement>\n\
+  <mouse>\n\
+    <context name="Titlebar">\n\
+      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>\n\
+      <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximize"/></mousebind>\n\
+      <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>client-menu</menu></action></mousebind>\n\
+    </context>\n\
+    <context name="Top"><mousebind button="Left" action="Drag"><action name="Resize"><edge>top</edge></action></mousebind></context>\n\
+    <context name="Bottom"><mousebind button="Left" action="Drag"><action name="Resize"><edge>bottom</edge></action></mousebind></context>\n\
+    <context name="Left"><mousebind button="Left" action="Drag"><action name="Resize"><edge>left</edge></action></mousebind></context>\n\
+    <context name="Right"><mousebind button="Left" action="Drag"><action name="Resize"><edge>right</edge></action></mousebind></context>\n\
+    <context name="TLCorner"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>\n\
+    <context name="TRCorner"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>\n\
+    <context name="BLCorner"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>\n\
+    <context name="BRCorner"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>\n\
+    <context name="Frame">\n\
+      <mousebind button="A-Left" action="Drag"><action name="Move"/></mousebind>\n\
+      <mousebind button="A-Right" action="Drag"><action name="Resize"/></mousebind>\n\
+    </context>\n\
+    <context name="Root">\n\
+      <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind>\n\
+    </context>\n\
+    <context name="Close"><mousebind button="Left" action="Click"><action name="Close"/></mousebind></context>\n\
+    <context name="Maximize"><mousebind button="Left" action="Click"><action name="ToggleMaximize"/></mousebind></context>\n\
+    <context name="Iconify"><mousebind button="Left" action="Click"><action name="Iconify"/></mousebind></context>\n\
+  </mouse>\n\
+</openbox_config>\n' > /home/devshot/.config/openbox/rc.xml \
+ && printf '<?xml version="1.0" encoding="UTF-8"?>\n\
+<openbox_menu xmlns="http://openbox.org/3.5/menu">\n\
+  <menu id="root-menu" label="DevShot">\n\
+    <item label="Terminal"><action name="Execute"><execute>xterm -fa &quot;Noto Sans Mono&quot; -fs 11 -bg &quot;#1c1c1e&quot; -fg &quot;#e5e5e7&quot;</execute></action></item>\n\
+    <item label="File Manager"><action name="Execute"><execute>pcmanfm</execute></action></item>\n\
+    <separator />\n\
+    <menu id="apps" label="Applications">\n\
+      <item label="XTerm"><action name="Execute"><execute>xterm</execute></action></item>\n\
+      <item label="PCManFM"><action name="Execute"><execute>pcmanfm</execute></action></item>\n\
+    </menu>\n\
+    <separator />\n\
+    <item label="Reconfigure"><action name="Reconfigure" /></item>\n\
+  </menu>\n\
+</openbox_menu>\n' > /home/devshot/.config/openbox/menu.xml
+
+# tint2 panel config — macOS-inspired dock at bottom
+RUN printf '# Background 1: Panel\n\
+rounded = 0\n\
+border_width = 1\n\
+border_sides = T\n\
+background_color = #1c1c1e 85\n\
+border_color = #3a3a3c 50\n\
+\n\
+# Background 2: Active task\n\
+rounded = 6\n\
+border_width = 0\n\
+background_color = #ffffff 15\n\
+border_color = #000000 0\n\
+\n\
+# Background 3: Tooltip\n\
+rounded = 4\n\
+border_width = 0\n\
+background_color = #2c2c2e 95\n\
+border_color = #000000 0\n\
+\n\
+# Panel\n\
+panel_items = LTSC\n\
+panel_size = 100%% 38\n\
+panel_margin = 0 0\n\
+panel_padding = 6 0 6\n\
+panel_background_id = 1\n\
+panel_position = bottom center horizontal\n\
+panel_layer = top\n\
+panel_monitor = all\n\
+\n\
+# Launcher\n\
+launcher_padding = 4 2 4\n\
+launcher_background_id = 0\n\
+launcher_icon_size = 24\n\
+launcher_item_app = /usr/share/applications/xterm.desktop\n\
+launcher_item_app = /usr/share/applications/pcmanfm.desktop\n\
+\n\
+# Taskbar\n\
+taskbar_mode = single_desktop\n\
+taskbar_padding = 2 0 4\n\
+taskbar_background_id = 0\n\
+taskbar_active_background_id = 0\n\
+taskbar_name = 0\n\
+\n\
+# Task\n\
+task_text = 1\n\
+task_icon = 1\n\
+task_centered = 1\n\
+task_maximum_size = 180 30\n\
+task_padding = 6 2 4\n\
+task_font = Noto Sans 9\n\
+task_font_color = #c7c7cc 80\n\
+task_active_font_color = #ffffff 100\n\
+task_icon_asb = 100 0 0\n\
+task_active_icon_asb = 100 0 0\n\
+task_background_id = 0\n\
+task_active_background_id = 2\n\
+task_urgent_background_id = 0\n\
+task_iconified_font_color = #8e8e93 60\n\
+\n\
+# Separator\n\
+separator = new\n\
+separator_background_id = 0\n\
+separator_color = #48484a 40\n\
+separator_style = line\n\
+separator_size = 1\n\
+separator_padding = 4 4\n\
+\n\
+# System tray\n\
+systray_padding = 4 2 4\n\
+systray_background_id = 0\n\
+systray_icon_size = 20\n\
+systray_icon_asb = 100 0 0\n\
+\n\
+# Clock\n\
+time1_format = %%H:%%M\n\
+time1_font = Noto Sans Bold 10\n\
+time2_format = %%a %%d %%b\n\
+time2_font = Noto Sans 8\n\
+clock_font_color = #e5e5e7 90\n\
+clock_padding = 8 0\n\
+clock_background_id = 0\n\
+\n\
+# Tooltip\n\
+tooltip_show_timeout = 0.3\n\
+tooltip_padding = 6 4\n\
+tooltip_background_id = 3\n\
+tooltip_font = Noto Sans 9\n\
+tooltip_font_color = #e5e5e7 100\n\
+\n\
+# Mouse\n\
+mouse_left = toggle_iconify\n\
+mouse_middle = close\n\
+mouse_right = maximize_restore\n\
+mouse_scroll_up = toggle\n\
+mouse_scroll_down = iconify\n\
+\n' > /home/devshot/.config/tint2/tint2rc
+
+# macOS-style wallpaper — dark gradient with subtle blue accent
+RUN apk add --no-cache imagemagick \
+ && convert -size 1280x800 \
+    -define gradient:angle=135 \
+    'gradient:#0d1117-#161b22' \
+    -fill 'rgba(56,139,253,0.08)' -draw 'circle 900,200 900,500' \
+    -fill 'rgba(139,92,246,0.05)' -draw 'circle 300,600 300,900' \
+    /home/devshot/.wallpaper.png \
+ && apk del imagemagick
+
+# Openbox autostart: compositor, wallpaper, dock panel
+RUN printf '#!/bin/sh\n\
+# Compositor for shadows, transparency, smooth rendering\n\
+picom --backend xrender --shadow --shadow-radius=12 --shadow-opacity=0.4 \\\n\
+  --shadow-offset-x=-8 --shadow-offset-y=-8 --no-fading-openclose \\\n\
+  --inactive-opacity=0.95 -b 2>/dev/null &\n\
+# Wallpaper\n\
+feh --bg-fill /home/devshot/.wallpaper.png &\n\
+# Dock panel\n\
+tint2 &\n' > /home/devshot/.config/openbox/autostart \
+ && chmod +x /home/devshot/.config/openbox/autostart \
+ && chown -R devshot:devshot /home/devshot
+
+COPY docker/entrypoint-domU-desktop.sh ./entrypoint.sh
+RUN chmod +x /opt/devshot/entrypoint.sh
+
+ENV DOMID=1 \
+    XS_ROOT=/tmp/xenstore \
+    RUN_AS_USER=devshot \
+    LOG_LEVEL=info \
+    VNC_PORT=5900 \
+    NOVNC_PORT=6080 \
+    VNC_GEOMETRY=1280x800 \
+    VNC_DEPTH=24 \
+    DISPLAY=:0
+
+EXPOSE 5900 6080
+
+ENTRYPOINT ["tini", "--"]
+CMD ["/opt/devshot/entrypoint.sh"]

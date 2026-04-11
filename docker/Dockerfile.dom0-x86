@@ -6,13 +6,13 @@
 #
 # Build:
 #   docker buildx build --platform linux/amd64 \
-#     -t devshotcom/devshot-orchestrator:x86 -f docker/Dockerfile.dom0-x86 .
+#     -t anticipatercom/devshot:amd64 -f docker/Dockerfile.dom0-x86 .
 #
 # Run:
 #   docker run -d --privileged --device /dev/kvm \
 #     -e DEVSHOT_SERVER_ID=... -e DEVSHOT_HMAC_SECRET=... \
 #     -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
-#     devshotcom/devshot-orchestrator:x86
+#     anticipatercom/devshot:amd64
 
 # ─── Stage 1: Build Xen hypervisor + tools/libs ────────────────────────────
 FROM --platform=linux/amd64 debian:bookworm AS xen-builder
