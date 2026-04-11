@@ -1,0 +1,323 @@
+# DevShot Orchestrator — x86_64 (KVM)
+#
+# Multi-stage: compiles Xen, kernel, QEMU-Xen, and rootfs from source.
+# Uses pre-built Go binary from bin/.
+# Rebuild: 2026-04-05
+#
+# Build:
+#   docker buildx build --platform linux/amd64 \
+#     -t devshotcom/devshot-orchestrator:x86 -f docker/Dockerfile.dom0-x86 .
+#
+# Run:
+#   docker run -d --privileged --device /dev/kvm \
+#     -e DEVSHOT_SERVER_ID=... -e DEVSHOT_HMAC_SECRET=... \
+#     -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
+#     devshotcom/devshot-orchestrator:x86
+
+# ─── Stage 1: Build Xen hypervisor + tools/libs ────────────────────────────
+FROM --platform=linux/amd64 debian:bookworm AS xen-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y \
+    build-essential \
+    bison flex python3 python3-dev \
+    uuid-dev libglib2.0-dev libpixman-1-dev \
+    libyajl-dev libfdt-dev libssl-dev \
+    git wget bc iasl pkg-config libncurses-dev
+
+WORKDIR /build
+
+RUN --mount=type=cache,target=/build/xen,id=xen-src-x86 \
+    if [ ! -d /build/xen/.git ]; then \
+        git clone --depth 1 --branch RELEASE-4.17.5 \
+            https://xenbits.xen.org/git-http/xen.git /build/xen; \
+    fi && \
+    cd /build/xen && \
+    if [ ! -f xen/.config ]; then make -C xen XEN_TARGET_ARCH=x86_64 defconfig; fi && \
+    make -C xen XEN_TARGET_ARCH=x86_64 -j$(nproc) && \
+    cp xen/xen /tmp/xen-x86 && \
+    ./configure --disable-docs --disable-stubdom && \
+    make -C tools/include install && \
+    make -C tools/libs install && \
+    ldconfig && \
+    make -C tools/firmware -j$(nproc) 2>/dev/null || true && \
+    make -C tools/firmware install 2>/dev/null || true && \
+    mkdir -p /tmp/xen-firmware && \
+    (cp -a /usr/local/lib/xen/boot/* /tmp/xen-firmware/ 2>/dev/null || true) && \
+    find /usr/local/include /usr/local/lib -name 'xen*' -o -name 'libxen*' -o -name '_libxl*' | \
+        tar czf /tmp/xen-dev.tar.gz -T -
+
+# ─── Stage 2: Build QEMU with Xen device model ─────────────────────────────
+FROM --platform=linux/amd64 debian:bookworm AS qemu-xen-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y \
+    build-essential python3 ninja-build pkg-config \
+    libglib2.0-dev libpixman-1-dev libfdt-dev \
+    libyajl-dev zlib1g-dev libaio-dev \
+    git flex bison
+
+WORKDIR /build
+
+COPY --from=xen-builder /tmp/xen-dev.tar.gz /tmp/xen-dev.tar.gz
+RUN tar xzf /tmp/xen-dev.tar.gz -C / && ldconfig && rm /tmp/xen-dev.tar.gz
+
+RUN --mount=type=cache,target=/build/qemu-xen,id=qemu-xen-src-x86 \
+    if [ ! -d /build/qemu-xen/.git ]; then \
+        git clone --depth 1 --branch stable-4.17 \
+            https://xenbits.xen.org/git-http/qemu-xen.git /build/qemu-xen; \
+    fi && \
+    cd /build/qemu-xen && rm -rf build && \
+    ./configure \
+        --target-list=x86_64-softmmu \
+        --enable-xen \
+        --disable-docs \
+        --disable-guest-agent \
+        --disable-guest-agent-msi \
+        --disable-brlapi \
+        --disable-curl \
+        --disable-curses \
+        --disable-sdl \
+        --disable-gtk \
+        --disable-opengl \
+        --enable-vnc \
+        --disable-spice \
+        --disable-virglrenderer \
+        --disable-smartcard \
+        --disable-usb-redir \
+        --disable-libusb \
+        --disable-vhost-user \
+        --disable-capstone \
+        --disable-libssh \
+        --disable-glusterfs \
+        --disable-rbd \
+        --disable-rdma \
+        --disable-vde \
+        --disable-nettle \
+        --disable-gcrypt \
+        --disable-gnutls \
+        --disable-tpm \
+        --disable-live-block-migration \
+        --disable-replication \
+        --disable-numa \
+        --disable-membarrier \
+        --disable-debug-info \
+    && make -j$(nproc) && \
+    cp build/qemu-system-x86_64 /tmp/qemu-system-x86_64-xen
+
+# ─── Stage 3: Build Linux kernel (Dom0) ────────────────────────────────────
+FROM --platform=linux/amd64 debian:bookworm AS kernel-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y \
+    build-essential bc bison flex \
+    libssl-dev libelf-dev \
+    git wget cpio
+
+WORKDIR /build
+
+RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
+    if [ ! -d /build/linux/.git ]; then \
+        git clone --depth 1 --branch linux-6.1.y \
+            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /build/linux; \
+    fi && \
+    cd /build/linux && \
+    make ARCH=x86_64 defconfig && \
+    scripts/config \
+        --enable CONFIG_XEN \
+        --enable CONFIG_XEN_DOM0 \
+        --enable CONFIG_XEN_PV \
+        --enable CONFIG_XEN_PV_DOM0 \
+        --enable CONFIG_XEN_PVHVM \
+        --enable CONFIG_XEN_BLKDEV_BACKEND \
+        --enable CONFIG_XEN_BLKDEV_FRONTEND \
+        --enable CONFIG_XEN_NETDEV_BACKEND \
+        --enable CONFIG_XEN_NETDEV_FRONTEND \
+        --enable CONFIG_XEN_PCIDEV_BACKEND \
+        --enable CONFIG_XEN_BALLOON \
+        --enable CONFIG_XEN_GNTDEV \
+        --enable CONFIG_XEN_GRANT_DEV_ALLOC \
+        --enable CONFIG_PARAVIRT \
+        --enable CONFIG_PARAVIRT_SPINLOCKS \
+        --enable CONFIG_VIRTIO_BLK \
+        --enable CONFIG_VIRTIO_NET \
+        --enable CONFIG_VIRTIO_PCI \
+        --enable CONFIG_VIRTIO_MMIO \
+        --enable CONFIG_EXT4_FS \
+        --enable CONFIG_TMPFS \
+        --enable CONFIG_DEVTMPFS \
+        --enable CONFIG_DEVTMPFS_MOUNT \
+        --enable CONFIG_CGROUPS \
+        --enable CONFIG_OVERLAY_FS \
+        --enable CONFIG_NFSD \
+        && \
+    scripts/config \
+        --set-val CONFIG_BLK_DEV_NBD y \
+        --set-val CONFIG_BRIDGE y \
+        --set-val CONFIG_VETH y \
+        --set-val CONFIG_TUN y \
+        --set-val CONFIG_NETFILTER y \
+        --set-val CONFIG_NETFILTER_XTABLES y \
+        --set-val CONFIG_NF_CONNTRACK y \
+        --set-val CONFIG_NF_NAT y \
+        --set-val CONFIG_NF_TABLES y \
+        --set-val CONFIG_NF_TABLES_IPV4 y \
+        --set-val CONFIG_NFT_COMPAT y \
+        --set-val CONFIG_NFT_NAT y \
+        --set-val CONFIG_NFT_MASQ y \
+        --set-val CONFIG_NFT_CHAIN_NAT y \
+        --set-val CONFIG_NFT_CT y \
+        --set-val CONFIG_NFT_REJECT y \
+        --set-val CONFIG_BRIDGE_NETFILTER y \
+        --set-val CONFIG_IP_NF_IPTABLES y \
+        --set-val CONFIG_IP_NF_FILTER y \
+        --set-val CONFIG_IP_NF_NAT y \
+        --set-val CONFIG_IP_NF_TARGET_MASQUERADE y \
+        --set-val CONFIG_NF_CONNTRACK_IPV4 y && \
+    make ARCH=x86_64 olddefconfig && \
+    sed -i 's/CONFIG_BRIDGE=m/CONFIG_BRIDGE=y/; s/CONFIG_BRIDGE_NETFILTER=m/CONFIG_BRIDGE_NETFILTER=y/; s/CONFIG_VETH=m/CONFIG_VETH=y/; s/CONFIG_TUN=m/CONFIG_TUN=y/; s/CONFIG_BLK_DEV_NBD=m/CONFIG_BLK_DEV_NBD=y/; s/CONFIG_NETFILTER_XT_MATCH_STATE=m/CONFIG_NETFILTER_XT_MATCH_STATE=y/; s/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=m/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y/' .config && \
+    make ARCH=x86_64 -j$(nproc) bzImage modules && \
+    cp arch/x86/boot/bzImage /tmp/vmlinuz-dom0 && \
+    mkdir -p /tmp/modules && \
+    make ARCH=x86_64 INSTALL_MOD_PATH=/tmp/modules modules_install
+
+# ─── Stage 4: Build Dom0 rootfs (Debian Bookworm) ──────────────────────────
+FROM --platform=linux/amd64 debian:bookworm AS rootfs-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y \
+    debootstrap qemu-utils e2fsprogs kpartx
+
+WORKDIR /build
+
+RUN --mount=type=cache,target=/var/cache/bootstrap,id=debootstrap-x86 \
+    debootstrap --arch=amd64 \
+    --include=systemd,systemd-sysv,openssh-server,sudo,iproute2,bridge-utils,dnsmasq,net-tools,iputils-ping,curl,wget,vim-tiny,ca-certificates,gnupg,less,procps,kmod,udev,e2fsprogs,xfsprogs,parted,qemu-utils,iptables \
+    bookworm /rootfs http://deb.debian.org/debian
+
+RUN chroot /rootfs bash -c ' \
+    echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list && \
+    echo "deb http://deb.debian.org/debian bookworm-updates main" >> /etc/apt/sources.list && \
+    echo "deb http://security.debian.org/debian-security bookworm-security main" >> /etc/apt/sources.list && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        xen-utils-common xen-tools \
+        bridge-utils dnsmasq openssh-server tmux \
+        sudo iproute2 net-tools iputils-ping \
+        curl wget vim-tiny ca-certificates \
+        procps kmod udev systemd systemd-sysv \
+        python3 qemu-utils nbd-client \
+        libpixman-1-0 nftables conntrack \
+        clamav clamav-daemon clamav-freshclam yara \
+    && rm -rf /var/lib/apt/lists/*'
+
+COPY --from=qemu-xen-builder /tmp/qemu-system-x86_64-xen /rootfs/usr/bin/qemu-system-x86_64
+RUN chmod +x /rootfs/usr/bin/qemu-system-x86_64
+
+COPY --from=xen-builder /tmp/xen-dev.tar.gz /tmp/xen-dev.tar.gz
+RUN tar xzf /tmp/xen-dev.tar.gz -C /rootfs && \
+    chroot /rootfs ldconfig && \
+    rm /tmp/xen-dev.tar.gz
+
+COPY --from=xen-builder /tmp/xen-firmware/ /tmp/xen-firmware/
+RUN mkdir -p /rootfs/usr/lib/xen/boot /rootfs/usr/local/lib/xen/boot && \
+    cp -a /tmp/xen-firmware/* /rootfs/usr/lib/xen/boot/ 2>/dev/null || true && \
+    cp -a /tmp/xen-firmware/* /rootfs/usr/local/lib/xen/boot/ 2>/dev/null || true && \
+    rm -rf /tmp/xen-firmware
+
+COPY --from=kernel-builder /tmp/modules/lib/modules /rootfs/lib/modules
+
+# Configure Dom0 rootfs (x86_64): networking, Xen services, NAT, agent auto-start
+RUN set -eux && \
+    ROOTFS=/rootfs && \
+    HOSTNAME=xen-dom0 && \
+    echo "$HOSTNAME" > "$ROOTFS/etc/hostname" && \
+    echo "127.0.0.1 localhost $HOSTNAME" > "$ROOTFS/etc/hosts" && \
+    echo "nameserver 10.0.2.3" > "$ROOTFS/etc/resolv.conf" && \
+    mkdir -p "$ROOTFS/etc/network/interfaces.d" && \
+    printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n' > "$ROOTFS/etc/network/interfaces" && \
+    printf 'auto xenbr0\niface xenbr0 inet static\n    bridge_ports none\n    address 10.10.0.1\n    netmask 255.255.0.0\n' > "$ROOTFS/etc/network/interfaces.d/xenbr0" && \
+    echo "net.ipv4.ip_forward=1" > "$ROOTFS/etc/sysctl.d/99-xen.conf" && \
+    chroot "$ROOTFS" bash -c 'update-alternatives --set iptables /usr/sbin/iptables-legacy 2>/dev/null || true' && \
+    echo "TOOLSTACK=xl" > "$ROOTFS/etc/default/xen" && \
+    chroot "$ROOTFS" bash -c 'systemctl enable xencommons 2>/dev/null || true' && \
+    mkdir -p "$ROOTFS/usr/local/bin" && \
+    printf '#!/bin/bash\ndepmod -a 2>/dev/null || true\nmodprobe bridge 2>/dev/null || true\nmodprobe nbd nbds_max=1024 2>/dev/null || true\nif ! ip link show xenbr0 >/dev/null 2>&1; then\n    ip link add xenbr0 type bridge\n    ip addr add 10.10.0.1/16 dev xenbr0\n    ip link set xenbr0 up\nfi\niptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE\niptables -C FORWARD -i xenbr0 -o eth0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i xenbr0 -o eth0 -j ACCEPT\niptables -C FORWARD -i eth0 -o xenbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i eth0 -o xenbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n' > "$ROOTFS/usr/local/bin/xen-nat.sh" && \
+    chmod +x "$ROOTFS/usr/local/bin/xen-nat.sh" && \
+    printf '[Unit]\nDescription=Xen NAT for DomU internet access\nAfter=network.target xencommons.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/xen-nat.sh\nRemainAfterExit=yes\n\n[Install]\nWantedBy=multi-user.target\n' > "$ROOTFS/etc/systemd/system/xen-nat.service" && \
+    chroot "$ROOTFS" bash -c 'systemctl enable xen-nat 2>/dev/null || true' && \
+    chroot "$ROOTFS" bash -c 'useradd -m -s /bin/bash -d /home/devshot devshot 2>/dev/null || true' && \
+    mkdir -p "$ROOTFS/home/devshot/workspace" && \
+    chroot "$ROOTFS" bash -c 'chown -R devshot:devshot /home/devshot' && \
+    chroot "$ROOTFS" bash -c 'passwd -d devshot 2>/dev/null || true' && \
+    chroot "$ROOTFS" bash -c 'apt-get install -y --no-install-recommends sudo tmux >/dev/null 2>&1 || true' && \
+    mkdir -p "$ROOTFS/etc/sudoers.d" && \
+    echo "devshot ALL=(ALL) NOPASSWD: ALL" > "$ROOTFS/etc/sudoers.d/devshot" && \
+    chmod 440 "$ROOTFS/etc/sudoers.d/devshot" && \
+    printf '[Unit]\nDescription=DevShot Agent (Dom0 orchestrator)\nAfter=xen-nat.service\nRequires=xen-nat.service\n\n[Service]\nEnvironmentFile=/xen/agent.env\nEnvironment=XS_REAL=1\nExecStart=/opt/devshot/agent\nRestart=always\nRestartSec=5\nStandardOutput=append:/xen/orchestrator.log\nStandardError=append:/xen/orchestrator.log\n\n[Install]\nWantedBy=multi-user.target\n' > "$ROOTFS/etc/systemd/system/devshot-agent.service" && \
+    chroot "$ROOTFS" bash -c 'systemctl enable devshot-agent 2>/dev/null || true' && \
+    mkdir -p "$ROOTFS/usr/libexec" "$ROOTFS/usr/lib/xen/bin" && \
+    ln -sf /usr/bin/qemu-system-x86_64 "$ROOTFS/usr/libexec/xen-qemu-system-i386" && \
+    ln -sf /usr/bin/qemu-system-x86_64 "$ROOTFS/usr/lib/xen/bin/qemu-system-i386" && \
+    echo "xen_shared /xen 9p trans=virtio,version=9p2000.L,nofail 0 0" >> "$ROOTFS/etc/fstab" && \
+    echo "orchestrator /opt/devshot 9p trans=virtio,version=9p2000.L,nofail 0 0" >> "$ROOTFS/etc/fstab" && \
+    mkdir -p "$ROOTFS/opt/devshot" "$ROOTFS/xen/guests" "$ROOTFS/etc/xen/guests" "$ROOTFS/etc/xen/auto" "$ROOTFS/xen/boot" "$ROOTFS/xen/configs" && \
+    chroot "$ROOTFS" bash -c 'systemctl disable ssh 2>/dev/null || true'
+
+# Convert rootfs to qcow2
+RUN cd /rootfs && tar czf /build/dom0-rootfs-x86.tar.gz . && \
+    apt-get update && apt-get install -y qemu-utils && \
+    mke2fs -t ext4 -d /rootfs -r 1 -N 0 -m 5 -L '' -O ^64bit /tmp/disk.raw 4G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/disk.raw /tmp/dom0-rootfs-x86.qcow2 && \
+    rm /tmp/disk.raw
+
+# ─── Stage 5: Final image ──────────────────────────────────────────────────
+FROM --platform=linux/amd64 debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    qemu-system-x86 qemu-utils \
+    socat netcat-openbsd tmux \
+    curl ca-certificates bash tini openssl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Xen hypervisor + kernel + rootfs (from build stages)
+RUN mkdir -p /xen/boot /xen/configs /xen/work /xen/guests /etc/xen/guests /var/lib/xen/guests
+COPY --from=xen-builder      /tmp/xen-x86                     /xen/xen
+COPY --from=kernel-builder   /tmp/vmlinuz-dom0                 /xen/vmlinuz
+COPY --from=kernel-builder   /tmp/vmlinuz-dom0                 /xen/boot/vmlinuz-domu
+COPY --from=rootfs-builder   /tmp/dom0-rootfs-x86.qcow2       /xen/dom0-rootfs.qcow2
+# boot-xen.sh — inlined
+RUN printf '#!/bin/bash\nset -e\necho "=== DevShot Xen Boot ==="\nfor f in /xen/xen /xen/vmlinuz /xen/dom0-rootfs.qcow2; do\n    if [ ! -f "$f" ]; then echo "ERROR: $f not found."; exit 1; fi\ndone\nif [ ! -f /xen/dom0-rootfs-work.qcow2 ]; then\n    qemu-img create -f qcow2 -b /xen/dom0-rootfs.qcow2 -F qcow2 /xen/dom0-rootfs-work.qcow2\nfi\necho "QEMU boot delegated to entrypoint"\n' > /xen/boot-xen.sh && \
+    chmod +x /xen/boot-xen.sh
+
+# Pre-built Go agent binary
+WORKDIR /opt/devshot
+COPY bin/devshot-agent-linux-amd64 ./agent
+
+# Entrypoint
+COPY docker/entrypoint-dom0-x86.sh ./entrypoint.sh
+RUN chmod +x /opt/devshot/entrypoint.sh
+
+# Defaults
+ENV PORT=7200 \
+    BIND_HOST=0.0.0.0 \
+    POOL_SIZE=2 \
+    VM_MEM=256 \
+    XEN_MEM=4096 \
+    XEN_CPUS=4 \
+    LOG_LEVEL=info
+
+ENTRYPOINT ["tini", "--"]
+CMD ["/opt/devshot/entrypoint.sh"]
