@@ -195,14 +195,15 @@ Stripped (`-ldflags="-s -w"`), statically linked (`CGO_ENABLED=0`).
 | `DEVSHOT_SERVER_ID` | yes | Server UUID from console.devshot.com |
 | `DEVSHOT_HMAC_SECRET` | yes | HMAC key from console.devshot.com |
 | `DEVSHOT_TUNNEL_URL` | yes | Control-plane WebSocket URL (prod: `wss://console.devshot.com`) |
-| `POOL_SIZE` | no | Concurrent VMs (default: `2`) |
-| `VM_MEM` | no | Per-VM memory in MB (default: `1024`) |
-| `XEN_MEM` | no | Hypervisor memory in MB (default: `auto — ~80% of host RAM`) |
+| `POOL_SIZE` | no | Concurrent DomUs (default: `2`) |
+| `VM_MEM` | no | Per-DomU memory in MB (default: `1024`) |
+| `XEN_MEM` | no | Hypervisor memory in MB (default: `auto — host RAM minus 1 GB`) |
 | `XEN_CPUS` | no | Hypervisor CPUs (default: `auto — all host cores`) |
-| `DOM0_MEM` | no | Dom0 memory in MB (default: `1536`) |
+| `DOM0_MEM` | no | Dom0 memory in MB (default: `auto — 80% of XEN_MEM, floor 1536`) |
+| `DOM0_DISK` | no | Dom0 root disk size, e.g. `16G` (default: baked-in 4 GB). qemu-img resize + in-VM resize2fs on boot. |
 
 ## Build Info
 
-Auto-deployed by CI from [devshotcom/devshot@756092417bf7ac8b88e628a6d49e3654109c0f20](https://github.com/devshotcom/devshot/commit/756092417bf7ac8b88e628a6d49e3654109c0f20).
+Auto-deployed by CI from [devshotcom/devshot@26240222c8667889ee7266b313ade6e915d68c32](https://github.com/devshotcom/devshot/commit/26240222c8667889ee7266b313ade6e915d68c32).
 
-Last built: 2026-04-11T22:35:57Z
+Last built: 2026-04-11T22:59:05Z

@@ -30,22 +30,16 @@ CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
 [ -z "$CPU_MODEL" ] && CPU_MODEL="unknown"
 
 # ── Auto-size Xen to host ────────────────────────────────────────────────
-# Defaults aim to hand the full machine to Xen while leaving ~1 GB for the
-# container runtime (QEMU process, orchestrator, Go agent). Users can pin
-# explicit values with -e XEN_MEM=... / -e XEN_CPUS=... / -e DOM0_MEM=...
+# Defaults hand the full machine to Xen, then give Dom0 80% of that budget
+# (the heavy workload runs in Dom0 itself; the DomU pool gets the remaining
+# 20%). Users can pin explicit values with
+#   -e XEN_MEM=... / -e XEN_CPUS=... / -e DOM0_MEM=... / -e DOM0_DISK=...
 
-DOM0_MEM="${DOM0_MEM:-1536}"
-
-# Memory: 80% of host RAM, but always leave at least 1 GB for the host.
-SOFT_CAP=$(( TOTAL_RAM_MB * 80 / 100 ))
+# Xen memory: leave at least 1 GB for the container runtime (QEMU heap,
+# orchestrator, Go agent), give everything else to Xen.
 HARD_CAP=$(( TOTAL_RAM_MB - 1024 ))
-if [ "$HARD_CAP" -lt "$SOFT_CAP" ]; then
-  AUTO_XEN_MEM="$HARD_CAP"
-else
-  AUTO_XEN_MEM="$SOFT_CAP"
-fi
-[ "$AUTO_XEN_MEM" -lt 1024 ] && AUTO_XEN_MEM=1024
-XEN_MEM="${XEN_MEM:-$AUTO_XEN_MEM}"
+[ "$HARD_CAP" -lt 1024 ] && HARD_CAP=1024
+XEN_MEM="${XEN_MEM:-$HARD_CAP}"
 if [ "$XEN_MEM" -gt "$HARD_CAP" ] && [ "$HARD_CAP" -gt 0 ]; then
   echo "WARNING: XEN_MEM=${XEN_MEM}MB leaves <1GB for host (${TOTAL_RAM_MB}MB total)."
   echo "  Capping to ${HARD_CAP}MB. Set XEN_MEM explicitly to override."
@@ -60,11 +54,16 @@ if [ "$XEN_CPUS" -gt "$CPU_CORES" ]; then
   XEN_CPUS="$CPU_CORES"
 fi
 
-# Dom0 must not eat the entire Xen budget.
+# Dom0 memory: 80% of Xen budget by default — keeps the bulk of the machine
+# in Dom0 itself, where the user's interactive workload lives. Floor at
+# 1536 MB so tiny hosts still boot. The DomU pool gets the remaining 20%.
+AUTO_DOM0_MEM=$(( XEN_MEM * 80 / 100 ))
+[ "$AUTO_DOM0_MEM" -lt 1536 ] && AUTO_DOM0_MEM=1536
+DOM0_MEM="${DOM0_MEM:-$AUTO_DOM0_MEM}"
 if [ "$DOM0_MEM" -ge "$XEN_MEM" ]; then
   echo "WARNING: DOM0_MEM=${DOM0_MEM}MB >= XEN_MEM=${XEN_MEM}MB; no room for DomUs."
-  DOM0_MEM=$(( XEN_MEM / 2 ))
-  echo "  Halving DOM0_MEM to ${DOM0_MEM}MB."
+  DOM0_MEM=$(( XEN_MEM * 80 / 100 ))
+  echo "  Capping DOM0_MEM to ${DOM0_MEM}MB (80% of Xen budget)."
 fi
 
 echo "════════════════════════════════════════════════════════"
@@ -121,6 +120,21 @@ echo "[2/3] Booting Xen hypervisor via QEMU x86_64 (${ACCEL_LABEL})..."
 
 [ -f /xen/dom0-rootfs-work.qcow2 ] || \
   qemu-img create -f qcow2 -b /xen/dom0-rootfs.qcow2 -F qcow2 /xen/dom0-rootfs-work.qcow2
+
+# DOM0_DISK runtime resize (e.g. -e DOM0_DISK=16G). Grows the qcow2 here;
+# the actual ext4 grow happens inside Dom0 via the dom0-resize-rootfs.service
+# unit (see roles/dom0/files/configure-dom0.sh) which calls resize2fs on
+# /dev/vda once on every boot. resize2fs is idempotent so the no-op case is
+# safe. qemu-img resize itself refuses to shrink without --shrink, so a
+# DOM0_DISK smaller than the current image is silently ignored with a warn.
+if [ -n "${DOM0_DISK:-}" ]; then
+  if qemu-img resize /xen/dom0-rootfs-work.qcow2 "$DOM0_DISK" >/tmp/resize.log 2>&1; then
+    echo "  Dom0 disk resized to ${DOM0_DISK}"
+  else
+    echo "  WARNING: Could not resize Dom0 disk to ${DOM0_DISK}: $(cat /tmp/resize.log)"
+    echo "  (qemu-img resize cannot shrink qcow2 without --shrink; current size kept)"
+  fi
+fi
 
 qemu-system-x86_64 \
   -accel "${QEMU_ACCEL}" \

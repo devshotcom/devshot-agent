@@ -77,6 +77,31 @@ WantedBy=multi-user.target
 UNIT
 chroot "$ROOTFS" bash -c 'systemctl enable xen-nat 2>/dev/null || true'
 
+# Grow the root filesystem to fill the underlying block device.
+# Pairs with `qemu-img resize` performed by the orchestrator entrypoint when
+# the user passes -e DOM0_DISK=16G. Online resize2fs handles a mounted ext4
+# root since e2fsprogs >= 1.42, and is idempotent: a no-op when /dev/vda is
+# already at full size, so safe to run on every boot.
+cat > "$ROOTFS/etc/systemd/system/dom0-resize-rootfs.service" <<UNIT
+[Unit]
+Description=Grow Dom0 root filesystem to underlying block device size
+DefaultDependencies=no
+After=local-fs.target
+Before=basic.target sysinit.target
+ConditionPathExists=/dev/vda
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/resize2fs /dev/vda
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target
+UNIT
+chroot "$ROOTFS" bash -c 'systemctl enable dom0-resize-rootfs 2>/dev/null || true'
+
 # Unprivileged user for command execution (same as DomU)
 chroot "$ROOTFS" bash -c 'useradd -m -s /bin/bash -d /home/devshot devshot 2>/dev/null || true'
 mkdir -p "$ROOTFS/home/devshot/workspace"
