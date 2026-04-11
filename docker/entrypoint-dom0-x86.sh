@@ -145,8 +145,8 @@ qemu-system-x86_64 \
   -display none \
   -daemonize \
   -kernel /xen/xen \
-  -append "dom0_mem=${DOM0_MEM}M,max:${DOM0_MEM}M loglvl=all guest_loglvl=all console=com1" \
-  -device guest-loader,addr=0x00200000,kernel=/xen/vmlinuz,bootargs="console=hvc0 root=/dev/vda rw earlyprintk=xen" \
+  -append "dom0_mem=${DOM0_MEM}M,max:${DOM0_MEM}M loglvl=all guest_loglvl=all console=com1 com1=115200,8n1" \
+  -initrd "/xen/vmlinuz console=hvc0 earlyprintk=xen root=/dev/vda rw" \
   -drive file=/xen/dom0-rootfs-work.qcow2,format=qcow2,if=none,id=hd0 \
   -device virtio-blk-pci,drive=hd0 \
   -netdev user,id=net0 \
