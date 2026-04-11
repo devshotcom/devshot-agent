@@ -155,7 +155,8 @@ qemu-system-x86_64 \
   -device virtio-9p-pci,fsdev=xen_fs,mount_tag=xen_shared \
   -fsdev local,id=orch_fs,path=/opt/devshot,security_model=none \
   -device virtio-9p-pci,fsdev=orch_fs,mount_tag=orchestrator \
-  -serial unix:/tmp/qemu-console.sock,server,nowait \
+  -chardev socket,id=serial0,path=/tmp/qemu-console.sock,server=on,wait=off,logfile=/xen/xen-console.log,logappend=off \
+  -serial chardev:serial0 \
   -monitor unix:/tmp/qemu-monitor.sock,server,nowait \
   -device virtio-serial-pci \
   -chardev socket,id=qga0,path=/tmp/qemu-ga.sock,server=on,wait=off \
