@@ -15,22 +15,70 @@ set -u
 
 QEMU_ACCEL="tcg,thread=multi"
 QEMU_CPU="max"
+ACCEL_LABEL="TCG (software — no KVM)"
 if [ -w /dev/kvm ]; then
   QEMU_ACCEL="kvm"
   QEMU_CPU="host"
+  ACCEL_LABEL="KVM (hardware virtualization)"
 fi
+
+# ── Detect host hardware ─────────────────────────────────────────────────
+# With --network=host/--privileged the container sees real host resources.
+
+TOTAL_RAM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+CPU_CORES=$(nproc)
+CPU_MODEL=$(grep -m1 'model name\|Processor' /proc/cpuinfo | cut -d: -f2 | xargs)
+[ -z "$CPU_MODEL" ] && CPU_MODEL="arm64"
+
+# ── Auto-size Xen to host ────────────────────────────────────────────────
+# Defaults aim to hand the full machine to Xen while leaving ~1 GB for the
+# container runtime (QEMU process, orchestrator, Go agent). Users can pin
+# explicit values with -e XEN_MEM=... / -e XEN_CPUS=... / -e DOM0_MEM=...
 
 DOM0_MEM="${DOM0_MEM:-1536}"
 
+# Memory: 80% of host RAM, but always leave at least 1 GB for the host.
+SOFT_CAP=$(( TOTAL_RAM_MB * 80 / 100 ))
+HARD_CAP=$(( TOTAL_RAM_MB - 1024 ))
+if [ "$HARD_CAP" -lt "$SOFT_CAP" ]; then
+  AUTO_XEN_MEM="$HARD_CAP"
+else
+  AUTO_XEN_MEM="$SOFT_CAP"
+fi
+[ "$AUTO_XEN_MEM" -lt 1024 ] && AUTO_XEN_MEM=1024
+XEN_MEM="${XEN_MEM:-$AUTO_XEN_MEM}"
+if [ "$XEN_MEM" -gt "$HARD_CAP" ] && [ "$HARD_CAP" -gt 0 ]; then
+  echo "WARNING: XEN_MEM=${XEN_MEM}MB leaves <1GB for host (${TOTAL_RAM_MB}MB total)."
+  echo "  Capping to ${HARD_CAP}MB. Set XEN_MEM explicitly to override."
+  XEN_MEM="$HARD_CAP"
+fi
+
+# CPUs: default to every host core. Cap at nproc so we never oversubscribe.
+XEN_CPUS="${XEN_CPUS:-$CPU_CORES}"
+if [ "$XEN_CPUS" -gt "$CPU_CORES" ]; then
+  echo "WARNING: XEN_CPUS=${XEN_CPUS} exceeds host cores (${CPU_CORES})."
+  echo "  Capping to ${CPU_CORES}."
+  XEN_CPUS="$CPU_CORES"
+fi
+
+# Dom0 must not eat the entire Xen budget.
+if [ "$DOM0_MEM" -ge "$XEN_MEM" ]; then
+  echo "WARNING: DOM0_MEM=${DOM0_MEM}MB >= XEN_MEM=${XEN_MEM}MB; no room for DomUs."
+  DOM0_MEM=$(( XEN_MEM / 2 ))
+  echo "  Halving DOM0_MEM to ${DOM0_MEM}MB."
+fi
+
 echo "════════════════════════════════════════════════════════"
-echo "  DevShot Orchestrator starting"
+echo "  DevShot Orchestrator starting (arm64)"
 echo "════════════════════════════════════════════════════════"
+echo "  CPU:        ${CPU_MODEL}"
+echo "  Host RAM:   ${TOTAL_RAM_MB}MB  CPUs: ${CPU_CORES}"
 echo "  Server ID:  ${DEVSHOT_SERVER_ID}"
 echo "  Tunnel URL: ${DEVSHOT_TUNNEL_URL}"
 echo "  Pool size:  ${POOL_SIZE:-2}"
-echo "  Xen memory: ${XEN_MEM:-4096}MB  CPUs: ${XEN_CPUS:-2}"
+echo "  Xen memory: ${XEN_MEM}MB  CPUs: ${XEN_CPUS}"
 echo "  Dom0 mem:   ${DOM0_MEM}MB"
-echo "  Accel:      ${QEMU_ACCEL} (cpu=${QEMU_CPU})"
+echo "  Accel:      ${ACCEL_LABEL}"
 
 if [ "$QEMU_ACCEL" = "tcg,thread=multi" ]; then
   echo ""
@@ -91,8 +139,8 @@ start_qemu() {
     -accel "${QEMU_ACCEL}" \
     -machine virt,gic-version=3,virtualization=true \
     -cpu "${QEMU_CPU}" \
-    -smp "${XEN_CPUS:-2}" \
-    -m "${XEN_MEM:-4096}" \
+    -smp "${XEN_CPUS}" \
+    -m "${XEN_MEM}" \
     -display none \
     -daemonize \
     -kernel /xen/xen \
@@ -143,7 +191,7 @@ echo "  Orchestrator booting. Agent will connect when Dom0 is ready."
 echo "  Server ID:    ${DEVSHOT_SERVER_ID}"
 echo "  Tunnel:       ${DEVSHOT_TUNNEL_URL}"
 echo "  Pool size:    ${POOL_SIZE:-2}"
-echo "  Xen:          ${XEN_MEM:-4096}MB / ${XEN_CPUS:-2} CPUs"
+echo "  Xen:          ${XEN_MEM}MB / ${XEN_CPUS} CPUs"
 echo "  Console:      socat - UNIX-CONNECT:/tmp/qemu-console.sock"
 echo "════════════════════════════════════════════════════════"
 echo ""

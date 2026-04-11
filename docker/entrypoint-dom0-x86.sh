@@ -29,21 +29,42 @@ CPU_CORES=$(nproc)
 CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
 [ -z "$CPU_MODEL" ] && CPU_MODEL="unknown"
 
-# ── Auto-tune resources ──────────────────────────────────────────────────
+# ── Auto-size Xen to host ────────────────────────────────────────────────
+# Defaults aim to hand the full machine to Xen while leaving ~1 GB for the
+# container runtime (QEMU process, orchestrator, Go agent). Users can pin
+# explicit values with -e XEN_MEM=... / -e XEN_CPUS=... / -e DOM0_MEM=...
 
 DOM0_MEM="${DOM0_MEM:-1536}"
 
-MAX_XEN_MEM=$(( TOTAL_RAM_MB * 80 / 100 ))
-XEN_MEM="${XEN_MEM:-4096}"
-if [ "$XEN_MEM" -gt "$MAX_XEN_MEM" ]; then
-  echo "WARNING: XEN_MEM=${XEN_MEM}MB exceeds 80% of ${TOTAL_RAM_MB}MB total RAM."
-  echo "  Capping to ${MAX_XEN_MEM}MB. Set XEN_MEM explicitly to override."
-  XEN_MEM="$MAX_XEN_MEM"
+# Memory: 80% of host RAM, but always leave at least 1 GB for the host.
+SOFT_CAP=$(( TOTAL_RAM_MB * 80 / 100 ))
+HARD_CAP=$(( TOTAL_RAM_MB - 1024 ))
+if [ "$HARD_CAP" -lt "$SOFT_CAP" ]; then
+  AUTO_XEN_MEM="$HARD_CAP"
+else
+  AUTO_XEN_MEM="$SOFT_CAP"
+fi
+[ "$AUTO_XEN_MEM" -lt 1024 ] && AUTO_XEN_MEM=1024
+XEN_MEM="${XEN_MEM:-$AUTO_XEN_MEM}"
+if [ "$XEN_MEM" -gt "$HARD_CAP" ] && [ "$HARD_CAP" -gt 0 ]; then
+  echo "WARNING: XEN_MEM=${XEN_MEM}MB leaves <1GB for host (${TOTAL_RAM_MB}MB total)."
+  echo "  Capping to ${HARD_CAP}MB. Set XEN_MEM explicitly to override."
+  XEN_MEM="$HARD_CAP"
 fi
 
+# CPUs: default to every host core. Cap at nproc so we never oversubscribe.
 XEN_CPUS="${XEN_CPUS:-$CPU_CORES}"
 if [ "$XEN_CPUS" -gt "$CPU_CORES" ]; then
+  echo "WARNING: XEN_CPUS=${XEN_CPUS} exceeds host cores (${CPU_CORES})."
+  echo "  Capping to ${CPU_CORES}."
   XEN_CPUS="$CPU_CORES"
+fi
+
+# Dom0 must not eat the entire Xen budget.
+if [ "$DOM0_MEM" -ge "$XEN_MEM" ]; then
+  echo "WARNING: DOM0_MEM=${DOM0_MEM}MB >= XEN_MEM=${XEN_MEM}MB; no room for DomUs."
+  DOM0_MEM=$(( XEN_MEM / 2 ))
+  echo "  Halving DOM0_MEM to ${DOM0_MEM}MB."
 fi
 
 echo "════════════════════════════════════════════════════════"

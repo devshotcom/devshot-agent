@@ -392,12 +392,12 @@ COPY docker/entrypoint-dom0-arm.sh ./entrypoint.sh
 RUN chmod +x /opt/devshot/entrypoint.sh
 
 # Tunables
+# Hardware-sensitive values (XEN_MEM, XEN_CPUS, VM_MEM, DOM0_MEM) are intentionally
+# NOT set here — the entrypoint auto-detects host resources at runtime and sizes
+# Xen to use the full machine by default. Override per-run with -e XEN_MEM=...
 ENV PORT=7200 \
     BIND_HOST=0.0.0.0 \
     POOL_SIZE=2 \
-    VM_MEM=256 \
-    XEN_MEM=4096 \
-    XEN_CPUS=4 \
     LOG_LEVEL=info
 
 ENTRYPOINT ["tini", "--"]
