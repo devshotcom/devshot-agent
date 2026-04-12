@@ -1,0 +1,99 @@
+# devshot-vmm-qemu.template — per-VM AppArmor profile template.
+# Instantiated at Create time by vmm_sandbox_linux.go with the
+# following substitutions:
+#
+#   @{VM_NAME}    → spec.Name                          (e.g. "pool-abcd1234")
+#   @{VM_ROOT}    → /xen/qemu/<vm-name>               (per-VM runtime dir)
+#   @{VM_DISK}    → /xen/guests/<vm-name>.qcow2       (per-VM overlay)
+#   @{VM_TAP}     → vm-<sha1(name)[:6]>               (tap interface)
+#
+# The loader writes the expanded profile to
+# /etc/apparmor.d/devshot-vmm-qemu-@{VM_NAME} and runs
+# `apparmor_parser -r` before execing the VM.
+#
+# Spec 038 FR-015 — per-VM enforcement, strictest possible scope.
+
+#include <tunables/global>
+
+profile devshot-vmm-qemu-@{VM_NAME} {
+  #include <abstractions/base>
+
+  # Deny default — only explicit permissions work.
+  deny @{HOME}/** rwklmx,
+  deny /root/** rwklmx,
+  deny /etc/devshot/secrets/** rwklmx,
+  deny /proc/*/environ r,
+  deny /proc/*/mem rwklmx,
+  deny /proc/*/root/** rwklmx,
+
+  # QEMU binary + kernel + base image (read-only).
+  /usr/bin/qemu-system-aarch64 rix,
+  /usr/bin/qemu-system-x86_64 rix,
+  /xen/boot/Image-domu r,
+  /xen/devshot-guest-base.qcow2 r,
+
+  # Per-VM runtime dir (full read/write — that's the VM's own scratch).
+  @{VM_ROOT}/** rw,
+  @{VM_ROOT}/console.sock rw,
+  @{VM_ROOT}/monitor.sock rw,
+  @{VM_ROOT}/pid w,
+  @{VM_ROOT}/xenstore/** rw,
+
+  # Per-VM disk overlay (read-write — QEMU opens it directly).
+  @{VM_DISK} rw,
+
+  # Block every other VM's runtime dir explicitly. The chroot layer
+  # also enforces this, but redundant defenses help pass audit.
+  deny /xen/qemu/*/xenstore/local__domain__*__data__magic-key r,
+  deny /xen/qemu/*/pid r,
+  deny /xen/qemu/*/console.sock rw,
+  deny /xen/qemu/*/monitor.sock rw,
+  deny /xen/guests/** rw,
+
+  # Block everything outside the VM's namespace.
+  deny /xen/agent.env r,
+  deny /opt/devshot/agent rix,
+
+  # No capabilities inside the VM.
+  deny capability,
+
+  # No mount/umount.
+  deny mount,
+  deny umount,
+  deny remount,
+  deny pivot_root,
+
+  # KVM device only — no /dev/mem, /dev/kmem, /dev/sda*, /dev/nvme*.
+  /dev/kvm rw,
+  /dev/net/tun rw,
+  /dev/urandom r,
+  /dev/null rw,
+  /dev/zero r,
+  /dev/ptmx rw,
+  deny /dev/mem rwklmx,
+  deny /dev/kmem rwklmx,
+  deny /dev/sd* rwklmx,
+  deny /dev/nvme* rwklmx,
+  deny /dev/xvd* rwklmx,
+
+  # Networking: virtio over the tap only.
+  network unix stream,
+  network inet stream,
+  network inet dgram,
+  network inet6 stream,
+  network inet6 dgram,
+  network netlink raw,
+  deny network bluetooth,
+  deny network packet,
+
+  # Proc filesystem: strictly limited.
+  /proc/cpuinfo r,
+  /proc/meminfo r,
+  /proc/filesystems r,
+  /proc/self/status r,
+  /proc/self/stat r,
+  /proc/self/maps r,
+  deny /proc/*/environ r,
+  deny /proc/sys/kernel/random/boot_id r,
+  deny /proc/kcore rwklmx,
+}

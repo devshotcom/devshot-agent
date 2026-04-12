@@ -1,0 +1,56 @@
+#include <tunables/global>
+
+# devshot-vmm-qemu.parent — parent AppArmor profile loaded at host
+# container startup. Per-VM children inherit from this via `aa-exec -p
+# devshot-vmm-qemu-<vm-name>` where <vm-name> is instantiated at
+# Create time from devshot-vmm-qemu.template.
+#
+# Spec 038 FR-015 — baseline enforcement for the QEMU backend.
+# The per-VM profile narrows the mount points to a single VM's runtime
+# dir; this parent profile provides the shared baseline.
+
+profile devshot-vmm-qemu.parent {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # Deny everything not explicitly permitted.
+  deny @{HOME}/** rwx,
+  deny /root/** rwx,
+  deny /etc/devshot/secrets/** rwx,
+
+  # QEMU binary + kernel image (read-only).
+  /usr/bin/qemu-system-aarch64 rix,
+  /usr/bin/qemu-system-x86_64 rix,
+  /xen/boot/Image-domu r,
+
+  # Shared base guest image (read-only).
+  /xen/devshot-guest-base.qcow2 r,
+
+  # Per-VM runtime dirs are permitted by the child profile, not here.
+  /xen/qemu/ r,
+
+  # Network admin for tap attach (done by parent before unshare).
+  capability net_admin,
+  capability net_raw,
+
+  # Allow unshare to build the namespaces. The child profile drops
+  # these capabilities after the namespaces are created.
+  capability sys_admin,
+
+  # Block everything else by default.
+  deny capability,
+  deny /sys/fs/cgroup/** w,
+  deny /proc/sys/kernel/** w,
+
+  # Netlink for ip-link calls (creating tap devices).
+  network netlink dgram,
+  network netlink raw,
+
+  # Standard abstractions for QEMU itself.
+  /dev/kvm rw,
+  /dev/net/tun rw,
+  /dev/urandom r,
+  /dev/null rw,
+  /dev/zero r,
+  /dev/ptmx rw,
+}

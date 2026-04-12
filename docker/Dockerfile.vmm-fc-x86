@@ -1,0 +1,51 @@
+# DevShot Firecracker backend — x86_64 Docker image
+# Tag: anticipatercom/devshot:amd64-fc
+# See Dockerfile.vmm-fc-arm for detailed comments; this is the x86 variant.
+# Spec 038 FR-004, FR-015, FR-020.
+
+ARG BASE_IMAGE=anticipatercom/devshot:amd64
+FROM ${BASE_IMAGE} AS artifacts
+
+FROM debian:bookworm-slim AS fc-download
+ARG FC_VERSION=1.10.1
+ARG FC_ARCH=x86_64
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+  && curl -fsSL -o /tmp/firecracker.tgz \
+     "https://github.com/firecracker-microvm/firecracker/releases/download/v${FC_VERSION}/firecracker-v${FC_VERSION}-${FC_ARCH}.tgz" \
+  && tar xzf /tmp/firecracker.tgz -C /tmp \
+  && mv /tmp/release-v${FC_VERSION}-${FC_ARCH}/firecracker-v${FC_VERSION}-${FC_ARCH} /usr/bin/firecracker \
+  && mv /tmp/release-v${FC_VERSION}-${FC_ARCH}/jailer-v${FC_VERSION}-${FC_ARCH} /usr/bin/jailer \
+  && chmod +x /usr/bin/firecracker /usr/bin/jailer \
+  && rm -rf /tmp/*
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  qemu-utils \
+  iproute2 \
+  bridge-utils \
+  nftables \
+  iptables \
+  e2fsprogs \
+  util-linux \
+  procps \
+  tini \
+  socat \
+  ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=fc-download /usr/bin/firecracker /usr/bin/firecracker
+COPY --from=fc-download /usr/bin/jailer /usr/bin/jailer
+COPY --from=artifacts /xen/boot/Image-domu /xen/boot/vmlinux-domu-fc
+COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
+
+COPY devshot-agent-linux-amd64 /opt/devshot/agent
+RUN chmod +x /opt/devshot/agent
+
+COPY entrypoint-vmm-fc.sh /opt/devshot/entrypoint.sh
+RUN chmod +x /opt/devshot/entrypoint.sh
+
+RUN mkdir -p /xen/fc /xen/guests /tmp/xenstore-dom0 /var/run/netns
+
+USER root
+ENTRYPOINT ["tini", "--", "/opt/devshot/entrypoint.sh"]

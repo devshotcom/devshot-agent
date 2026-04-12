@@ -1,0 +1,65 @@
+# DevShot Firecracker backend — ARM64 Docker image
+# Tag: anticipatercom/devshot:arm64-fc
+# Spec 038 FR-004, FR-015, FR-020.
+#
+# Smallest image (~150 MB): firecracker + jailer + Go agent + base guest.
+# No Xen, no QEMU.
+
+ARG BASE_IMAGE=anticipatercom/devshot:arm64
+FROM ${BASE_IMAGE} AS artifacts
+
+# Firecracker release download (pinned version + hash).
+FROM debian:bookworm-slim AS fc-download
+ARG FC_VERSION=1.10.1
+ARG FC_ARCH=aarch64
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+  && curl -fsSL -o /tmp/firecracker.tgz \
+     "https://github.com/firecracker-microvm/firecracker/releases/download/v${FC_VERSION}/firecracker-v${FC_VERSION}-${FC_ARCH}.tgz" \
+  && tar xzf /tmp/firecracker.tgz -C /tmp \
+  && mv /tmp/release-v${FC_VERSION}-${FC_ARCH}/firecracker-v${FC_VERSION}-${FC_ARCH} /usr/bin/firecracker \
+  && mv /tmp/release-v${FC_VERSION}-${FC_ARCH}/jailer-v${FC_VERSION}-${FC_ARCH} /usr/bin/jailer \
+  && chmod +x /usr/bin/firecracker /usr/bin/jailer \
+  && rm -rf /tmp/*
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  qemu-utils \
+  iproute2 \
+  bridge-utils \
+  nftables \
+  iptables \
+  e2fsprogs \
+  util-linux \
+  procps \
+  tini \
+  socat \
+  ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# Firecracker + jailer binaries.
+COPY --from=fc-download /usr/bin/firecracker /usr/bin/firecracker
+COPY --from=fc-download /usr/bin/jailer /usr/bin/jailer
+
+# DomU kernel. Firecracker needs uncompressed vmlinux (ELF), not the
+# compressed Image. If the existing Image-domu is a compressed kernel,
+# the CI build step must produce a vmlinux-domu-fc variant via objcopy.
+# For now, copy the existing Image and note the spike requirement.
+COPY --from=artifacts /xen/boot/Image-domu /xen/boot/vmlinux-domu-fc
+
+# Base guest root as raw ext4 (converted from qcow2 in CI or at runtime).
+# If the CI doesn't pre-build a .raw, the agent converts at pool-fill
+# time via `qemu-img convert -O raw`. This COPY is a placeholder; the
+# actual .raw will be built by a CI step.
+COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
+
+COPY devshot-agent-linux-arm64 /opt/devshot/agent
+RUN chmod +x /opt/devshot/agent
+
+COPY entrypoint-vmm-fc.sh /opt/devshot/entrypoint.sh
+RUN chmod +x /opt/devshot/entrypoint.sh
+
+RUN mkdir -p /xen/fc /xen/guests /tmp/xenstore-dom0 /var/run/netns
+
+USER root
+ENTRYPOINT ["tini", "--", "/opt/devshot/entrypoint.sh"]

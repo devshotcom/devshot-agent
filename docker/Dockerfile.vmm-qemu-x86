@@ -1,0 +1,46 @@
+# DevShot QEMU/KVM backend — x86_64 Docker image
+# Tag: anticipatercom/devshot:amd64-kvm
+# See Dockerfile.vmm-qemu-arm for detailed comments; this is the x86 variant.
+# Spec 038 FR-003, FR-020.
+
+ARG BASE_IMAGE=anticipatercom/devshot:amd64
+FROM ${BASE_IMAGE} AS artifacts
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  qemu-system-x86 \
+  qemu-utils \
+  iproute2 \
+  bridge-utils \
+  nftables \
+  iptables \
+  apparmor \
+  apparmor-utils \
+  libseccomp2 \
+  util-linux \
+  procps \
+  tini \
+  socat \
+  ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=artifacts /xen/boot/Image-domu /xen/boot/Image-domu
+COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
+COPY --from=artifacts /xen/boot/initramfs-virt /xen/boot/initramfs-virt
+COPY --from=artifacts /xen/configs/ /xen/configs/
+
+COPY devshot-agent-linux-amd64 /opt/devshot/agent
+RUN chmod +x /opt/devshot/agent
+
+COPY apparmor/devshot-vmm-qemu.parent /etc/apparmor.d/devshot-vmm-qemu.parent
+COPY apparmor/devshot-vmm-qemu.template /etc/devshot/apparmor/devshot-vmm-qemu.template
+COPY seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
+
+COPY entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
+RUN chmod +x /opt/devshot/entrypoint.sh
+
+RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns
+
+USER root
+ENTRYPOINT ["tini", "--", "/opt/devshot/entrypoint.sh"]

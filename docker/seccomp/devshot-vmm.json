@@ -1,0 +1,117 @@
+{
+  "comment": "Seccomp BPF filter for QEMU/KVM and Firecracker backend VMs. Spec 038 FR-015.6. Allowlist approach: only the syscalls QEMU actually needs are permitted; everything else is rejected with EPERM. Derived from upstream QEMU's recommended seccomp config + devshot-specific hardening. This file is loaded by vmm_sandbox_linux.go via setpriv --seccomp or the equivalent pre-exec hook.",
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "defaultErrnoRet": 1,
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_AARCH64",
+      "subArchitectures": []
+    },
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+    }
+  ],
+  "syscalls": [
+    {
+      "comment": "Core process lifecycle",
+      "names": [
+        "exit", "exit_group", "clone", "clone3", "fork", "vfork",
+        "wait4", "waitid", "getpid", "getppid", "gettid",
+        "set_tid_address", "sched_yield", "nanosleep",
+        "clock_nanosleep", "clock_gettime", "clock_getres",
+        "gettimeofday"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "File I/O (QEMU opens qcow2, sockets, pid files)",
+      "names": [
+        "read", "readv", "pread64", "preadv", "preadv2",
+        "write", "writev", "pwrite64", "pwritev", "pwritev2",
+        "open", "openat", "openat2", "close", "fstat", "stat",
+        "newfstatat", "fstatat64", "statx", "lstat",
+        "lseek", "dup", "dup2", "dup3", "pipe", "pipe2",
+        "fcntl", "flock", "fallocate", "ftruncate", "fsync",
+        "fdatasync", "sync_file_range", "copy_file_range",
+        "sendfile", "splice", "tee",
+        "access", "faccessat", "faccessat2",
+        "getcwd", "readlink", "readlinkat",
+        "unlink", "unlinkat", "rename", "renameat", "renameat2",
+        "mkdir", "mkdirat", "rmdir",
+        "getdents", "getdents64"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Memory management (QEMU mmap's guest RAM)",
+      "names": [
+        "mmap", "munmap", "mremap", "mprotect", "madvise",
+        "brk", "sbrk", "mincore", "mlock", "mlock2", "munlock",
+        "mlockall", "munlockall", "msync"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Network (QEMU tap + QMP sockets)",
+      "names": [
+        "socket", "bind", "listen", "accept", "accept4",
+        "connect", "sendto", "recvfrom", "sendmsg", "recvmsg",
+        "sendmmsg", "recvmmsg",
+        "shutdown", "setsockopt", "getsockopt",
+        "getsockname", "getpeername",
+        "select", "pselect6", "poll", "ppoll", "epoll_create",
+        "epoll_create1", "epoll_ctl", "epoll_wait", "epoll_pwait",
+        "eventfd", "eventfd2", "signalfd", "signalfd4",
+        "timerfd_create", "timerfd_settime", "timerfd_gettime"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "KVM ioctls (via generic ioctl syscall)",
+      "names": ["ioctl"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Signals",
+      "names": [
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn",
+        "rt_sigsuspend", "rt_sigtimedwait", "rt_sigqueueinfo",
+        "rt_tgsigqueueinfo", "sigaltstack",
+        "kill", "tgkill", "tkill"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Thread / futex primitives",
+      "names": [
+        "futex", "set_robust_list", "get_robust_list",
+        "sched_getaffinity", "sched_setaffinity",
+        "sched_getscheduler", "sched_setscheduler",
+        "sched_getparam", "sched_setparam",
+        "rseq", "membarrier"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Identity queries",
+      "names": [
+        "getuid", "geteuid", "getgid", "getegid",
+        "getgroups", "setgroups",
+        "prctl", "arch_prctl",
+        "uname", "sysinfo", "getrandom"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Misc safe ops",
+      "names": [
+        "chdir", "fchdir", "umask", "setrlimit", "getrlimit",
+        "prlimit64", "setitimer", "getitimer",
+        "personality", "capget", "capset"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ],
+  "comment_blocked": "The following syscalls are EXPLICITLY BLOCKED (they hit defaultAction=ERRNO): ptrace, mount, umount2, pivot_root, reboot, kexec_load, init_module, finit_module, delete_module, setns, unshare, add_key, request_key, keyctl, create_module, nfsservctl, io_uring_enter, io_uring_setup, io_uring_register, process_vm_readv, process_vm_writev, kcmp, bpf, userfaultfd, perf_event_open, seccomp (we do NOT allow the sandboxed child to load further filters), mknod, mknodat, swapon, swapoff, acct."
+}
