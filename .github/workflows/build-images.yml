@@ -109,6 +109,36 @@ jobs:
             anticipatercom/devshot:arm64-mac
             anticipatercom/devshot:arm64-mac-${{ github.sha }}
 
+  # ── Extract + commit boot artifacts for Homebrew tap ──────────────────
+  # After the arm64 Docker image is built and pushed, extract the kernel
+  # + guest base and commit them to boot/ in this repo. The monorepo's
+  # deploy job reads them from here and syncs to the homebrew-tap.
+  extract-boot-artifacts:
+    needs: build-dom0-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull arm64 image and extract boot files
+        run: |
+          docker pull anticipatercom/devshot:arm64
+          CID=$(docker create anticipatercom/devshot:arm64)
+          mkdir -p boot
+          docker cp "$CID:/xen/boot/Image-domu" boot/Image-domu 2>/dev/null \
+            || docker cp "$CID:/xen/Image" boot/Image-domu
+          docker cp "$CID:/xen/devshot-guest-base.qcow2" boot/devshot-guest-base.qcow2
+          docker rm "$CID"
+          ls -lh boot/
+
+      - name: Commit boot artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add boot/
+          git diff --cached --quiet && echo "Boot artifacts unchanged" && exit 0
+          git commit -m "Update boot artifacts (Image-domu + guest base)"
+          git push
+
   # ── DomU standalone: multi-arch manifest (amd64 + arm64) ──────────────
   build-domu:
     runs-on: ubuntu-latest
