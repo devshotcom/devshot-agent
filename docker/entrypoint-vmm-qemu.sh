@@ -17,6 +17,9 @@ export DEVSHOT_HYPERVISOR=qemu
 export ROLE=dom0
 export XS_REAL=0
 export XS_ROOT=/tmp/xenstore-dom0
+export GUESTS_DIR="${GUESTS_DIR:-/xen/guests}"
+export CONFIGS_DIR="${CONFIGS_DIR:-/xen/configs}"
+export DEVSHOT_DATA_DIR="${DEVSHOT_DATA_DIR:-/var/lib/devshot}"
 
 # ── Detect acceleration ─────────────────────────────────────────────────────
 if [ -w /dev/kvm ]; then
@@ -78,6 +81,9 @@ echo "  Tunnel URL: ${DEVSHOT_TUNNEL_URL}"
 echo "  Pool size:  ${POOL_SIZE:-2}"
 echo "  Bridge:     ${BRIDGE}"
 echo "  Backend:    ${DEVSHOT_HYPERVISOR}"
+echo "  Guests dir: ${GUESTS_DIR}"
+echo "  Config dir: ${CONFIGS_DIR}"
+echo "  Data dir:   ${DEVSHOT_DATA_DIR}"
 echo "════════════════════════════════════════════════════════"
 echo ""
 

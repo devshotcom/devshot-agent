@@ -30,6 +30,9 @@ name: Build & Push Orchestrator Images
 # Required repo secrets (configure in devshot-agent repo Settings → Secrets):
 #   DOCKERHUB_USERNAME — Docker Hub user with push access to anticipatercom
 #   DOCKERHUB_TOKEN    — Docker Hub access token
+#   BOOT_ARTIFACTS_PUSH_TOKEN — GitHub token/PAT with contents:write on
+#                               devshotcom/devshot-agent so the workflow can
+#                               commit updated boot/ artifacts back to main.
 #
 # Required Docker Build Cloud setup (one-time, in the Docker Hub UI):
 #   1. Subscribe to Docker Build Cloud on the anticipatercom org
@@ -183,6 +186,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}
+
+      - name: Verify boot artifact push token
+        run: |
+          if [ -z "${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}" ]; then
+            echo "BOOT_ARTIFACTS_PUSH_TOKEN is required to push boot/ updates back to the repo."
+            exit 1
+          fi
 
       - name: Pull arm64 image and extract boot files
         run: |
@@ -199,6 +211,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}@github.com/${{ github.repository }}.git"
           git add boot/
           git diff --cached --quiet && echo "Boot artifacts unchanged" && exit 0
           git commit -m "Update boot artifacts (Image-domu + guest base)"
