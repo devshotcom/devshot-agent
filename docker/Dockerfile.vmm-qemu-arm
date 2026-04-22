@@ -64,16 +64,16 @@ COPY --from=artifacts /xen/boot/initramfs-virt /xen/boot/initramfs-virt
 COPY --from=artifacts /xen/configs/ /xen/configs/
 
 # Copy the Go agent binary (built by CI in the agent-build job).
-COPY devshot-agent-linux-arm64 /opt/devshot/agent
+COPY bin/devshot-agent-linux-arm64 /opt/devshot/agent
 RUN chmod +x /opt/devshot/agent
 
 # Copy security policies.
-COPY apparmor/devshot-vmm-qemu.parent /etc/apparmor.d/devshot-vmm-qemu.parent
-COPY apparmor/devshot-vmm-qemu.template /etc/devshot/apparmor/devshot-vmm-qemu.template
-COPY seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
+COPY docker/apparmor/devshot-vmm-qemu.parent /etc/apparmor.d/devshot-vmm-qemu.parent
+COPY docker/apparmor/devshot-vmm-qemu.template /etc/devshot/apparmor/devshot-vmm-qemu.template
+COPY docker/seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
 
 # Copy the entrypoint.
-COPY entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
+COPY docker/entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
 RUN chmod +x /opt/devshot/entrypoint.sh
 
 # Create runtime dirs.

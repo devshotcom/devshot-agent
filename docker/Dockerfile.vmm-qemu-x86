@@ -30,14 +30,14 @@ COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow
 COPY --from=artifacts /xen/boot/initramfs-virt /xen/boot/initramfs-virt
 COPY --from=artifacts /xen/configs/ /xen/configs/
 
-COPY devshot-agent-linux-amd64 /opt/devshot/agent
+COPY bin/devshot-agent-linux-amd64 /opt/devshot/agent
 RUN chmod +x /opt/devshot/agent
 
-COPY apparmor/devshot-vmm-qemu.parent /etc/apparmor.d/devshot-vmm-qemu.parent
-COPY apparmor/devshot-vmm-qemu.template /etc/devshot/apparmor/devshot-vmm-qemu.template
-COPY seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
+COPY docker/apparmor/devshot-vmm-qemu.parent /etc/apparmor.d/devshot-vmm-qemu.parent
+COPY docker/apparmor/devshot-vmm-qemu.template /etc/devshot/apparmor/devshot-vmm-qemu.template
+COPY docker/seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
 
-COPY entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
+COPY docker/entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
 RUN chmod +x /opt/devshot/entrypoint.sh
 
 RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns
