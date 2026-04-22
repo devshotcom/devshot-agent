@@ -27,7 +27,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=artifacts /xen/boot/Image-domu /xen/boot/Image-domu
 COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
-COPY --from=artifacts /xen/boot/initramfs-virt /xen/boot/initramfs-virt
 COPY --from=artifacts /xen/configs/ /xen/configs/
 
 COPY bin/devshot-agent-linux-amd64 /opt/devshot/agent
