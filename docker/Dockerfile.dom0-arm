@@ -324,7 +324,7 @@ RUN mkdir -p /etc/runlevels/sysinit /etc/runlevels/boot /etc/runlevels/default &
 # Network + inittab + xennet init + agent init (files Docker doesn't bind-mount)
 RUN mkdir -p /etc/network && \
     printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet manual\n' > /etc/network/interfaces && \
-    printf '::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\ntty0::respawn:/sbin/getty 38400 tty0\nhvc0::respawn:/sbin/getty 38400 hvc0\nttyAMA0::respawn:/sbin/getty 115200 ttyAMA0\nttyS0::respawn:/sbin/getty 115200 ttyS0\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n' > /etc/inittab && \
+    printf '::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\ntty0::respawn:/sbin/getty -L 38400 tty0 vt100\n::once:/bin/sh -c "[ -e /dev/hvc0 ] && exec /sbin/getty -L 38400 hvc0 vt100 || true"\nttyAMA0::respawn:/bin/sh -l\nttyS0::once:/bin/sh -l\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n' > /etc/inittab && \
     echo '/dev/xvda / ext4 rw,relatime 0 1' > /etc/fstab && \
     printf '#!/sbin/openrc-run\n\nname="xennet"\ndescription="Configure eth0 from xenstore-assigned IP"\n\ndepend() {\n    need net\n    before networking sshd domu-agent\n    after devfs mdev\n}\n\nstart() {\n    local ip=""\n    local attempts=0\n    # Try xenstore-read first (Xen DomU), fall back to static config\n    if command -v xenstore-read >/dev/null 2>&1; then\n        while [ -z "$ip" ] && [ $attempts -lt 50 ]; do\n            ip=$(xenstore-read "data/ip" 2>/dev/null) || ip=""\n            if [ -z "$ip" ]; then\n                attempts=$((attempts + 1))\n                usleep 100000 2>/dev/null || sleep 0.1\n            fi\n        done\n    fi\n    # Under QEMU/Firecracker, use DHCP from the user-mode netdev\n    if [ -z "$ip" ]; then\n        ebegin "Configuring eth0 via DHCP (non-Xen backend)"\n        udhcpc -i eth0 -q -n -t 5 2>/dev/null && eend 0 && return 0\n        ewarn "DHCP failed, falling back to 10.10.0.100"\n        ip="10.10.0.100"\n    fi\n    ebegin "Configuring eth0 with ${ip}"\n    ip addr flush dev eth0 2>/dev/null\n    ip addr add ${ip}/16 dev eth0\n    ip link set eth0 up\n    ip route add default via 10.10.0.1 dev eth0 2>/dev/null\n    eend $?\n}\n' > /etc/init.d/xennet && \
     chmod 755 /etc/init.d/xennet && \
@@ -337,7 +337,7 @@ RUN mkdir -p /opt/devshot
 COPY bin/devshot-agent-linux-arm64 /opt/devshot/agent
 RUN chmod 755 /opt/devshot/agent && \
     chmod 700 /opt/devshot && \
-    printf '#!/bin/sh\n# Detect hypervisor and configure xs client accordingly (spec 038).\nif [ -d /sys/hypervisor ] && grep -q xen /sys/hypervisor/type 2>/dev/null; then\n  # Xen DomU: real xenstore\n  export XS_REAL=1\n  SELF_DOMID="$(xenstore-read /local/domain/self/domid 2>/dev/null || true)"\n  [ -n "$SELF_DOMID" ] && export DOMID="$SELF_DOMID"\nelif [ -d /tmp/xenstore ] || mount -t 9p xen_shared /tmp/xenstore 2>/dev/null; then\n  # QEMU direct: 9p mount at /tmp/xenstore\n  export XS_REAL=0\n  export XS_ROOT=/tmp/xenstore\n  export DOMID=1\nelif [ -b /dev/vdb ]; then\n  # Firecracker: config disk at /dev/vdb\n  mkdir -p /mnt/devshot-config\n  mount -o ro /dev/vdb /mnt/devshot-config 2>/dev/null\n  export XS_REAL=0\n  export XS_ROOT=/mnt/devshot-config/xenstore\n  export DOMID=1\nelse\n  # Fallback: file-based xenstore (standalone containers)\n  export XS_REAL=0\n  export XS_ROOT=/tmp/xenstore\n  export DOMID=1\nfi\nexec /opt/devshot/agent\n' > /opt/devshot/start-agent.sh && \
+    printf '#!/bin/sh\n# Detect hypervisor and configure xs client accordingly (spec 038).\n# Priority: /proc/xen/xenbus (Xen) > virtio-9p xen_shared tag (QEMU) >\n# /dev/vdb config disk (Firecracker) > plain file store (fallback).\nif [ -e /proc/xen/xenbus ]; then\n  # Xen DomU: real xenstored talking over xenbus\n  export XS_REAL=1\n  SELF_DOMID="$(xenstore-read /local/domain/self/domid 2>/dev/null || true)"\n  [ -n "$SELF_DOMID" ] && export DOMID="$SELF_DOMID"\nelse\n  # Non-Xen: load 9p modules in case they are modular\n  # QEMU user networking exposes the parent orchestrator as 10.0.2.2.\n  # The orchestrator forwards :3041 to the Mac host, so pool VMs can use\n  # the same ws://host.docker.internal:3041 tunnel URL as dom0.\n  grep -q "^10.0.2.2[[:space:]]\\+host.docker.internal" /etc/hosts 2>/dev/null || echo "10.0.2.2 host.docker.internal" >> /etc/hosts\n  modprobe 9p 2>/dev/null; modprobe 9pnet_virtio 2>/dev/null\n  mkdir -p /tmp/xenstore\n  if mount -t 9p -o trans=virtio,version=9p2000.L xen_shared /tmp/xenstore 2>/dev/null; then\n    # QEMU backend (spec 038): orchestrator populated the 9p share with\n    # the FileXenstore tree before launch.\n    export XS_REAL=0\n    export XS_ROOT=/tmp/xenstore\n    export DOMID=1\n  elif [ -b /dev/vdb ]; then\n    # Firecracker: config disk at /dev/vdb\n    mkdir -p /mnt/devshot-config\n    mount -o ro /dev/vdb /mnt/devshot-config 2>/dev/null\n    export XS_REAL=0\n    export XS_ROOT=/mnt/devshot-config/xenstore\n    export DOMID=1\n  else\n    # Fallback: file-based xenstore (standalone containers / dev mode)\n    export XS_REAL=0\n    export XS_ROOT=/tmp/xenstore\n    export DOMID=1\n  fi\nfi\nexec /opt/devshot/agent\n' > /opt/devshot/start-agent.sh && \
     chmod 755 /opt/devshot/start-agent.sh && \
     printf '#!/sbin/openrc-run\n\nname="devshot-agent"\ndescription="DevShot Agent"\ncommand="/opt/devshot/start-agent.sh"\npidfile="/run/${RC_SVCNAME}.pid"\ncommand_background="yes"\noutput_log="/var/log/devshot-agent.log"\nerror_log="/var/log/devshot-agent.log"\ncommand_user="root"\n\ndepend() {\n    need net\n    after networking\n}\n' > /etc/init.d/devshot-agent && \
     chmod 755 /etc/init.d/devshot-agent && \
@@ -373,6 +373,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     qemu-system-arm qemu-efi-aarch64 qemu-utils \
     socat netcat-openbsd tmux \
     curl ca-certificates bash tini \
+    # Spec 038 FR-015 sandbox toolchain — util-linux gives us `unshare` and
+    # `setpriv`; systemd-container provides `systemd-run --user --scope` for
+    # the cgroup v2 wrapper; apparmor-utils ships `aa-exec` for the optional
+    # per-VM AppArmor profile load. devshot-sandbox-init handles the rest
+    # (pivot_root, bind mounts, seccomp, cap drop) directly via x/sys/unix
+    # — no libseccomp needed because the helper loads precompiled BPF.
+    util-linux systemd-container apparmor-utils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Xen hypervisor + kernel + rootfs (from build stages)
@@ -388,6 +395,14 @@ RUN chmod +x /xen/boot-xen.sh
 # Go agent binary
 WORKDIR /opt/devshot
 COPY bin/devshot-agent-linux-arm64 ./agent
+
+# Spec 038 FR-015 sandbox helper — runs inside the per-VM mount namespace
+# (after unshare) and applies pivot_root + bind mounts + seccomp + cap
+# drop before exec'ing the VM binary. Sandbox.Wrap looks for it at
+# /usr/local/bin/devshot-sandbox-init by default; SANDBOX_INIT_BIN can
+# override for tests.
+COPY bin/devshot-sandbox-init-linux-arm64 /usr/local/bin/devshot-sandbox-init
+RUN chmod 755 /usr/local/bin/devshot-sandbox-init
 
 # Entrypoint
 COPY docker/entrypoint-dom0-arm.sh ./entrypoint.sh
