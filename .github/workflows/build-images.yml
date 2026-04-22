@@ -47,6 +47,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   BUILDX_CLOUD_ENDPOINT: anticipatercom/devshot
 
