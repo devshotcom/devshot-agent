@@ -285,6 +285,78 @@ RUN cd /rootfs && tar czf /build/dom0-rootfs-x86.tar.gz . && \
     qemu-img convert -f raw -O qcow2 -c /tmp/disk.raw /tmp/dom0-rootfs-x86.qcow2 && \
     rm /tmp/disk.raw
 
+# ─── Stage 4: Build DomU guest base image (Alpine rootfs for pool VMs) ────
+FROM --platform=linux/amd64 alpine:3.19 AS domu-rootfs
+
+RUN apk add --no-cache \
+    alpine-base openssh openrc e2fsprogs xe-guest-utilities \
+    qemu-guest-agent \
+    iputils sudo tmux curl bash openssl
+
+RUN mkdir -p /etc/ssh && \
+    printf 'Port 22\nPermitRootLogin yes\nPasswordAuthentication yes\nPubkeyAuthentication yes\nAuthorizedKeysFile .ssh/authorized_keys\nSubsystem sftp /usr/lib/ssh/sftp-server\n' > /etc/ssh/sshd_config && \
+    ssh-keygen -A 2>/dev/null || true
+
+RUN HASH=$(openssl passwd -6 "$(openssl rand -hex 16)") && \
+    sed -i "s|^root:.*|root:${HASH}:18000:0:99999:7:::|" /etc/shadow && \
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
+    touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+
+RUN adduser -D -s /bin/sh -h /home/devshot devshot && \
+    mkdir -p /home/devshot/workspace && \
+    chown -R devshot:devshot /home/devshot && \
+    mkdir -p /etc/sudoers.d && \
+    echo "devshot ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/devshot && \
+    chmod 440 /etc/sudoers.d/devshot && \
+    grep -q "^#includedir /etc/sudoers.d" /etc/sudoers 2>/dev/null || echo "#includedir /etc/sudoers.d" >> /etc/sudoers && \
+    RANDPW=$(head -c 32 /dev/urandom | base64 | tr -d '/+= \n') && \
+    echo "devshot:${RANDPW}" | chpasswd && \
+    unset RANDPW
+
+RUN mkdir -p /etc/runlevels/sysinit /etc/runlevels/boot /etc/runlevels/default && \
+    for svc in devfs dmesg mdev hwdrivers; do ln -sf /etc/init.d/$svc /etc/runlevels/sysinit/$svc 2>/dev/null || true; done && \
+    for svc in hostname networking bootmisc syslog; do ln -sf /etc/init.d/$svc /etc/runlevels/boot/$svc 2>/dev/null || true; done && \
+    ln -sf /etc/init.d/sshd /etc/runlevels/default/sshd && \
+    ln -sf /etc/init.d/qemu-guest-agent /etc/runlevels/default/qemu-guest-agent 2>/dev/null || true
+
+RUN mkdir -p /etc/network && \
+    printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet manual\n' > /etc/network/interfaces && \
+    printf '::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\ntty0::respawn:/sbin/getty -L 38400 tty0 vt100\n::once:/bin/sh -c "[ -e /dev/hvc0 ] && exec /sbin/getty -L 38400 hvc0 vt100 || true"\nttyS0::respawn:/bin/sh -l\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n' > /etc/inittab && \
+    echo '/dev/xvda / ext4 rw,relatime 0 1' > /etc/fstab && \
+    printf '#!/sbin/openrc-run\n\nname="xennet"\ndescription="Configure eth0 from xenstore-assigned IP"\n\ndepend() {\n    need net\n    before networking sshd domu-agent\n    after devfs mdev\n}\n\nstart() {\n    local ip=""\n    local attempts=0\n    if command -v xenstore-read >/dev/null 2>&1; then\n        while [ -z "$ip" ] && [ $attempts -lt 50 ]; do\n            ip=$(xenstore-read "data/ip" 2>/dev/null) || ip=""\n            if [ -z "$ip" ]; then\n                attempts=$((attempts + 1))\n                usleep 100000 2>/dev/null || sleep 0.1\n            fi\n        done\n    fi\n    if [ -z "$ip" ]; then\n        ebegin "Configuring eth0 via DHCP (non-Xen backend)"\n        udhcpc -i eth0 -q -n -t 5 2>/dev/null && eend 0 && return 0\n        ewarn "DHCP failed, falling back to 10.10.0.100"\n        ip="10.10.0.100"\n    fi\n    ebegin "Configuring eth0 with ${ip}"\n    ip addr flush dev eth0 2>/dev/null\n    ip addr add ${ip}/16 dev eth0\n    ip link set eth0 up\n    ip route add default via 10.10.0.1 dev eth0 2>/dev/null\n    eend $?\n}\n' > /etc/init.d/xennet && \
+    chmod 755 /etc/init.d/xennet && \
+    ln -sf /etc/init.d/xennet /etc/runlevels/boot/xennet
+
+RUN mkdir -p /opt/devshot
+COPY bin/devshot-agent-linux-amd64 /opt/devshot/agent
+RUN chmod 755 /opt/devshot/agent && \
+    chmod 700 /opt/devshot && \
+    printf '#!/bin/sh\nif [ -e /proc/xen/xenbus ]; then\n  export XS_REAL=1\n  SELF_DOMID="$(xenstore-read /local/domain/self/domid 2>/dev/null || true)"\n  [ -n "$SELF_DOMID" ] && export DOMID="$SELF_DOMID"\nelse\n  grep -q "^10.0.2.2[[:space:]]\\+host.docker.internal" /etc/hosts 2>/dev/null || echo "10.0.2.2 host.docker.internal" >> /etc/hosts\n  modprobe 9p 2>/dev/null; modprobe 9pnet_virtio 2>/dev/null\n  mkdir -p /tmp/xenstore\n  if mount -t 9p -o trans=virtio,version=9p2000.L xen_shared /tmp/xenstore 2>/dev/null; then\n    export XS_REAL=0\n    export XS_ROOT=/tmp/xenstore\n    export DOMID=1\n  elif [ -b /dev/vdb ]; then\n    mkdir -p /mnt/devshot-config\n    mount -o ro /dev/vdb /mnt/devshot-config 2>/dev/null\n    export XS_REAL=0\n    export XS_ROOT=/mnt/devshot-config/xenstore\n    export DOMID=1\n  else\n    export XS_REAL=0\n    export XS_ROOT=/tmp/xenstore\n    export DOMID=1\n  fi\nfi\nexec /opt/devshot/agent\n' > /opt/devshot/start-agent.sh && \
+    chmod 755 /opt/devshot/start-agent.sh && \
+    printf '#!/sbin/openrc-run\n\nname="devshot-agent"\ndescription="DevShot Agent"\ncommand="/opt/devshot/start-agent.sh"\npidfile="/run/${RC_SVCNAME}.pid"\ncommand_background="yes"\noutput_log="/var/log/devshot-agent.log"\nerror_log="/var/log/devshot-agent.log"\ncommand_user="root"\n\ndepend() {\n    need net\n    after networking\n}\n' > /etc/init.d/devshot-agent && \
+    chmod 755 /etc/init.d/devshot-agent && \
+    ln -sf /etc/init.d/devshot-agent /etc/runlevels/default/devshot-agent
+
+RUN tar czf /tmp/domu-rootfs.tar.gz --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' -C / .
+
+FROM debian:bookworm AS domu-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=domu-rootfs /tmp/domu-rootfs.tar.gz /tmp/domu-rootfs.tar.gz
+
+RUN mkdir -p /domu/rootfs && \
+    tar xzf /tmp/domu-rootfs.tar.gz -C /domu/rootfs && \
+    rm /tmp/domu-rootfs.tar.gz && \
+    echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
+    echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
+    echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
+    mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/domu-disk.raw 2G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/domu-disk.raw /tmp/devshot-guest-base.qcow2 && \
+    rm -rf /tmp/domu-disk.raw /domu/rootfs
+
 # ─── Stage 5: Final image ──────────────────────────────────────────────────
 FROM --platform=linux/amd64 debian:bookworm-slim
 
@@ -299,7 +371,9 @@ RUN mkdir -p /xen/boot /xen/configs /xen/work /xen/guests /etc/xen/guests /var/l
 COPY --from=xen-builder      /tmp/xen-x86                     /xen/xen
 COPY --from=kernel-builder   /tmp/vmlinuz-dom0                 /xen/vmlinuz
 COPY --from=kernel-builder   /tmp/vmlinuz-dom0                 /xen/boot/vmlinuz-domu
+COPY --from=kernel-builder   /tmp/vmlinuz-dom0                 /xen/boot/Image-domu
 COPY --from=rootfs-builder   /tmp/dom0-rootfs-x86.qcow2       /xen/dom0-rootfs.qcow2
+COPY --from=domu-converter   /tmp/devshot-guest-base.qcow2    /xen/devshot-guest-base.qcow2
 # boot-xen.sh — inlined
 RUN printf '#!/bin/bash\nset -e\necho "=== DevShot Xen Boot ==="\nfor f in /xen/xen /xen/vmlinuz /xen/dom0-rootfs.qcow2; do\n    if [ ! -f "$f" ]; then echo "ERROR: $f not found."; exit 1; fi\ndone\nif [ ! -f /xen/dom0-rootfs-work.qcow2 ]; then\n    qemu-img create -f qcow2 -b /xen/dom0-rootfs.qcow2 -F qcow2 /xen/dom0-rootfs-work.qcow2\nfi\necho "QEMU boot delegated to entrypoint"\n' > /xen/boot-xen.sh && \
     chmod +x /xen/boot-xen.sh
