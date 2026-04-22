@@ -137,6 +137,7 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
         --enable CONFIG_XEN_DOM0 \
         --enable CONFIG_XEN_PV \
         --enable CONFIG_XEN_PV_DOM0 \
+        --enable CONFIG_XEN_PVH \
         --enable CONFIG_XEN_PVHVM \
         --enable CONFIG_XEN_BLKDEV_BACKEND \
         --enable CONFIG_XEN_BLKDEV_FRONTEND \
@@ -146,6 +147,7 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
         --enable CONFIG_XEN_BALLOON \
         --enable CONFIG_XEN_GNTDEV \
         --enable CONFIG_XEN_GRANT_DEV_ALLOC \
+        --enable CONFIG_SWIOTLB_XEN \
         --enable CONFIG_PARAVIRT \
         --enable CONFIG_PARAVIRT_SPINLOCKS \
         --enable CONFIG_VIRTIO_BLK \

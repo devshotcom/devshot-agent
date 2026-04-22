@@ -15,11 +15,18 @@ set -u
 QEMU_ACCEL="tcg,thread=multi"
 QEMU_CPU="max"
 ACCEL_LABEL="TCG (software — no KVM)"
+ALLOW_X86_TCG="${DEVSHOT_EXPERIMENTAL_X86_TCG:-0}"
 
 if [ -w /dev/kvm ]; then
   QEMU_ACCEL="kvm"
   QEMU_CPU="host"
   ACCEL_LABEL="KVM (hardware virtualization)"
+elif [ "$ALLOW_X86_TCG" != "1" ]; then
+  echo "ERROR: x86 Xen orchestrator requires /dev/kvm (or nested virtualization)."
+  echo "  The software TCG fallback is disabled by default because nested x86 Xen"
+  echo "  PV Dom0 crashes during early boot on this path."
+  echo "  For one-off debugging only, set DEVSHOT_EXPERIMENTAL_X86_TCG=1."
+  exit 1
 fi
 
 # ── Detect hardware ──────────────────────────────────────────────────────
@@ -80,7 +87,8 @@ echo "  Accel:      ${ACCEL_LABEL}"
 
 if [ "$QEMU_ACCEL" = "tcg,thread=multi" ]; then
   echo ""
-  echo "  TIP: For full hardware power, run with --device /dev/kvm"
+  echo "  WARNING: Experimental x86 Xen-on-TCG path enabled."
+  echo "  TIP: For a supported configuration, run with --device /dev/kvm"
   echo "    docker run --privileged --device /dev/kvm ..."
 fi
 echo ""
