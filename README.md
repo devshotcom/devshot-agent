@@ -33,9 +33,11 @@ on demand. Use this for `server_type: 'multi'` servers.
 
 | Tag | Platform | KVM | Source Dockerfile |
 |---|---|---|---|
-| `anticipatercom/devshot:amd64` | Linux x86_64 (bare-metal, cloud VMs) | required (`--device /dev/kvm`) | `docker/Dockerfile.dom0-x86` |
-| `anticipatercom/devshot:arm64` | Linux ARM64 (Raspberry Pi, Graviton, Ampere) | required (`--device /dev/kvm`) | `docker/Dockerfile.dom0-arm` |
+| `anticipatercom/devshot:amd64` | Linux x86_64 Xen orchestrator (legacy) | required (`--device /dev/kvm`) | `docker/Dockerfile.dom0-x86` |
+| `anticipatercom/devshot:arm64` | Linux ARM64 Xen orchestrator (legacy) | required (`--device /dev/kvm`) | `docker/Dockerfile.dom0-arm` |
 | `anticipatercom/devshot:arm64-mac` | Apple Silicon via Docker Desktop | not used (TCG software emulation) | `docker/Dockerfile.dom0-arm` |
+| `anticipatercom/devshot:amd64-kvm` | Linux x86_64 direct QEMU backend | optional (`/dev/kvm` enables acceleration) | `docker/Dockerfile.vmm-qemu-x86` |
+| `anticipatercom/devshot:arm64-kvm` | Linux ARM64 direct QEMU backend | optional (`/dev/kvm` enables acceleration) | `docker/Dockerfile.vmm-qemu-arm` |
 
 ### DomU standalone (single-VM, no Xen)
 
@@ -57,9 +59,11 @@ so you can pin a specific commit.
 
 ```bash
 # Dom0 orchestrator
-docker pull anticipatercom/devshot:amd64      # Linux x86_64
-docker pull anticipatercom/devshot:arm64      # Linux ARM64 (Pi, Graviton)
+docker pull anticipatercom/devshot:amd64      # Linux x86_64 Xen (legacy)
+docker pull anticipatercom/devshot:arm64      # Linux ARM64 Xen (legacy)
 docker pull anticipatercom/devshot:arm64-mac  # Apple Silicon Docker Desktop
+docker pull anticipatercom/devshot:amd64-kvm  # Linux x86_64 direct QEMU
+docker pull anticipatercom/devshot:arm64-kvm  # Linux ARM64 direct QEMU
 
 # DomU standalone
 docker pull anticipatercom/devshot_domu:latest     # terminal only
@@ -72,6 +76,8 @@ docker pull anticipatercom/devshot_desktop:latest  # + VNC desktop
 # Dom0 orchestrator (one per target arch — cross-compiles Xen + kernel)
 docker build -t anticipatercom/devshot:amd64 -f docker/Dockerfile.dom0-x86 .
 docker build -t anticipatercom/devshot:arm64 -f docker/Dockerfile.dom0-arm .
+docker build -t anticipatercom/devshot:amd64-kvm -f docker/Dockerfile.vmm-qemu-x86 .
+docker build -t anticipatercom/devshot:arm64-kvm -f docker/Dockerfile.vmm-qemu-arm .
 
 # DomU standalone (multi-arch from a single Dockerfile)
 docker buildx build --platform linux/amd64,linux/arm64 \
@@ -98,10 +104,11 @@ docker run -d \
   -e DEVSHOT_SERVER_ID=<your-server-id> \
   -e DEVSHOT_HMAC_SECRET=<your-hmac-secret> \
   -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
-  anticipatercom/devshot:amd64   # or :arm64 on Pi / Graviton
+  anticipatercom/devshot:amd64-kvm   # or :arm64-kvm on Pi / Graviton
 ```
 
-Requires `/dev/kvm` (check with `ls /dev/kvm` and `lsmod | grep kvm`).
+If `/dev/kvm` is present, keep `--device /dev/kvm` for acceleration.
+If it is absent, remove just that flag and the direct QEMU image still boots under TCG.
 
 ### macOS (Apple Silicon) — Docker Desktop, TCG
 
@@ -207,6 +214,6 @@ Stripped (`-ldflags="-s -w"`), statically linked (`CGO_ENABLED=0`).
 
 ## Build Info
 
-Auto-deployed by CI from [devshotcom/devshot@8689809c05825d29ba6d00d17f40f2e91e48c218](https://github.com/devshotcom/devshot/commit/8689809c05825d29ba6d00d17f40f2e91e48c218).
+Auto-deployed by CI from [devshotcom/devshot@38fcb0747350676a32a8a440512c399978a19380](https://github.com/devshotcom/devshot/commit/38fcb0747350676a32a8a440512c399978a19380).
 
-Last built: 2026-04-22T15:04:01Z
+Last built: 2026-04-22T18:15:33Z

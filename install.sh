@@ -46,10 +46,10 @@ detect_platform() {
       fi
       if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
         DOCKER_ARCH="amd64"
-        IMAGE_TAG="amd64"
+        IMAGE_TAG="amd64-kvm"
       elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
         DOCKER_ARCH="arm64"
-        IMAGE_TAG="arm64"
+        IMAGE_TAG="arm64-kvm"
       else
         fatal "Unsupported architecture: $ARCH"
       fi
@@ -57,7 +57,7 @@ detect_platform() {
     MINGW*|MSYS*|CYGWIN*)
       PLATFORM="windows"
       DOCKER_ARCH="amd64"
-      IMAGE_TAG="amd64"
+      IMAGE_TAG="amd64-kvm"
       ;;
     *)
       fatal "Unsupported OS: $OS"
@@ -132,7 +132,7 @@ install_mac() {
     ok "KVM available inside Colima"
     KVM_FLAG="--device /dev/kvm"
   else
-    warn "No KVM inside Colima — will use TCG (slower but functional)"
+    warn "No KVM inside Colima — the Xen image will not boot reliably"
     KVM_FLAG=""
   fi
 }
@@ -171,7 +171,7 @@ install_linux() {
       ok "KVM module loaded"
       KVM_FLAG="--device /dev/kvm"
     else
-      warn "KVM not available — will use TCG (slower)"
+      warn "KVM not available — will use the direct QEMU backend under TCG (slower)"
       warn "For hardware acceleration, ensure your CPU supports VT-x/AMD-V"
       KVM_FLAG=""
     fi
@@ -207,13 +207,13 @@ install_wsl() {
       ok "KVM module loaded"
       KVM_FLAG="--device /dev/kvm"
     else
-      warn "No KVM in WSL2 — will use TCG (slower)"
+      warn "No KVM in WSL2 — will use the direct QEMU backend under TCG (slower)"
       warn "For KVM in WSL2, you need a custom kernel with CONFIG_KVM=y"
       KVM_FLAG=""
     fi
   fi
 
-  IMAGE_TAG="amd64"
+  IMAGE_TAG="amd64-kvm"
 }
 
 # ── Windows (native) ────────────────────────────────────────────────────────
