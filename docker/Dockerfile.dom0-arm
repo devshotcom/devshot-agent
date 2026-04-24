@@ -42,15 +42,10 @@ WORKDIR /build
 
 RUN --mount=type=cache,target=/build/xen,id=xen-src \
     if [ ! -d /build/xen/.git ]; then \
-        git clone --depth 1 \
+        git clone --depth 1 --branch RELEASE-4.17.5 \
             https://xenbits.xen.org/git-http/xen.git /build/xen; \
     fi && \
     cd /build/xen && \
-    xen_branch="$(git ls-remote --symref origin HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')" && \
-    git fetch --depth 1 origin "$xen_branch" && \
-    git checkout -B "$xen_branch" "origin/$xen_branch" && \
-    git reset --hard "origin/$xen_branch" && \
-    git clean -fdx && \
     if [ ! -f xen/.config ]; then make -C xen XEN_TARGET_ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig; fi && \
     make -C xen XEN_TARGET_ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) && \
     cp xen/xen /tmp/xen-arm64 && \
@@ -85,16 +80,10 @@ RUN tar xzf /tmp/xen-dev.tar.gz -C / && ldconfig && rm /tmp/xen-dev.tar.gz
 
 RUN --mount=type=cache,target=/build/qemu-xen,id=qemu-xen-src \
     if [ ! -d /build/qemu-xen/.git ]; then \
-        git clone --depth 1 \
+        git clone --depth 1 --branch stable-4.17 \
             https://xenbits.xen.org/git-http/qemu-xen.git /build/qemu-xen; \
     fi && \
-    cd /build/qemu-xen && \
-    qemu_xen_branch="$(git ls-remote --symref origin HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')" && \
-    git fetch --depth 1 origin "$qemu_xen_branch" && \
-    git checkout -B "$qemu_xen_branch" "origin/$qemu_xen_branch" && \
-    git reset --hard "origin/$qemu_xen_branch" && \
-    git clean -fdx && \
-    rm -rf build && \
+    cd /build/qemu-xen && rm -rf build && \
     ./configure \
         --target-list=aarch64-softmmu \
         --enable-xen \
