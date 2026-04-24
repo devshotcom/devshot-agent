@@ -59,7 +59,7 @@ env:
 jobs:
   # ── Dom0 orchestrator: Linux x86_64 ────────────────────────────────────
   build-dom0-amd64:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
@@ -89,7 +89,7 @@ jobs:
   # ── Direct QEMU backend: Linux x86_64 ──────────────────────────────────
   build-vmm-qemu-amd64:
     needs: build-dom0-amd64
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
@@ -118,7 +118,7 @@ jobs:
 
   # ── Dom0 orchestrator: Linux ARM64 (+ arm64-mac alias) ─────────────────
   build-dom0-arm64:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
@@ -150,7 +150,7 @@ jobs:
   # ── Direct QEMU backend: Linux ARM64 ───────────────────────────────────
   build-vmm-qemu-arm64:
     needs: build-dom0-arm64
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
@@ -183,7 +183,7 @@ jobs:
   # deploy job reads them from here and syncs to the homebrew-tap.
   extract-boot-artifacts:
     needs: build-dom0-arm64
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
         with:
@@ -219,7 +219,7 @@ jobs:
 
   # ── DomU standalone: multi-arch manifest (amd64 + arm64) ──────────────
   build-domu:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
@@ -248,7 +248,7 @@ jobs:
 
   # ── DomU desktop (VNC + noVNC): multi-arch manifest (amd64 + arm64) ───
   build-domu-desktop:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
