@@ -6,44 +6,36 @@ name: Build & Push Orchestrator Images
 # pushes a new deploy artifact — so this workflow actually runs there.
 #
 # Triggered every time CI in the monorepo pushes new binaries + Dockerfiles
-# to the devshot-agent repo. Builds every publishable tag from the
-# Dockerfiles using Docker Build Cloud (native linux/arm64 builder, no
-# qemu-user emulation of the final stage).
+# to the devshot-agent repo.
 #
-# Tags produced:
+# Active groups:
+#   Group 1 (x86)            — dom0-amd64 + vmm-qemu-amd64
+#                              run on the self-hosted X64 runner (Hetzner)
+#
+# Disabled groups (commented out below — uncomment to re-enable):
+#   Group 2 (arm64)          — dom0-arm64 + vmm-qemu-arm64 + extract-boot-artifacts
+#                              built on Docker Build Cloud
+#   Group 3 (multi-arch domu) — domu + domu-desktop
+#                              multi-arch manifests via Docker Build Cloud
+#
+# Tags produced by Group 1 (active):
 #   anticipatercom/devshot:amd64           — Dom0 orchestrator, Linux x86_64 (KVM)
-#   anticipatercom/devshot:arm64           — Dom0 orchestrator, Linux ARM64 (Pi, Graviton)
-#   anticipatercom/devshot:arm64-mac       — Dom0 orchestrator, Apple Silicon Docker Desktop (TCG)
 #   anticipatercom/devshot:amd64-kvm       — Direct QEMU backend, Linux x86_64
-#   anticipatercom/devshot:arm64-kvm       — Direct QEMU backend, Linux ARM64
-#   anticipatercom/devshot_domu:latest     — Standalone DomU (terminal), multi-arch manifest
-#   anticipatercom/devshot_desktop:latest  — Standalone DomU + VNC desktop, multi-arch manifest
-#
-# The :arm64 and :arm64-mac dom0 tags are built from the same Dockerfile
-# (Dockerfile.dom0-arm); they exist as distinct tags so the install script
-# can route Mac users to a build we explicitly validated for Docker Desktop.
-#
-# The domU images ship as single multi-arch manifest lists (amd64 + arm64)
-# because the Dockerfiles are just `alpine + pre-built Go binary` — buildx
-# picks the right binary per platform via ARG TARGETARCH, no separate jobs.
 #
 # Required repo secrets (configure in devshot-agent repo Settings → Secrets):
 #   DOCKERHUB_USERNAME — Docker Hub user with push access to anticipatercom
 #   DOCKERHUB_TOKEN    — Docker Hub access token
-#   BOOT_ARTIFACTS_PUSH_TOKEN — GitHub token/PAT with contents:write on
-#                               devshotcom/devshot-agent so the workflow can
-#                               commit updated boot/ artifacts back to main.
+#   BOOT_ARTIFACTS_PUSH_TOKEN — only needed for Group 2 (arm64); commit boot/
+#                               artifacts back to devshot-agent main.
 #
-# Required Docker Build Cloud setup (one-time, in the Docker Hub UI):
+# Required Docker Build Cloud setup — only used by Groups 2 & 3 when enabled:
 #   1. Subscribe to Docker Build Cloud on the anticipatercom org
 #   2. Create a builder named "devshot": `docker buildx create --driver cloud anticipatercom/devshot`
 #   3. If you rename the builder, update BUILDX_CLOUD_ENDPOINT below.
 #
 # IMPORTANT: Disable Docker Hub Automated Builds on anticipatercom/devshot,
-# anticipatercom/devshot_domu, and anticipatercom/devshot_desktop before
-# merging this. Otherwise Docker Hub will race this workflow every push
-# and clobber the tags with single-platform amd64-manifest builds from
-# its classic amd64-only build agents.
+# anticipatercom/devshot_domu, and anticipatercom/devshot_desktop — otherwise
+# Docker Hub will race this workflow and clobber the manifests.
 
 on:
   push:
@@ -57,6 +49,12 @@ env:
   BUILDX_CLOUD_ENDPOINT: anticipatercom/devshot
 
 jobs:
+  # ═══════════════════════════════════════════════════════════════════════
+  # Group 1 — x86 (active)
+  # Runs on self-hosted Hetzner runner (label: [self-hosted, X64]).
+  # Native amd64, no QEMU, no Build Cloud minutes.
+  # ═══════════════════════════════════════════════════════════════════════
+
   # ── Dom0 orchestrator: Linux x86_64 ────────────────────────────────────
   build-dom0-amd64:
     runs-on: [self-hosted, X64]
@@ -110,169 +108,181 @@ jobs:
             anticipatercom/devshot:amd64-kvm
             anticipatercom/devshot:amd64-kvm-${{ github.sha }}
 
-  # ── Dom0 orchestrator: Linux ARM64 (+ arm64-mac alias) ─────────────────
-  build-dom0-arm64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  # ═══════════════════════════════════════════════════════════════════════
+  # Group 2 — arm64 (disabled)
+  # Re-enable by removing the leading `# ` from each line below.
+  # Builds on Docker Build Cloud (native arm64 builder).
+  # ═══════════════════════════════════════════════════════════════════════
+  #
+  # # ── Dom0 orchestrator: Linux ARM64 (+ arm64-mac alias) ─────────────────
+  # build-dom0-arm64:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - uses: docker/login-action@v3
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
+  #
+  #     - uses: docker/setup-buildx-action@v3
+  #       with:
+  #         version: "lab:latest"
+  #         driver: cloud
+  #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
+  #         install: true
+  #
+  #     - uses: docker/build-push-action@v6
+  #       with:
+  #         context: .
+  #         file: docker/Dockerfile.dom0-arm
+  #         platforms: linux/arm64
+  #         provenance: false
+  #         push: true
+  #         cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
+  #         cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=max
+  #         tags: |
+  #           anticipatercom/devshot:arm64
+  #           anticipatercom/devshot:arm64-${{ github.sha }}
+  #           anticipatercom/devshot:arm64-mac
+  #           anticipatercom/devshot:arm64-mac-${{ github.sha }}
+  #
+  # # ── Direct QEMU backend: Linux ARM64 ───────────────────────────────────
+  # build-vmm-qemu-arm64:
+  #   needs: build-dom0-arm64
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - uses: docker/login-action@v3
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
+  #
+  #     - uses: docker/setup-buildx-action@v3
+  #       with:
+  #         version: "lab:latest"
+  #         driver: cloud
+  #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
+  #         install: true
+  #
+  #     - uses: docker/build-push-action@v6
+  #       with:
+  #         context: .
+  #         file: docker/Dockerfile.vmm-qemu-arm
+  #         platforms: linux/arm64
+  #         provenance: false
+  #         push: true
+  #         cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64
+  #         cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64,mode=max
+  #         tags: |
+  #           anticipatercom/devshot:arm64-kvm
+  #           anticipatercom/devshot:arm64-kvm-${{ github.sha }}
+  #
+  # # ── Extract + commit boot artifacts for Homebrew tap ──────────────────
+  # # After the arm64 image is built, extract the kernel + guest base and
+  # # commit them to boot/ so the monorepo deploy job can sync them to the
+  # # homebrew-tap.
+  # extract-boot-artifacts:
+  #   needs: build-dom0-arm64
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         token: ${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}
+  #
+  #     - name: Verify boot artifact push token
+  #       run: |
+  #         if [ -z "${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}" ]; then
+  #           echo "BOOT_ARTIFACTS_PUSH_TOKEN is required to push boot/ updates back to the repo."
+  #           exit 1
+  #         fi
+  #
+  #     - name: Pull arm64 image and extract boot files
+  #       run: |
+  #         docker pull anticipatercom/devshot:arm64
+  #         CID=$(docker create anticipatercom/devshot:arm64)
+  #         mkdir -p boot
+  #         docker cp "$CID:/xen/boot/Image-domu" boot/Image-domu 2>/dev/null \
+  #           || docker cp "$CID:/xen/Image" boot/Image-domu
+  #         docker cp "$CID:/xen/devshot-guest-base.qcow2" boot/devshot-guest-base.qcow2
+  #         docker rm "$CID"
+  #         ls -lh boot/
+  #
+  #     - name: Commit boot artifacts
+  #       run: |
+  #         git config user.name "github-actions[bot]"
+  #         git config user.email "github-actions[bot]@users.noreply.github.com"
+  #         git remote set-url origin "https://x-access-token:${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}@github.com/${{ github.repository }}.git"
+  #         git add boot/
+  #         git diff --cached --quiet && echo "Boot artifacts unchanged" && exit 0
+  #         git commit -m "Update boot artifacts (Image-domu + guest base)"
+  #         git push
 
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v3
-        with:
-          version: "lab:latest"
-          driver: cloud
-          endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
-          install: true
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.dom0-arm
-          platforms: linux/arm64
-          provenance: false
-          push: true
-          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=max
-          tags: |
-            anticipatercom/devshot:arm64
-            anticipatercom/devshot:arm64-${{ github.sha }}
-            anticipatercom/devshot:arm64-mac
-            anticipatercom/devshot:arm64-mac-${{ github.sha }}
-
-  # ── Direct QEMU backend: Linux ARM64 ───────────────────────────────────
-  build-vmm-qemu-arm64:
-    needs: build-dom0-arm64
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v3
-        with:
-          version: "lab:latest"
-          driver: cloud
-          endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
-          install: true
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.vmm-qemu-arm
-          platforms: linux/arm64
-          provenance: false
-          push: true
-          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64,mode=max
-          tags: |
-            anticipatercom/devshot:arm64-kvm
-            anticipatercom/devshot:arm64-kvm-${{ github.sha }}
-
-  # ── Extract + commit boot artifacts for Homebrew tap ──────────────────
-  # After the arm64 Docker image is built and pushed, extract the kernel
-  # + guest base and commit them to boot/ in this repo. The monorepo's
-  # deploy job reads them from here and syncs to the homebrew-tap.
-  extract-boot-artifacts:
-    needs: build-dom0-arm64
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}
-
-      - name: Verify boot artifact push token
-        run: |
-          if [ -z "${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}" ]; then
-            echo "BOOT_ARTIFACTS_PUSH_TOKEN is required to push boot/ updates back to the repo."
-            exit 1
-          fi
-
-      - name: Pull arm64 image and extract boot files
-        run: |
-          docker pull anticipatercom/devshot:arm64
-          CID=$(docker create anticipatercom/devshot:arm64)
-          mkdir -p boot
-          docker cp "$CID:/xen/boot/Image-domu" boot/Image-domu 2>/dev/null \
-            || docker cp "$CID:/xen/Image" boot/Image-domu
-          docker cp "$CID:/xen/devshot-guest-base.qcow2" boot/devshot-guest-base.qcow2
-          docker rm "$CID"
-          ls -lh boot/
-
-      - name: Commit boot artifacts
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}@github.com/${{ github.repository }}.git"
-          git add boot/
-          git diff --cached --quiet && echo "Boot artifacts unchanged" && exit 0
-          git commit -m "Update boot artifacts (Image-domu + guest base)"
-          git push
-
-  # ── DomU standalone: multi-arch manifest (amd64 + arm64) ──────────────
-  build-domu:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v3
-        with:
-          version: "lab:latest"
-          driver: cloud
-          endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
-          install: true
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.domU
-          platforms: linux/amd64,linux/arm64
-          provenance: false
-          push: true
-          cache-from: type=registry,ref=anticipatercom/devshot_domu:buildcache
-          cache-to: type=registry,ref=anticipatercom/devshot_domu:buildcache,mode=max
-          tags: |
-            anticipatercom/devshot_domu:latest
-            anticipatercom/devshot_domu:${{ github.sha }}
-
-  # ── DomU desktop (VNC + noVNC): multi-arch manifest (amd64 + arm64) ───
-  build-domu-desktop:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v3
-        with:
-          version: "lab:latest"
-          driver: cloud
-          endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
-          install: true
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.domU-desktop
-          platforms: linux/amd64,linux/arm64
-          provenance: false
-          push: true
-          cache-from: type=registry,ref=anticipatercom/devshot_desktop:buildcache
-          cache-to: type=registry,ref=anticipatercom/devshot_desktop:buildcache,mode=max
-          tags: |
-            anticipatercom/devshot_desktop:latest
-            anticipatercom/devshot_desktop:${{ github.sha }}
+  # ═══════════════════════════════════════════════════════════════════════
+  # Group 3 — multi-arch domu (disabled)
+  # Re-enable by removing the leading `# ` from each line below.
+  # Single multi-arch manifest (linux/amd64 + linux/arm64) per image.
+  # ═══════════════════════════════════════════════════════════════════════
+  #
+  # # ── DomU standalone: multi-arch manifest (amd64 + arm64) ──────────────
+  # build-domu:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - uses: docker/login-action@v3
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
+  #
+  #     - uses: docker/setup-buildx-action@v3
+  #       with:
+  #         version: "lab:latest"
+  #         driver: cloud
+  #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
+  #         install: true
+  #
+  #     - uses: docker/build-push-action@v6
+  #       with:
+  #         context: .
+  #         file: docker/Dockerfile.domU
+  #         platforms: linux/amd64,linux/arm64
+  #         provenance: false
+  #         push: true
+  #         cache-from: type=registry,ref=anticipatercom/devshot_domu:buildcache
+  #         cache-to: type=registry,ref=anticipatercom/devshot_domu:buildcache,mode=max
+  #         tags: |
+  #           anticipatercom/devshot_domu:latest
+  #           anticipatercom/devshot_domu:${{ github.sha }}
+  #
+  # # ── DomU desktop (VNC + noVNC): multi-arch manifest (amd64 + arm64) ───
+  # build-domu-desktop:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - uses: docker/login-action@v3
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
+  #
+  #     - uses: docker/setup-buildx-action@v3
+  #       with:
+  #         version: "lab:latest"
+  #         driver: cloud
+  #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
+  #         install: true
+  #
+  #     - uses: docker/build-push-action@v6
+  #       with:
+  #         context: .
+  #         file: docker/Dockerfile.domU-desktop
+  #         platforms: linux/amd64,linux/arm64
+  #         provenance: false
+  #         push: true
+  #         cache-from: type=registry,ref=anticipatercom/devshot_desktop:buildcache
+  #         cache-to: type=registry,ref=anticipatercom/devshot_desktop:buildcache,mode=max
+  #         tags: |
+  #           anticipatercom/devshot_desktop:latest
+  #           anticipatercom/devshot_desktop:${{ github.sha }}
