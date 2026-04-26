@@ -58,6 +58,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   dnsmasq \
   kmod \
   conntrack \
+  clamav \
+  clamav-freshclam \
+  yara \
   && rm -rf /var/lib/apt/lists/*
 
 # Copy pre-built artifacts from the Xen image.
@@ -69,6 +72,8 @@ COPY --from=artifacts /xen/configs/ /xen/configs/
 COPY bin/devshot-agent-linux-arm64 /opt/devshot/agent
 RUN chmod +x /opt/devshot/agent
 
+COPY yara_rules /opt/devshot/yara_rules
+
 # Copy security policies.
 COPY docker/apparmor/devshot-vmm-qemu.parent /etc/apparmor.d/devshot-vmm-qemu.parent
 COPY docker/apparmor/devshot-vmm-qemu.template /etc/devshot/apparmor/devshot-vmm-qemu.template
@@ -78,8 +83,9 @@ COPY docker/seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
 COPY docker/entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
 RUN chmod +x /opt/devshot/entrypoint.sh
 
-# Create runtime dirs.
-RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns
+# Create runtime dirs and prefetch signatures when possible.
+RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \
+  freshclam --stdout || echo "freshclam failed during image build (non-fatal)"
 
 # Run as unprivileged UID by default (spec 038 FR-020).
 # The entrypoint needs root for bridge + iptables; dropping after

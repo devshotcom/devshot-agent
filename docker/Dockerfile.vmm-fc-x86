@@ -32,6 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   tini \
   socat \
   ca-certificates \
+  clamav \
+  clamav-freshclam \
+  yara \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fc-download /usr/bin/firecracker /usr/bin/firecracker
@@ -42,10 +45,13 @@ COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow
 COPY bin/devshot-agent-linux-amd64 /opt/devshot/agent
 RUN chmod +x /opt/devshot/agent
 
+COPY yara_rules /opt/devshot/yara_rules
+
 COPY docker/entrypoint-vmm-fc.sh /opt/devshot/entrypoint.sh
 RUN chmod +x /opt/devshot/entrypoint.sh
 
-RUN mkdir -p /xen/fc /xen/guests /tmp/xenstore-dom0 /var/run/netns
+RUN mkdir -p /xen/fc /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \
+  freshclam --stdout || echo "freshclam failed during image build (non-fatal)"
 
 USER root
 ENTRYPOINT ["tini", "--", "/opt/devshot/entrypoint.sh"]
