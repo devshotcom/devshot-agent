@@ -30,9 +30,56 @@ else
 fi
 
 # ── Load required kernel modules ────────────────────────────────────────────
-modprobe nbd max_part=8 nbds_max=1024 2>/dev/null || true
+# Requires `kmod` package (provides modprobe) and `/lib/modules` from the
+# host bind-mounted (set by the install command's
+# `-v /lib/modules:/lib/modules:ro`). Without those, modprobe fails silently
+# and the operator must load the modules on the host before starting this
+# container.
+NBD_COUNT="${DEVSHOT_NBD_COUNT:-16}"
+modprobe nbd "max_part=8" "nbds_max=${NBD_COUNT}" 2>/dev/null || true
 modprobe tun 2>/dev/null || true
 modprobe bridge 2>/dev/null || true
+
+# ── Materialise /dev/nbdN nodes inside the container ───────────────────────
+# Docker's --privileged mode does NOT auto-populate /dev/nbd* even after
+# the host loads the nbd module — the container's /dev is a tmpfs. We
+# mknod the devices ourselves (major 43 = NBD).
+#
+# Minor numbering: NBD reserves a stride of 16 minors per device (driven by
+# max_part=8 → max_part_shift=4 → 1<<4 = 16 partition slots). So:
+#   nbd0 → minor  0
+#   nbd1 → minor 16
+#   nbdN → minor N*16
+# Using a flat minor=N would create files that look right but qemu-nbd
+# would fail to open them with ENXIO ("No such device or address").
+NBD_MADE=0
+for i in $(seq 0 $((NBD_COUNT - 1))); do
+  if [ ! -e "/dev/nbd${i}" ]; then
+    if mknod -m 660 "/dev/nbd${i}" b 43 $((i * 16)) 2>/dev/null; then
+      NBD_MADE=$((NBD_MADE + 1))
+    fi
+  fi
+done
+NBD_VISIBLE=$(ls /dev/nbd* 2>/dev/null | wc -l)
+echo "  NBD:        ${NBD_VISIBLE} block devices ready (mknod'd ${NBD_MADE} new)"
+
+# ── Writable /run/lock and /var/tmp inside read-only container ──────────────
+# qemu-nbd uses /var/lock/qemu-nbd-nbd<N> as its bind-socket lock and
+# creates temp files in /var/tmp during overlay open. Both paths are
+# unwritable in our --read-only image:
+#   • /var/lock is a symlink to /run/lock; /run is tmpfs but /run/lock
+#     is not auto-created by Debian's slim image, so qemu-nbd hits
+#     "No such file or directory".
+#   • /var/tmp is a regular dir on the read-only rootfs.
+# Bind-mounting /tmp onto /var/tmp (both writable, both purged on
+# container restart) gives qemu-nbd a writable scratch path without
+# adding another --tmpfs flag to every install command.
+mkdir -p /run/lock
+chmod 1777 /run/lock
+if ! mountpoint -q /var/tmp 2>/dev/null; then
+  mkdir -p /var/tmp
+  mount --bind /tmp /var/tmp 2>/dev/null || true
+fi
 
 # ── Create the VM bridge ────────────────────────────────────────────────────
 BRIDGE="${BRIDGE:-xenbr0}"
