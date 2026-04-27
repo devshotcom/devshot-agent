@@ -279,18 +279,35 @@ configure_orchestrator() {
 start_orchestrator() {
   local image="anticipatercom/devshot:${IMAGE_TAG}"
   local container_name="devshot-orchestrator"
+  local data_root="${DEVSHOT_DATA_ROOT:-/var/lib/devshot/${container_name}}"
 
   # Stop existing container
   docker rm -f "$container_name" 2>/dev/null || true
+
+  info "Preparing persistent data directory: $data_root"
+  sudo mkdir -p \
+    "$data_root/guests" \
+    "$data_root/configs" \
+    "$data_root/qemu" \
+    "$data_root/data"
+  sudo chown -R "$(id -u):$(id -g)" "$data_root"
 
   info "Starting DevShot Orchestrator..."
   docker run -d \
     --name "$container_name" \
     --privileged $KVM_FLAG \
     --restart=unless-stopped \
+    --tmpfs /mnt/devshot-scan:exec,mode=755 \
+    -v "$data_root/guests:/xen/guests" \
+    -v "$data_root/configs:/xen/configs" \
+    -v "$data_root/qemu:/xen/qemu" \
+    -v "$data_root/data:/var/lib/devshot" \
     -e DEVSHOT_SERVER_ID="$DEVSHOT_SERVER_ID" \
     -e DEVSHOT_HMAC_SECRET="$DEVSHOT_HMAC_SECRET" \
     -e DEVSHOT_TUNNEL_URL="$DEVSHOT_TUNNEL_URL" \
+    -e GUESTS_DIR="/xen/guests" \
+    -e CONFIGS_DIR="/xen/configs" \
+    -e DEVSHOT_DATA_DIR="/var/lib/devshot" \
     "$image"
 
   echo ""
@@ -299,6 +316,7 @@ start_orchestrator() {
   echo ""
   echo "  Container:  $container_name"
   echo "  Image:      $image"
+  echo "  Data root:  $data_root"
   echo "  Server ID:  $DEVSHOT_SERVER_ID"
   echo "  KVM:        $([ -n '$KVM_FLAG' ] && echo 'enabled' || echo 'disabled (TCG)')"
   echo ""
