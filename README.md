@@ -214,6 +214,6 @@ Stripped (`-ldflags="-s -w"`), statically linked (`CGO_ENABLED=0`).
 
 ## Build Info
 
-Auto-deployed by CI from [devshotcom/devshot@3ac0a340ea79b2bfd407f415f8bb7c75502914b5](https://github.com/devshotcom/devshot/commit/3ac0a340ea79b2bfd407f415f8bb7c75502914b5).
+Auto-deployed by CI from [devshotcom/devshot@4e83623cb9f7c010ab95ccc1bc813617338b2bec](https://github.com/devshotcom/devshot/commit/4e83623cb9f7c010ab95ccc1bc813617338b2bec).
 
-Last built: 2026-04-27T20:18:04Z
+Last built: 2026-04-27T20:22:06Z
