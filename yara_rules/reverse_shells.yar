@@ -9,7 +9,7 @@ rule Reverse_Shell_Bash {
         $s3 = "bash -i >& /dev/"
         $s4 = "bash -c 'bash -i >& /dev/"
     condition:
-        any of them
+        any of them and filesize < 64KB
 }
 
 rule Reverse_Shell_Netcat {
@@ -23,7 +23,7 @@ rule Reverse_Shell_Netcat {
         $s3 = "nc.traditional -e"
         $s4 = "nc -c /bin/"
     condition:
-        any of them
+        any of them and filesize < 64KB
 }
 
 rule Reverse_Shell_Pipe {
@@ -47,7 +47,7 @@ rule Reverse_Shell_Socat {
         $s1 = "socat exec:"
         $s2 = "socat TCP:"
     condition:
-        all of them
+        all of them and filesize < 64KB
 }
 
 rule Reverse_Shell_Python {
