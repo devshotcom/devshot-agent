@@ -1,350 +1,191 @@
-#!/bin/bash
-# DevShot Orchestrator Installer — Mac (Colima), Linux (Docker + KVM), Windows (WSL2)
-# Detects platform, installs dependencies, pulls/builds the right Docker image, and starts the orchestrator.
+#!/bin/sh
+# DevShot Orchestrator Installer.
 #
-# Usage:
-#   curl -fsSL https://devshot.com/install.sh | bash
-#   # or
-#   make install
-set -euo pipefail
+#   curl -fsSL https://devshot.com/install.sh | sh
+#
+# This is the Tailscale-style entry point: it makes Docker available,
+# drops a `devshot` CLI into /usr/local/bin, and exits. It does NOT
+# register the host with the control plane — that's a separate step:
+#
+#   sudo devshot up --auth-key=ds_<your-orchestrator-key>
+#
+# The auth key is an orchestrator-mode API key (Settings → API Keys
+# in console.devshot.com). `devshot up` POSTs it to /api/install/bootstrap,
+# receives a fresh per-server HMAC secret, and starts the container.
+#
+# Re-running this script is idempotent: it only installs what's missing.
+# Re-running `devshot up` registers a brand-new server (so don't do that
+# unless you mean it). Use `devshot down` / `devshot logs` for routine
+# operations.
+#
+# Env overrides (all optional):
+#   DEVSHOT_BIN_DIR       Where to install the CLI (default: /usr/local/bin)
+#   DEVSHOT_API_BASE      Override the console URL the CLI bootstraps
+#                         against (default: https://console.devshot.com)
 
-# ── Colors ──────────────────────────────────────────────────────────────────
+set -eu
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+DEVSHOT_BIN_DIR="${DEVSHOT_BIN_DIR:-/usr/local/bin}"
+DEVSHOT_API_BASE="${DEVSHOT_API_BASE:-https://console.devshot.com}"
+DEVSHOT_VERSION="${DEVSHOT_VERSION:-latest}"
 
-info()  { echo -e "${CYAN}[info]${NC}  $*"; }
-ok()    { echo -e "${GREEN}[ok]${NC}    $*"; }
-warn()  { echo -e "${YELLOW}[warn]${NC}  $*"; }
-err()   { echo -e "${RED}[error]${NC} $*" >&2; }
-fatal() { err "$*"; exit 1; }
+# ── Output helpers (no colors when stdout isn't a TTY) ──────────────────
+if [ -t 1 ]; then
+  C_RED='\033[0;31m'; C_GREEN='\033[0;32m'; C_YELLOW='\033[1;33m'
+  C_CYAN='\033[0;36m'; C_BOLD='\033[1m'; C_NC='\033[0m'
+else
+  C_RED=''; C_GREEN=''; C_YELLOW=''; C_CYAN=''; C_BOLD=''; C_NC=''
+fi
+info()  { printf "${C_CYAN}info${C_NC}  %s\n" "$*"; }
+ok()    { printf "${C_GREEN}ok${C_NC}    %s\n" "$*"; }
+warn()  { printf "${C_YELLOW}warn${C_NC}  %s\n" "$*"; }
+fatal() { printf "${C_RED}error${C_NC} %s\n" "$*" >&2; exit 1; }
 
-# ── Detect platform ─────────────────────────────────────────────────────────
+# ── Need-root: every step the installer takes (apt-get / chown of
+#    /usr/local/bin / docker daemon install) needs root. We ask once
+#    upfront and re-use cached sudo for the rest of the run.
+need_root() {
+  if [ "$(id -u)" -eq 0 ]; then SUDO=""; return; fi
+  if command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+    sudo -v || fatal "sudo is required to install Docker and the devshot CLI"
+    return
+  fi
+  fatal "must run as root or with sudo available"
+}
 
+# ── Detect platform ─────────────────────────────────────────────────────
 detect_platform() {
   OS="$(uname -s)"
   ARCH="$(uname -m)"
-
   case "$OS" in
-    Darwin)
-      PLATFORM="mac"
-      if [ "$ARCH" = "arm64" ]; then
-        DOCKER_ARCH="arm64"
-        IMAGE_TAG="arm64-mac"
-      else
-        DOCKER_ARCH="amd64"
-        IMAGE_TAG="amd64"
-      fi
-      ;;
     Linux)
       PLATFORM="linux"
-      if grep -qi microsoft /proc/version 2>/dev/null; then
-        PLATFORM="wsl"
-      fi
-      if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
-        DOCKER_ARCH="amd64"
-        IMAGE_TAG="amd64-kvm"
-      elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-        DOCKER_ARCH="arm64"
-        IMAGE_TAG="arm64-kvm"
-      else
-        fatal "Unsupported architecture: $ARCH"
+      if grep -qi microsoft /proc/version 2>/dev/null; then PLATFORM="wsl"; fi
+      ;;
+    Darwin)   PLATFORM="mac" ;;
+    MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
+    *) fatal "unsupported OS: $OS" ;;
+  esac
+  case "$ARCH" in
+    x86_64|amd64) ARCH_NORM="amd64" ;;
+    aarch64|arm64) ARCH_NORM="arm64" ;;
+    *) fatal "unsupported architecture: $ARCH" ;;
+  esac
+}
+
+# ── Install Docker (Linux + WSL only — Mac users handle Docker
+#    themselves via Docker Desktop or Colima; we just verify presence).
+ensure_docker() {
+  if command -v docker >/dev/null 2>&1; then
+    ok "Docker present ($(docker --version 2>/dev/null | head -1))"
+    return
+  fi
+  case "$PLATFORM" in
+    linux|wsl)
+      info "Installing Docker via the official get.docker.com script…"
+      curl -fsSL https://get.docker.com | $SUDO sh
+      if ! id -nG "$(id -un)" 2>/dev/null | grep -qw docker; then
+        $SUDO usermod -aG docker "$(id -un)" || true
+        warn "Added $(id -un) to docker group — log out and back in, or run 'newgrp docker'"
       fi
       ;;
-    MINGW*|MSYS*|CYGWIN*)
-      PLATFORM="windows"
-      DOCKER_ARCH="amd64"
-      IMAGE_TAG="amd64-kvm"
+    mac)
+      fatal "Docker not found. Install Docker Desktop or Colima first: https://www.docker.com/products/docker-desktop"
       ;;
-    *)
-      fatal "Unsupported OS: $OS"
+    windows)
+      cat >&2 <<EOF
+DevShot on Windows requires WSL2:
+  1. Open PowerShell as Administrator
+  2. wsl --install -d Ubuntu
+  3. Reboot, then re-run this script inside WSL2
+EOF
+      exit 1
       ;;
   esac
-
-  echo ""
-  echo "════════════════════════════════════════════════════════"
-  echo "  DevShot Orchestrator Installer"
-  echo "════════════════════════════════════════════════════════"
-  echo "  Platform:     $PLATFORM ($ARCH)"
-  echo "  Docker arch:  $DOCKER_ARCH"
-  echo "  Image:        anticipatercom/devshot:$IMAGE_TAG"
-  echo "════════════════════════════════════════════════════════"
-  echo ""
 }
 
-# ── Mac: install via Colima ──────────────────────────────────────────────────
-
-install_mac() {
-  info "Mac detected — using Colima for Docker runtime"
-
-  # Check Homebrew
-  if ! command -v brew &>/dev/null; then
-    info "Installing Homebrew..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  fi
-  ok "Homebrew installed"
-
-  # Install Docker CLI + Colima
-  if ! command -v docker &>/dev/null; then
-    info "Installing Docker CLI..."
-    brew install docker
-  fi
-  ok "Docker CLI installed"
-
-  if ! command -v colima &>/dev/null; then
-    info "Installing Colima..."
-    brew install colima
-  fi
-  ok "Colima installed"
-
-  # Start Colima with x86_64 (Rosetta) for KVM-ready x86 Xen.
-  # Note: Colima runs an x86_64 Linux VM — even on Apple Silicon — so we
-  # always pull the :amd64 tag here. (The console paste path uses Docker
-  # Desktop on Apple Silicon instead, which pulls :arm64-mac.)
-  if ! colima status &>/dev/null; then
-    info "Starting Colima (x86_64 via Rosetta)..."
-    if [ "$ARCH" = "arm64" ]; then
-      # Apple Silicon: use x86_64 with Rosetta for x86 Xen image
-      colima start \
-        --arch x86_64 \
-        --vm-type vz \
-        --vz-rosetta \
-        --mount-type virtiofs \
-        --cpu 4 \
-        --memory 8 \
-        --disk 60
-    else
-      # Intel Mac
-      colima start \
-        --cpu 4 \
-        --memory 8 \
-        --disk 60
-    fi
-  fi
-  IMAGE_TAG="amd64"
-  ok "Colima running"
-
-  # Check KVM inside Colima
-  if docker run --rm --privileged alpine sh -c '[ -w /dev/kvm ]' 2>/dev/null; then
-    ok "KVM available inside Colima"
-    KVM_FLAG="--device /dev/kvm"
-  else
-    warn "No KVM inside Colima — the Xen image will not boot reliably"
-    KVM_FLAG=""
-  fi
-}
-
-# ── Linux: native Docker + KVM ──────────────────────────────────────────────
-
-install_linux() {
-  info "Linux detected — using native Docker + KVM"
-
-  # Install Docker if missing
-  if ! command -v docker &>/dev/null; then
-    info "Installing Docker..."
-    curl -fsSL https://get.docker.com | sh
-    sudo usermod -aG docker "$USER"
-    warn "Added $USER to docker group — you may need to log out and back in"
-  fi
-  ok "Docker installed"
-
-  # Check KVM
-  if [ -w /dev/kvm ] || sudo test -w /dev/kvm 2>/dev/null; then
-    ok "KVM available — hardware acceleration enabled"
-    KVM_FLAG="--device /dev/kvm"
-
-    # Ensure current user can access /dev/kvm
-    if [ ! -w /dev/kvm ]; then
-      info "Adding $USER to kvm group..."
-      sudo usermod -aG kvm "$USER"
-      warn "You may need to log out and back in for kvm group access"
-    fi
-  else
-    warn "No KVM — loading kvm module..."
-    sudo modprobe kvm 2>/dev/null || true
-    sudo modprobe kvm_intel 2>/dev/null || sudo modprobe kvm_amd 2>/dev/null || true
-
+# ── Check /dev/kvm so we can warn early if the host can't run KVM
+#    images. We still install the CLI either way — a TCG-only host can
+#    still run, just slower.
+check_kvm() {
+  if [ "$PLATFORM" = "linux" ] || [ "$PLATFORM" = "wsl" ]; then
     if [ -e /dev/kvm ]; then
-      ok "KVM module loaded"
-      KVM_FLAG="--device /dev/kvm"
+      ok "/dev/kvm available — hardware acceleration enabled"
     else
-      warn "KVM not available — will use the direct QEMU backend under TCG (slower)"
-      warn "For hardware acceleration, ensure your CPU supports VT-x/AMD-V"
-      KVM_FLAG=""
+      warn "/dev/kvm not present — VMs will run under TCG (slower)"
+      warn "  ensure your CPU supports VT-x / AMD-V and the kvm kernel module is loaded"
     fi
   fi
 }
 
-# ── Windows (WSL2) ──────────────────────────────────────────────────────────
-
-install_wsl() {
-  info "WSL2 detected — using Docker inside WSL"
-
-  # Check if Docker Desktop is providing the daemon
-  if command -v docker &>/dev/null && docker info &>/dev/null; then
-    ok "Docker available (via Docker Desktop or WSL2 daemon)"
-  else
-    info "Installing Docker inside WSL2..."
-    curl -fsSL https://get.docker.com | sh
-    sudo usermod -aG docker "$USER"
-    sudo service docker start
+# ── Install the devshot CLI to $DEVSHOT_BIN_DIR ────────────────────────
+install_cli() {
+  if [ ! -d "$DEVSHOT_BIN_DIR" ]; then
+    $SUDO mkdir -p "$DEVSHOT_BIN_DIR"
   fi
-  ok "Docker ready"
+  CLI_PATH="$DEVSHOT_BIN_DIR/devshot"
+  info "Installing CLI to $CLI_PATH"
 
-  # WSL2 with Hyper-V can expose /dev/kvm
-  if [ -w /dev/kvm ]; then
-    ok "KVM available in WSL2"
-    KVM_FLAG="--device /dev/kvm"
-  else
-    # Try loading KVM modules (works on some WSL2 kernel builds)
-    sudo modprobe kvm 2>/dev/null || true
-    sudo modprobe kvm_intel 2>/dev/null || sudo modprobe kvm_amd 2>/dev/null || true
-
-    if [ -e /dev/kvm ]; then
-      ok "KVM module loaded"
-      KVM_FLAG="--device /dev/kvm"
-    else
-      warn "No KVM in WSL2 — will use the direct QEMU backend under TCG (slower)"
-      warn "For KVM in WSL2, you need a custom kernel with CONFIG_KVM=y"
-      KVM_FLAG=""
-    fi
-  fi
-
-  IMAGE_TAG="amd64-kvm"
+  # The CLI is a small POSIX shell script. We embed it inline rather
+  # than fetching a separate file so the curl|sh flow is one network
+  # round-trip and won't half-install on a flaky link.
+  TMP_CLI="$(mktemp)"
+  fetch_cli "$TMP_CLI"
+  $SUDO install -m 0755 "$TMP_CLI" "$CLI_PATH"
+  rm -f "$TMP_CLI"
+  ok "Installed: $CLI_PATH"
 }
 
-# ── Windows (native) ────────────────────────────────────────────────────────
-
-install_windows() {
-  info "Windows detected"
-  echo ""
-  echo "  DevShot requires WSL2 on Windows."
-  echo ""
-  echo "  Install steps:"
-  echo "    1. Open PowerShell as Administrator"
-  echo "    2. Run: wsl --install -d Ubuntu"
-  echo "    3. Reboot"
-  echo "    4. Open Ubuntu from Start menu"
-  echo "    5. Run this installer again inside WSL2"
-  echo ""
-  fatal "Please install WSL2 first, then run this script inside WSL."
-}
-
-# ── Pull or build image ─────────────────────────────────────────────────────
-
-pull_image() {
-  local image="anticipatercom/devshot:${IMAGE_TAG}"
-
-  info "Pulling Docker image: ${image}..."
-  if docker pull "$image" 2>/dev/null; then
-    ok "Image pulled: ${image}"
-  else
-    warn "Could not pull image — building locally..."
-    info "This will take a while (compiling Xen + kernel)..."
-
-    if [ -f "$(dirname "$0")/build.yml" ]; then
-      cd "$(dirname "$0")/.."
-      make build
-    else
-      fatal "Cannot build locally — no source tree found. Please pull the image manually."
-    fi
+# ── Fetch the CLI script. If we're being run via curl|sh, the same
+#    domain serves /devshot. Local invocation falls back to the sibling
+#    devshot.sh in this repo.
+fetch_cli() {
+  out="$1"
+  # 1. Local development: prefer the on-disk copy if present.
+  src_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
+  if [ -n "$src_dir" ] && [ -f "$src_dir/devshot.sh" ]; then
+    cp "$src_dir/devshot.sh" "$out"
+    return
+  fi
+  # 2. Production: pull from the same origin that served install.sh.
+  cli_url="${DEVSHOT_CLI_URL:-${DEVSHOT_API_BASE%/}/devshot.sh}"
+  info "Downloading CLI from $cli_url"
+  if ! curl -fsSL "$cli_url" -o "$out"; then
+    fatal "failed to fetch CLI from $cli_url"
   fi
 }
 
-# ── Configure and start orchestrator ────────────────────────────────────────────────
+# ── Print the next-steps banner ─────────────────────────────────────────
+print_next_steps() {
+  cat <<EOF
 
-configure_orchestrator() {
-  echo ""
-  echo "════════════════════════════════════════════════════════"
-  echo "  Configure your DevShot Orchestrator"
-  echo "════════════════════════════════════════════════════════"
-  echo ""
+${C_BOLD}DevShot orchestrator installed.${C_NC}
 
-  if [ -z "${DEVSHOT_SERVER_ID:-}" ]; then
-    read -rp "  Server ID (from console.devshot.com):  " DEVSHOT_SERVER_ID
-  fi
-  if [ -z "${DEVSHOT_HMAC_SECRET:-}" ]; then
-    read -rp "  HMAC Secret (from console.devshot.com): " DEVSHOT_HMAC_SECRET
-  fi
-  DEVSHOT_TUNNEL_URL="${DEVSHOT_TUNNEL_URL:-wss://console.devshot.com}"
+Register this host with your account:
 
-  if [ -z "$DEVSHOT_SERVER_ID" ] || [ -z "$DEVSHOT_HMAC_SECRET" ]; then
-    fatal "Server ID and HMAC Secret are required. Get them from console.devshot.com"
-  fi
+    ${C_CYAN}sudo devshot up --auth-key=ds_<your-orchestrator-api-key>${C_NC}
+
+Get a key from ${C_BOLD}${DEVSHOT_API_BASE}${C_NC} → Settings → API Keys
+(use mode "orchestrator").
+
+Other commands:
+    devshot status        show daemon status
+    devshot logs -f       tail orchestrator logs
+    devshot down          stop the orchestrator
+    devshot update        pull the latest image
+    devshot version       print versions
+
+EOF
 }
-
-start_orchestrator() {
-  local image="anticipatercom/devshot:${IMAGE_TAG}"
-  local container_name="devshot-orchestrator"
-  local data_root="${DEVSHOT_DATA_ROOT:-/var/lib/devshot/${container_name}}"
-
-  # Stop existing container
-  docker rm -f "$container_name" 2>/dev/null || true
-
-  info "Preparing persistent data directory: $data_root"
-  sudo mkdir -p \
-    "$data_root/guests" \
-    "$data_root/configs" \
-    "$data_root/qemu" \
-    "$data_root/data"
-  sudo chown -R "$(id -u):$(id -g)" "$data_root"
-
-  info "Starting DevShot Orchestrator..."
-  docker run -d \
-    --name "$container_name" \
-    --privileged $KVM_FLAG \
-    --restart=unless-stopped \
-    --tmpfs /mnt/devshot-scan:exec,mode=755 \
-    -v "$data_root/guests:/xen/guests" \
-    -v "$data_root/configs:/xen/configs" \
-    -v "$data_root/qemu:/xen/qemu" \
-    -v "$data_root/data:/var/lib/devshot" \
-    -e DEVSHOT_SERVER_ID="$DEVSHOT_SERVER_ID" \
-    -e DEVSHOT_HMAC_SECRET="$DEVSHOT_HMAC_SECRET" \
-    -e DEVSHOT_TUNNEL_URL="$DEVSHOT_TUNNEL_URL" \
-    -e GUESTS_DIR="/xen/guests" \
-    -e CONFIGS_DIR="/xen/configs" \
-    -e DEVSHOT_DATA_DIR="/var/lib/devshot" \
-    "$image"
-
-  echo ""
-  echo "════════════════════════════════════════════════════════"
-  ok "DevShot Orchestrator is running!"
-  echo ""
-  echo "  Container:  $container_name"
-  echo "  Image:      $image"
-  echo "  Data root:  $data_root"
-  echo "  Server ID:  $DEVSHOT_SERVER_ID"
-  echo "  KVM:        $([ -n '$KVM_FLAG' ] && echo 'enabled' || echo 'disabled (TCG)')"
-  echo ""
-  echo "  Commands:"
-  echo "    docker logs -f $container_name    # View logs"
-  echo "    docker stop $container_name       # Stop orchestrator"
-  echo "    docker start $container_name      # Start orchestrator"
-  echo "    docker rm -f $container_name      # Remove orchestrator"
-  echo "════════════════════════════════════════════════════════"
-}
-
-# ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
-  KVM_FLAG=""
-
   detect_platform
-
-  case "$PLATFORM" in
-    mac)      install_mac ;;
-    linux)    install_linux ;;
-    wsl)      install_wsl ;;
-    windows)  install_windows ;;
-  esac
-
-  pull_image
-  configure_orchestrator
-  start_orchestrator
+  need_root
+  ensure_docker
+  check_kvm
+  install_cli
+  print_next_steps
 }
 
 main "$@"
