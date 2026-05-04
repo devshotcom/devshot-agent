@@ -21,7 +21,7 @@
 #           -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
 #           anticipatercom/devshot_domu:latest
 
-FROM alpine:3.19
+FROM alpine:3.23
 
 RUN apk add --no-cache tmux openssl tini bash sudo
 

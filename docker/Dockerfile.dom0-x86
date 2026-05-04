@@ -286,7 +286,7 @@ RUN cd /rootfs && tar czf /build/dom0-rootfs-x86.tar.gz . && \
     rm /tmp/disk.raw
 
 # ─── Stage 4: Build DomU guest base image (Alpine rootfs for pool VMs) ────
-FROM --platform=linux/amd64 alpine:3.19 AS domu-rootfs
+FROM --platform=linux/amd64 alpine:3.23 AS domu-rootfs
 
 RUN apk add --no-cache \
     alpine-base openssh openrc e2fsprogs xe-guest-utilities \
