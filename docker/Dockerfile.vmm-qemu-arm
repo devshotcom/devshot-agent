@@ -66,6 +66,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy pre-built artifacts from the Xen image.
 COPY --from=artifacts /xen/boot/Image-domu /xen/boot/Image-domu
 COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
+# Pre-baked flavor templates — see Dockerfile.vmm-qemu-x86 for design notes.
+RUN mkdir -p /xen/guests/templates
+COPY --from=artifacts /xen/guests/templates/devshot-guest-desktop.qcow2 /xen/guests/templates/devshot-guest-desktop.qcow2
+COPY --from=artifacts /xen/guests/templates/devshot-guest-desktop.json  /xen/guests/templates/devshot-guest-desktop.json
 COPY --from=artifacts /xen/configs/ /xen/configs/
 
 # Copy the Go agent binary (built by CI in the agent-build job).

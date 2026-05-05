@@ -356,6 +356,56 @@ RUN mkdir -p /domu/rootfs && \
     qemu-img convert -f raw -O qcow2 -c /tmp/domu-disk.raw /tmp/devshot-guest-base.qcow2 && \
     rm -rf /tmp/domu-disk.raw /domu/rootfs
 
+# ─── Stage 4c: Desktop template — extends domu-rootfs with VNC desktop ────
+# Runs the same payload as apps/agent/recipes/desktop.sh, but inside a
+# Docker build stage instead of a live bake VM. The resulting rootfs is
+# converted to /xen/guests/templates/devshot-guest-desktop.qcow2 and
+# shipped pre-baked in every orchestrator image, so operators can pick
+# "desktop" from the pool image dropdown without running `agent bake run`
+# themselves. (Spec 044 — image bakery; pre-baked templates ship in CI.)
+FROM domu-rootfs AS desktop-rootfs
+
+COPY recipes/desktop.sh /tmp/desktop.sh
+RUN /bin/sh /tmp/desktop.sh && \
+    rm -f /tmp/desktop.sh /tmp/domu-rootfs.tar.gz
+
+RUN tar czf /tmp/desktop-rootfs.tar.gz \
+    --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
+    -C / .
+
+# ─── Stage 4d: Desktop template converter (rootfs → qcow2 + manifest) ────
+FROM debian:bookworm AS desktop-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=desktop-rootfs /tmp/desktop-rootfs.tar.gz /tmp/desktop-rootfs.tar.gz
+COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
+
+# Pack the rootfs into a 4 GiB ext4 image (the desktop set + theming
+# pushes ~600 MiB on top of the universal base, so the 2 GiB the base
+# uses is too tight) and convert to compressed qcow2.
+RUN mkdir -p /domu/rootfs && \
+    tar xzf /tmp/desktop-rootfs.tar.gz -C /domu/rootfs && \
+    rm /tmp/desktop-rootfs.tar.gz && \
+    echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
+    echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
+    echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
+    mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/desktop-disk.raw 4G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/desktop-disk.raw /tmp/devshot-guest-desktop.qcow2 && \
+    rm -rf /tmp/desktop-disk.raw /domu/rootfs
+
+# Sidecar manifest (matches BakeManifest in apps/agent/go/bakery.go).
+# Source = "prebaked" — the agent's ListTemplates() reads this JSON the
+# same way it reads recipe-baked manifests, so the desktop flavor shows
+# up in the pool image picker as soon as the orchestrator boots.
+RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
+    SIZE=$(stat -c%s /tmp/devshot-guest-desktop.qcow2) && \
+    BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
+    printf '{\n  "name": "desktop",\n  "image": "devshot-guest-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"},\n    {"port": 6080, "name": "novnc", "proto": "http"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-desktop.json && \
+    rm /tmp/devshot-guest-base.qcow2
+
 # ─── Stage 5: Final image ──────────────────────────────────────────────────
 FROM --platform=linux/amd64 debian:bookworm-slim
 
@@ -373,6 +423,12 @@ COPY --from=kernel-builder   /tmp/vmlinuz-dom0                 /xen/boot/vmlinuz
 COPY --from=kernel-builder   /tmp/vmlinuz-dom0                 /xen/boot/Image-domu
 COPY --from=rootfs-builder   /tmp/dom0-rootfs-x86.qcow2       /xen/dom0-rootfs.qcow2
 COPY --from=domu-converter   /tmp/devshot-guest-base.qcow2    /xen/devshot-guest-base.qcow2
+# Pre-baked flavor templates — the agent's bakery.ListTemplates() picks
+# these up automatically, so they show up in the pool image dropdown
+# without a per-orchestrator `agent bake run`.
+RUN mkdir -p /xen/guests/templates
+COPY --from=desktop-converter /tmp/devshot-guest-desktop.qcow2 /xen/guests/templates/devshot-guest-desktop.qcow2
+COPY --from=desktop-converter /tmp/devshot-guest-desktop.json  /xen/guests/templates/devshot-guest-desktop.json
 # boot-xen.sh — inlined
 RUN printf '#!/bin/bash\nset -e\necho "=== DevShot Xen Boot ==="\nfor f in /xen/xen /xen/vmlinuz /xen/dom0-rootfs.qcow2; do\n    if [ ! -f "$f" ]; then echo "ERROR: $f not found."; exit 1; fi\ndone\nif [ ! -f /xen/dom0-rootfs-work.qcow2 ]; then\n    qemu-img create -f qcow2 -b /xen/dom0-rootfs.qcow2 -F qcow2 /xen/dom0-rootfs-work.qcow2\nfi\necho "QEMU boot delegated to entrypoint"\n' > /xen/boot-xen.sh && \
     chmod +x /xen/boot-xen.sh
