@@ -30,10 +30,16 @@ set -eux
 # error". Force IPv4 by disabling IPv6 and pinning the resolver to IPv4-only
 # so apk falls back to the IPv4 A record. Retry once if the index is still
 # half-fetched.
+#
+# Spec 044: this recipe also runs inside a Docker build stage (the dom0
+# image bakes a desktop template at CI time). Buildkit mounts
+# /etc/resolv.conf read-only there, so the append-fallback `|| true`s
+# below are required — the tweaks are only useful in live-VM bakes
+# anyway, and Docker's own DNS is already configured by the daemon.
 sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
 sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-echo 'options single-request-reopen' >> /etc/resolv.conf
-echo 'nameserver 1.1.1.1' >> /etc/resolv.conf
+echo 'options single-request-reopen' >> /etc/resolv.conf 2>/dev/null || true
+echo 'nameserver 1.1.1.1'              >> /etc/resolv.conf 2>/dev/null || true
 apk update || (sleep 5 && apk update)
 apk add --no-cache \
     tigervnc \
