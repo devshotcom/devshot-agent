@@ -80,7 +80,7 @@ echo "  CPU:        ${CPU_MODEL}"
 echo "  Host RAM:   ${TOTAL_RAM_MB}MB  CPUs: ${CPU_CORES}"
 echo "  Server ID:  ${DEVSHOT_SERVER_ID}"
 echo "  Tunnel URL: ${DEVSHOT_TUNNEL_URL}"
-echo "  Pool size:  ${POOL_SIZE:-2}"
+echo "  Pool size:  (set by console — pushed via tunnel config on connect)"
 echo "  Xen memory: ${XEN_MEM}MB  CPUs: ${XEN_CPUS}"
 echo "  Dom0 mem:   ${DOM0_MEM}MB"
 echo "  Accel:      ${ACCEL_LABEL}"
@@ -115,7 +115,9 @@ DEVSHOT_SERVER_ID=${DEVSHOT_SERVER_ID}
 DEVSHOT_HMAC_SECRET=${DEVSHOT_HMAC_SECRET}
 DEVSHOT_TUNNEL_URL=${DEVSHOT_TUNNEL_URL}
 DEVSHOT_TLS_SKIP=${DEVSHOT_TLS_SKIP:-0}
-POOL_SIZE=${POOL_SIZE:-2}
+# POOL_SIZE intentionally NOT written: agent reads its target from
+# the console's `config` push (servers.pool_size). See
+# apps/agent/go/vmmanager.go.
 READY_TIMEOUT=${READY_TIMEOUT:-300000}
 LOG_LEVEL=${LOG_LEVEL:-info}
 ENV
@@ -193,7 +195,7 @@ echo "  Orchestrator booting (x86_64)"
 echo "  Accel:        ${ACCEL_LABEL}"
 echo "  Server ID:    ${DEVSHOT_SERVER_ID}"
 echo "  Tunnel:       ${DEVSHOT_TUNNEL_URL}"
-echo "  Pool size:    ${POOL_SIZE:-2}"
+echo "  Pool size:    (set by console — pushed via tunnel config on connect)"
 echo "  Xen:          ${XEN_MEM}MB / ${XEN_CPUS} CPUs"
 echo "  Console:      socat - UNIX-CONNECT:/tmp/qemu-console.sock"
 echo "════════════════════════════════════════════════════════"

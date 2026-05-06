@@ -457,8 +457,10 @@ RUN chmod +x /opt/devshot/entrypoint.sh
 # Xen to use the full machine by default. Override per-run with -e XEN_MEM=...
 ENV PORT=7200 \
     BIND_HOST=0.0.0.0 \
-    POOL_SIZE=2 \
     LOG_LEVEL=info
+# POOL_SIZE intentionally absent: agent reads its target from the
+# console's `config` push (servers.pool_size). See
+# apps/agent/go/vmmanager.go.
 
 ENTRYPOINT ["tini", "--"]
 CMD ["/opt/devshot/entrypoint.sh"]

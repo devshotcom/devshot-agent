@@ -180,7 +180,7 @@ echo "════════════════════════�
 echo "  Host RAM:   ${TOTAL_RAM_MB}MB  CPUs: ${CPU_CORES}"
 echo "  Server ID:  ${DEVSHOT_SERVER_ID}"
 echo "  Tunnel URL: ${DEVSHOT_TUNNEL_URL}"
-echo "  Pool size:  ${POOL_SIZE:-2}"
+echo "  Pool size:  (set by console — pushed via tunnel config on connect)"
 echo "  Bridge:     ${BRIDGE}"
 echo "  Backend:    ${DEVSHOT_HYPERVISOR}"
 echo "  Guests dir: ${GUESTS_DIR}"
