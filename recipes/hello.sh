@@ -14,14 +14,44 @@
 # devshot:exposed_ports=[{"port":8080,"name":"hello","proto":"http"}]
 set -eux
 
-apk update
-apk add --no-cache nodejs ca-certificates
+# Bake VMs run nested under the Mac orchestrator; their slirp DNS
+# forwards to the orch's slirp, which forwards to Mac DNS. That double
+# hop is reliably broken — apk's index fetch fails with "DNS: transient
+# error" and `apk add nodejs` then fails with "no such package". Even
+# pinning /etc/resolv.conf to 1.1.1.1 doesn't help (the same UDP NAT
+# carries it).
+#
+# Workaround: the orch runs a tiny socat-based HTTP server on
+# 0.0.0.0:8765 (apk-httpd init script) serving its `apk fetch -R`
+# cache out of /xen/boot/apk-cache. The bake VM's gateway is the
+# orch (10.0.2.2 from the bake's POV), so curl/wget against
+# http://10.0.2.2:8765/apk-cache/<file>.apk reaches it without
+# needing any external DNS. To refresh the cache, run inside the
+# orch:
+#   apk update
+#   apk fetch -R --output /xen/boot/apk-cache nodejs ca-certificates
+# Network-free apk install via 9p. vmm_qemu honors BAKE_APK_CACHE_DIR
+# at VM creation and 9p-shares that host dir into the bake VM as the
+# `apk_cache` mount tag. Mount it, install, done — no slirp NAT, no
+# DNS, no transient transfer failures on large packages.
+mkdir -p /tmp/apkcache
+mount -t 9p -o trans=virtio,version=9p2000.L,ro apk_cache /tmp/apkcache 2>&1
+ls /tmp/apkcache/*.apk 2>&1 | head -5
+apk add --no-network --allow-untrusted /tmp/apkcache/*.apk
+umount /tmp/apkcache 2>/dev/null || true
 
 # Single-file server. node-stdlib only so install is just `apk add
 # nodejs`. The same script also runs as a one-liner on any VM that
 # already has node:
 #   curl -fsSL <repo>/apps/agent/recipes/hello-server.js | node
 mkdir -p /opt/devshot
+# /opt/devshot is mode 0700 in the base image (it holds the agent
+# binary in production). The recipe's payload needs to be readable
+# by the unprivileged user that qemu-ga's guest-exec runs as
+# (devshot:1000 in the spawned pool VM), otherwise `start-hello`
+# fails with "Cannot find module '/opt/devshot/hello-server.js'"
+# even though the file is right there.
+chmod 0755 /opt/devshot
 cat > /opt/devshot/hello-server.js << 'SERVER'
 'use strict';
 const http = require('http');
@@ -178,6 +208,7 @@ server.listen(PORT, HOST, () => {
 process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
 process.on('SIGINT',  () => { server.close(() => process.exit(0)); });
 SERVER
+chmod 0644 /opt/devshot/hello-server.js
 
 # Launcher matches the start-n8n / start-flowise convention.
 cat > /usr/local/bin/start-hello << 'LAUNCHER'
@@ -187,7 +218,7 @@ detached=0
 if [ "${1-}" = "-d" ]; then detached=1; fi
 export HOST=0.0.0.0
 export PORT="${PORT:-8080}"
-LOG="${HOME}/hello.log"
+LOG="${LOG:-/tmp/hello.log}"
 if [ "$detached" = "1" ]; then
     nohup node /opt/devshot/hello-server.js > "$LOG" 2>&1 &
     echo "hello-server started in background — log: $LOG"
@@ -201,3 +232,10 @@ chmod 0755 /usr/local/bin/start-hello
 echo "=== Hello recipe complete ==="
 node --version
 ls -la /opt/devshot/hello-server.js /usr/local/bin/start-hello
+# Force the kernel to flush dirty pages before the bake VM is shut
+# down. Without this, the bakery sometimes records a successful recipe
+# but the resulting qcow2 has none of the recipe's writes — the VM is
+# force-destroyed during the QGA-shutdown fallback before fsync runs,
+# so the in-flight blocks never reach disk. With sync the bake commit
+# always sees the fully-installed image.
+sync

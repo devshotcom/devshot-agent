@@ -13,14 +13,30 @@
 # devshot:exposed_ports=[{"port":5678,"name":"n8n","proto":"http"}]
 set -eux
 
-apk update
-apk add --no-cache \
-    nodejs npm git \
-    build-base python3 \
-    ca-certificates
+# System deps via 9p-shared apk cache when available (Mac dev's
+# nested-QEMU slirp DNS is too unreliable for `apk update`); fall back
+# to network on bare metal / Linux orch where DNS works fine. See
+# vmm_qemu.go BAKE_APK_CACHE_DIR + recipes/hello.sh for the same
+# pattern.
+mkdir -p /tmp/apkcache
+if mount -t 9p -o trans=virtio,version=9p2000.L,ro apk_cache /tmp/apkcache 2>/dev/null \
+   && ls /tmp/apkcache/nodejs-*.apk >/dev/null 2>&1; then
+  echo "Installing system deps from /tmp/apkcache (9p-shared host cache)"
+  apk add --no-network --allow-untrusted /tmp/apkcache/*.apk
+  umount /tmp/apkcache 2>/dev/null || true
+else
+  echo "nameserver 1.1.1.1" > /etc/resolv.conf
+  echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+  apk update || echo "apk update warning (continuing with cached index)"
+  apk add --no-cache nodejs npm git build-base python3 ca-certificates
+fi
 
 # Global install — n8n's own postinstall hook handles compile of native
 # deps via node-gyp (build-base + python3 above are required for that).
+# npm install runs over the bake VM's slirp NAT to npmjs.org. Most
+# package tarballs are <1 MB so the slirp big-transfer issue doesn't
+# bite, but the dep tree is large — total wall time on Mac dev TCG is
+# ~15 min. CI / Linux dom0 bakes this in seconds.
 npm install -g n8n
 
 # Launcher dropped in /usr/local/bin so the user doesn't have to remember
@@ -49,3 +65,4 @@ chmod 0755 /usr/local/bin/start-n8n
 echo "=== n8n recipe complete ==="
 node --version
 n8n --version
+sync

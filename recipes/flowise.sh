@@ -11,15 +11,27 @@
 # devshot:exposed_ports=[{"port":3000,"name":"flowise","proto":"http"}]
 set -eux
 
-apk update
-apk add --no-cache \
-    nodejs npm git \
-    build-base python3 \
-    ca-certificates
+# Same 9p apk-cache + network fallback dance as recipes/hello.sh and
+# recipes/n8n.sh. Mac dev nested QEMU slirp DNS is unreliable; the
+# host's `apk fetch -R` cache mounts in as `apk_cache` and lets the
+# bake install offline.
+mkdir -p /tmp/apkcache
+if mount -t 9p -o trans=virtio,version=9p2000.L,ro apk_cache /tmp/apkcache 2>/dev/null \
+   && ls /tmp/apkcache/nodejs-*.apk >/dev/null 2>&1; then
+  echo "Installing system deps from /tmp/apkcache (9p-shared host cache)"
+  apk add --no-network --allow-untrusted /tmp/apkcache/*.apk
+  umount /tmp/apkcache 2>/dev/null || true
+else
+  echo "nameserver 1.1.1.1" > /etc/resolv.conf
+  echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+  apk update || echo "apk update warning (continuing with cached index)"
+  apk add --no-cache nodejs npm git build-base python3 ca-certificates
+fi
 
 # Flowise's tree includes some sqlite/native-bindings packages that
 # build via node-gyp during global install — build-base + python3 above
-# cover them.
+# cover them. npm install over Mac dev's nested slirp NAT is slow
+# (~10-15 min on TCG aarch64). CI / Linux dom0 bakes this in seconds.
 npm install -g flowise
 
 cat > /usr/local/bin/start-flowise << 'LAUNCHER'
@@ -43,3 +55,4 @@ chmod 0755 /usr/local/bin/start-flowise
 echo "=== Flowise recipe complete ==="
 node --version
 npx flowise --version || true
+sync
