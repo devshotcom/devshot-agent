@@ -1,14 +1,23 @@
 #!/bin/sh
-# Recipe: VNC desktop — Openbox + tint2 + Xvnc + noVNC.
+# Recipe: VNC desktop — Openbox + tint2 + Xvnc.
 #
 # Run via: devshot-agent bake run --recipe=apps/agent/recipes/desktop.sh --name=desktop
 #
 # Output template: devshot-guest-desktop.qcow2. Every VM spawned from
-# it boots straight into a working desktop on TCP:5900 (raw RFB) and
-# :6080 (websockify+noVNC). The DevShot console's spec-050 forward
-# allowlist auto-populates with both ports thanks to the magic-comment
-# header below, so an operator can `Open` the desktop in a browser
-# tab without any manual setup.
+# it boots straight into a working desktop on TCP:5900 (raw RFB). The
+# DevShot console's /console/desktop tab dials :5900 directly over
+# WebRTC DataChannel — no websockify / no in-VM HTTP bridge.
+#
+# We deliberately do NOT install websockify + novnc:
+#   - The console's WebRTC path bypasses websockify entirely (browser
+#     speaks RFB through a DataChannel, agent dials :5900 inside the
+#     VM, no /vnc.html involved).
+#   - websockify pulls in the full python3 stdlib, which adds ~50 MB
+#     to the image and trips the bundled YARA rules on legitimate
+#     stdlib helpers (pdb.py / doctest.py contain `exec(compile(`,
+#     which the Python_Webshell rule reads as a webshell signature).
+#     Stripping the dependency removes the alarms at the source — the
+#     scanner correctly flagged unused code, not buggy detection.
 #
 # This is the bake-VM equivalent of apps/agent/docker/Dockerfile.domU-desktop:
 # same package set, same theme + dock + wallpaper, same launcher style.
@@ -17,7 +26,7 @@
 #
 # Spec 050 — declared listen ports auto-populate the per-VM forward
 # allowlist (and surface as Open buttons in the Servers tab):
-# devshot:exposed_ports=[{"port":5900,"name":"vnc","proto":"tcp"},{"port":6080,"name":"novnc","proto":"http"}]
+# devshot:exposed_ports=[{"port":5900,"name":"vnc","proto":"tcp"}]
 set -eux
 
 # ── 1. Packages ─────────────────────────────────────────────────────────
@@ -43,7 +52,6 @@ echo 'nameserver 1.1.1.1'              >> /etc/resolv.conf 2>/dev/null || true
 apk update || (sleep 5 && apk update)
 apk add --no-cache \
     tigervnc \
-    websockify novnc \
     openbox tint2 picom \
     pcmanfm xterm \
     dbus dbus-x11 \
@@ -256,25 +264,24 @@ chmod +x "$DEVSHOT_HOME/.config/openbox/autostart"
 chown -R devshot:devshot "$DEVSHOT_HOME"
 
 # ── 3. /usr/local/bin launchers ────────────────────────────────────────
-# start-desktop  → bring up Xvnc :0, openbox, websockify (foreground or -d)
-# stop-desktop   → kill the lot
+# start-desktop  → bring up Xvnc :0 + openbox (foreground or -d).
+# stop-desktop   → kill the lot.
 # Same UX shape as start-n8n / start-flowise so muscle memory carries.
 cat > /usr/local/bin/start-desktop <<'LAUNCHER'
 #!/bin/sh
 # Start the VNC desktop. Pass -d to run detached.
-# Listens on :5900 (raw RFB) and :6080 (noVNC over websockify).
+# Listens on :5900 (raw RFB). The /console/desktop tab dials :5900
+# directly over WebRTC DataChannel — no in-VM HTTP/websockify bridge.
 detached=0
 if [ "${1-}" = "-d" ]; then detached=1; fi
 
 VNC_GEOMETRY="${VNC_GEOMETRY:-1280x800}"
 VNC_DEPTH="${VNC_DEPTH:-24}"
 VNC_PORT="${VNC_PORT:-5900}"
-NOVNC_PORT="${NOVNC_PORT:-6080}"
 
 # Anything still bound from a prior run blocks Xvnc — wipe stale state.
 pkill -f 'Xvnc :0' 2>/dev/null || true
 pkill -f 'openbox' 2>/dev/null || true
-pkill -f 'websockify' 2>/dev/null || true
 rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock 2>/dev/null || true
 mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix
@@ -283,11 +290,19 @@ chmod 1777 /tmp/.X11-unix
 # whatever firewalled in front of it — for DevShot that's the spec-050
 # forward channel which already gates the connection on the user's
 # fingerprint allowlist. -localhost no lets dom0 dial 10.10.0.X:5900.
-runuser -u devshot -- Xvnc :0 \
-  -geometry "$VNC_GEOMETRY" -depth "$VNC_DEPTH" \
-  -rfbport "$VNC_PORT" -SecurityTypes None -AlwaysShared \
+#
+# Use \`su -s /bin/sh devshot -c\` instead of \`runuser\` — runuser
+# ships with util-linux, which Alpine's busybox base does NOT include
+# by default. Falling through to \`runuser: not found\` left Xvnc
+# never starting and the desktop tab cycling through reconnect loops
+# forever. \`su\` works the same way and is always available on
+# Alpine. Mirrors apps/agent/docker/entrypoint-domU-desktop.sh which
+# already uses su for the same reason.
+su -s /bin/sh devshot -c "Xvnc :0 \
+  -geometry $VNC_GEOMETRY -depth $VNC_DEPTH \
+  -rfbport $VNC_PORT -SecurityTypes None -AlwaysShared \
   -AcceptSetDesktopSize -pn -localhost=0 \
-  >/tmp/xvnc.log 2>&1 &
+  >/tmp/xvnc.log 2>&1 &"
 
 # Wait briefly for the X socket to appear before launching openbox.
 for _ in $(seq 1 20); do
@@ -296,18 +311,13 @@ for _ in $(seq 1 20); do
 done
 
 # Openbox window manager + autostart (compositor + wallpaper + dock).
-runuser -u devshot -- env DISPLAY=:0 HOME=/home/devshot openbox-session \
-  >/tmp/openbox.log 2>&1 &
-
-# websockify: WebSocket → TCP bridge so noVNC's HTML client (served on
-# the same port) can render the RFB stream.
-websockify --web /usr/share/novnc "$NOVNC_PORT" "127.0.0.1:$VNC_PORT" \
-  >/tmp/websockify.log 2>&1 &
+su -s /bin/sh devshot -c "DISPLAY=:0 HOME=/home/devshot openbox-session \
+  >/tmp/openbox.log 2>&1 &"
 
 if [ "$detached" = "1" ]; then
-  echo "Desktop started — VNC :$VNC_PORT, noVNC :$NOVNC_PORT"
+  echo "Desktop started — VNC :$VNC_PORT"
   echo "  raw VNC:  forward :$VNC_PORT and connect with any VNC client"
-  echo "  browser:  forward :$NOVNC_PORT and open /vnc.html"
+  echo "  browser:  open /console/desktop/<server>/<vm> for WebRTC noVNC"
   exit 0
 fi
 
@@ -321,7 +331,6 @@ cat > /usr/local/bin/stop-desktop <<'STOP'
 pkill -f 'Xvnc :0' 2>/dev/null || true
 pkill -f 'openbox-session' 2>/dev/null || true
 pkill -f 'openbox' 2>/dev/null || true
-pkill -f 'websockify' 2>/dev/null || true
 pkill -f 'tint2' 2>/dev/null || true
 pkill -f 'picom' 2>/dev/null || true
 echo "Desktop stopped."
@@ -336,7 +345,7 @@ chmod 0755 /usr/local/bin/stop-desktop
 cat > /etc/init.d/devshot-desktop <<'INITD'
 #!/sbin/openrc-run
 
-description="DevShot VNC desktop (Xvnc + Openbox + websockify)"
+description="DevShot VNC desktop (Xvnc + Openbox)"
 
 depend() {
     need net
@@ -370,4 +379,4 @@ rc-update add devshot-desktop default
 echo "=== desktop recipe complete ==="
 ls /usr/local/bin/start-desktop /usr/local/bin/stop-desktop
 ls /etc/init.d/devshot-desktop
-which Xvnc openbox tint2 picom websockify
+which Xvnc openbox tint2 picom
