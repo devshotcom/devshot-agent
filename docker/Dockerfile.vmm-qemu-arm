@@ -17,8 +17,9 @@
 #     --device=/dev/net/tun --device=/dev/kvm \
 #     --read-only --tmpfs /tmp --tmpfs /run --tmpfs /var/run \
 #     --network=host --restart=unless-stopped \
+#     -v /var/lib/devshot/<name>/credentials.env:/opt/devshot/credentials.env:ro \
 #     -e DEVSHOT_SERVER_ID=... \
-#     -e DEVSHOT_HMAC_SECRET=... \
+#     -e DEVSHOT_CREDENTIALS_FILE=/opt/devshot/credentials.env \
 #     -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
 #     anticipatercom/devshot:arm64-kvm
 
@@ -84,8 +85,9 @@ COPY docker/apparmor/devshot-vmm-qemu.template /etc/devshot/apparmor/devshot-vmm
 COPY docker/seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
 
 # Copy the entrypoint.
+COPY docker/load-credentials.sh /opt/devshot/load-credentials.sh
 COPY docker/entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
-RUN chmod +x /opt/devshot/entrypoint.sh
+RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh
 
 # Create runtime dirs and prefetch signatures when possible.
 RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \

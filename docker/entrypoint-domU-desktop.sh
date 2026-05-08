@@ -1,6 +1,8 @@
 #!/bin/bash
 set -eu
 
+. /opt/devshot/load-credentials.sh
+
 # ── Tunnel env vars are optional (standalone mode) ─────────────────────────
 
 DEVSHOT_SERVER_ID="${DEVSHOT_SERVER_ID:-}"

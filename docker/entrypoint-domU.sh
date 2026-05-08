@@ -1,6 +1,8 @@
 #!/bin/bash
 set -eu
 
+. /opt/devshot/load-credentials.sh
+
 # ── Validate required env vars ──────────────────────────────────────────────
 
 : "${DEVSHOT_SERVER_ID:?ERROR: DEVSHOT_SERVER_ID is required. Create a server in the DevShot console.}"

@@ -10,14 +10,15 @@
 #
 # Required env vars at runtime:
 #   DEVSHOT_SERVER_ID    — UUID from the DevShot console
-#   DEVSHOT_HMAC_SECRET  — HMAC key from the DevShot console
+#   DEVSHOT_CREDENTIALS_FILE — mounted root-only file containing DEVSHOT_HMAC_SECRET
 #   DEVSHOT_TUNNEL_URL   — Tunnel WebSocket URL (wss://console.devshot.com)
 #
 # Build:  docker buildx build --platform linux/amd64,linux/arm64 \
 #           -t anticipatercom/devshot_domu:latest \
 #           -f docker/Dockerfile.domU .
 # Run:    docker run -d --name my-domu \
-#           -e DEVSHOT_SERVER_ID=... -e DEVSHOT_HMAC_SECRET=... \
+#           -v /var/lib/devshot/my-domu/credentials.env:/opt/devshot/credentials.env:ro \
+#           -e DEVSHOT_SERVER_ID=... -e DEVSHOT_CREDENTIALS_FILE=/opt/devshot/credentials.env \
 #           -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
 #           anticipatercom/devshot_domu:latest
 
@@ -45,8 +46,9 @@ RUN adduser -D -s /bin/sh -h /home/devshot devshot \
  && echo "devshot:${RANDPW}" | chpasswd \
  && unset RANDPW
 
+COPY docker/load-credentials.sh ./load-credentials.sh
 COPY docker/entrypoint-domU.sh ./entrypoint.sh
-RUN chmod +x /opt/devshot/entrypoint.sh
+RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh
 
 ENV DOMID=1 \
     XS_ROOT=/tmp/xenstore \

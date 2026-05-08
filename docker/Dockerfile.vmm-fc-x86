@@ -47,8 +47,9 @@ RUN chmod +x /opt/devshot/agent
 
 COPY yara_rules /opt/devshot/yara_rules
 
+COPY docker/load-credentials.sh /opt/devshot/load-credentials.sh
 COPY docker/entrypoint-vmm-fc.sh /opt/devshot/entrypoint.sh
-RUN chmod +x /opt/devshot/entrypoint.sh
+RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh
 
 RUN mkdir -p /xen/fc /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \
   freshclam --stdout || echo "freshclam failed during image build (non-fatal)"

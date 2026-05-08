@@ -6,6 +6,9 @@
 # Spec 038 FR-004, FR-015, FR-020.
 set -u
 
+# ── Load mounted credentials before validation ─────────────────────────────
+. /opt/devshot/load-credentials.sh
+
 # ── Validate required env vars ──────────────────────────────────────────────
 : "${DEVSHOT_SERVER_ID:?ERROR: DEVSHOT_SERVER_ID is required.}"
 : "${DEVSHOT_HMAC_SECRET:?ERROR: DEVSHOT_HMAC_SECRET is required.}"

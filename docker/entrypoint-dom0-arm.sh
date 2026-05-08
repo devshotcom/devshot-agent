@@ -3,6 +3,9 @@
 # Boots QEMU/Xen, Dom0 auto-starts the Go agent via systemd. No SSH.
 set -u
 
+# ── Load mounted credentials before validation ─────────────────────────────
+. /opt/devshot/load-credentials.sh
+
 # ── Validate required env vars ──────────────────────────────────────────────
 
 : "${DEVSHOT_SERVER_ID:?ERROR: DEVSHOT_SERVER_ID is required.}"
