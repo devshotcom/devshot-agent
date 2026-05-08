@@ -366,6 +366,43 @@ RUN mkdir -p /domu/rootfs && \
     qemu-img convert -f raw -O qcow2 -c /tmp/domu-disk.raw /tmp/devshot-guest-base.qcow2 && \
     rm -rf /tmp/domu-disk.raw /domu/rootfs
 
+# ─── Stage 5d: Hello template — extends domu-rootfs with starter app ──────
+FROM domu-rootfs AS hello-rootfs
+
+COPY recipes/hello.sh /tmp/hello.sh
+RUN DEVSHOT_RECIPE_DOCKER_BUILD=1 /bin/sh /tmp/hello.sh && \
+    rm -f /tmp/hello.sh /tmp/domu-rootfs.tar.gz
+
+RUN tar czf /tmp/hello-rootfs.tar.gz \
+    --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
+    -C / .
+
+# ─── Stage 5e: Hello template converter ───────────────────────────────────
+FROM debian:bookworm AS hello-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=hello-rootfs /tmp/hello-rootfs.tar.gz /tmp/hello-rootfs.tar.gz
+COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
+
+RUN mkdir -p /domu/rootfs && \
+    tar xzf /tmp/hello-rootfs.tar.gz -C /domu/rootfs && \
+    rm /tmp/hello-rootfs.tar.gz && \
+    echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
+    echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
+    echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
+    mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/hello-disk.raw 2G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/hello-disk.raw /tmp/devshot-guest-hello.qcow2 && \
+    rm -rf /tmp/hello-disk.raw /domu/rootfs
+
+RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
+    SIZE=$(stat -c%s /tmp/devshot-guest-hello.qcow2) && \
+    BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
+    printf '{\n  "name": "hello",\n  "image": "devshot-guest-hello.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 8080, "name": "hello", "proto": "http"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-hello.json && \
+    rm /tmp/devshot-guest-base.qcow2
+
 # ─── Stage 5d: Desktop template — extends domu-rootfs with VNC desktop ────
 # Same rationale as the x86 image: ship pre-baked desktop.qcow2 in CI so
 # every orchestrator gets the flavor in its pool image picker. See
@@ -430,9 +467,12 @@ COPY --from=kernel-builder   /tmp/Image-dom0                   /xen/boot/Image-d
 COPY --from=rootfs-builder   /tmp/dom0-rootfs.qcow2            /xen/dom0-rootfs.qcow2
 COPY --from=domu-converter   /tmp/devshot-guest-base.qcow2     /xen/devshot-guest-base.qcow2
 # Pre-baked flavor templates — see Dockerfile.dom0-x86 for design notes.
-RUN mkdir -p /xen/guests/templates
-COPY --from=desktop-converter /tmp/devshot-guest-desktop.qcow2 /xen/guests/templates/devshot-guest-desktop.qcow2
-COPY --from=desktop-converter /tmp/devshot-guest-desktop.json  /xen/guests/templates/devshot-guest-desktop.json
+RUN mkdir -p /xen/guests/templates /opt/devshot/templates
+COPY --from=desktop-converter /tmp/devshot-guest-desktop.qcow2 /opt/devshot/templates/devshot-guest-desktop.qcow2
+COPY --from=desktop-converter /tmp/devshot-guest-desktop.json  /opt/devshot/templates/devshot-guest-desktop.json
+COPY --from=hello-converter   /tmp/devshot-guest-hello.qcow2   /opt/devshot/templates/devshot-guest-hello.qcow2
+COPY --from=hello-converter   /tmp/devshot-guest-hello.json    /opt/devshot/templates/devshot-guest-hello.json
+RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
 COPY                         roles/dom0/files/boot-xen.sh      /xen/boot-xen.sh
 RUN chmod +x /xen/boot-xen.sh
 
@@ -450,8 +490,9 @@ RUN chmod 755 /usr/local/bin/devshot-sandbox-init
 
 # Entrypoint
 COPY docker/load-credentials.sh ./load-credentials.sh
+COPY docker/sync-templates.sh ./sync-templates.sh
 COPY docker/entrypoint-dom0-arm.sh ./entrypoint.sh
-RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh
+RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh /opt/devshot/sync-templates.sh
 
 # Tunables
 # Hardware-sensitive values (XEN_MEM, XEN_CPUS, VM_MEM, DOM0_MEM) are intentionally

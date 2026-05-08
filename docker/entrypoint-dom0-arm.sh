@@ -12,6 +12,9 @@ set -u
 : "${DEVSHOT_HMAC_SECRET:?ERROR: DEVSHOT_HMAC_SECRET is required.}"
 : "${DEVSHOT_TUNNEL_URL:?ERROR: DEVSHOT_TUNNEL_URL is required.}"
 
+# Keep prebaked templates available even when /xen/guests is bind-mounted.
+/opt/devshot/sync-templates.sh
+
 # ── Detect hardware acceleration ───────────────────────────────────────────
 # Prefer KVM when /dev/kvm is available (Linux with VT-x/AMD-V),
 # fall back to TCG software emulation otherwise.

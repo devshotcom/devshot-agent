@@ -24,6 +24,11 @@ export GUESTS_DIR="${GUESTS_DIR:-/xen/guests}"
 export CONFIGS_DIR="${CONFIGS_DIR:-/xen/configs}"
 export DEVSHOT_DATA_DIR="${DEVSHOT_DATA_DIR:-/var/lib/devshot}"
 
+# Runtime installs bind-mount GUESTS_DIR over /xen/guests, hiding templates
+# that were copied there during image build. Re-materialize them before the
+# agent validates pool-set-base-image requests.
+/opt/devshot/sync-templates.sh
+
 # ── Detect acceleration ─────────────────────────────────────────────────────
 if [ -w /dev/kvm ]; then
   echo "  Accel:      KVM (hardware virtualization)"

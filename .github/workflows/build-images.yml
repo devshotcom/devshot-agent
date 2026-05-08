@@ -102,6 +102,8 @@ jobs:
           platforms: linux/amd64
           provenance: false
           push: true
+          build-args: |
+            BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=max
           tags: |

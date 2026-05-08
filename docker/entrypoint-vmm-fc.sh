@@ -19,6 +19,10 @@ export DEVSHOT_HYPERVISOR=firecracker
 export ROLE=dom0
 export XS_REAL=0
 export XS_ROOT=/tmp/xenstore-dom0
+export GUESTS_DIR="${GUESTS_DIR:-/xen/guests}"
+
+# Keep prebaked templates available even when /xen/guests is bind-mounted.
+/opt/devshot/sync-templates.sh
 
 # ── Verify prerequisites ───────────────────────────────────────────────────
 if [ ! -w /dev/kvm ]; then

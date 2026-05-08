@@ -68,9 +68,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=artifacts /xen/boot/Image-domu /xen/boot/Image-domu
 COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
 # Pre-baked flavor templates — see Dockerfile.vmm-qemu-x86 for design notes.
-RUN mkdir -p /xen/guests/templates
-COPY --from=artifacts /xen/guests/templates/devshot-guest-desktop.qcow2 /xen/guests/templates/devshot-guest-desktop.qcow2
-COPY --from=artifacts /xen/guests/templates/devshot-guest-desktop.json  /xen/guests/templates/devshot-guest-desktop.json
+RUN mkdir -p /xen/guests/templates /opt/devshot/templates
+COPY --from=artifacts /xen/guests/templates/ /opt/devshot/templates/
+RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
 COPY --from=artifacts /xen/configs/ /xen/configs/
 
 # Copy the Go agent binary (built by CI in the agent-build job).
@@ -86,8 +86,9 @@ COPY docker/seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
 
 # Copy the entrypoint.
 COPY docker/load-credentials.sh /opt/devshot/load-credentials.sh
+COPY docker/sync-templates.sh /opt/devshot/sync-templates.sh
 COPY docker/entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
-RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh
+RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh /opt/devshot/sync-templates.sh
 
 # Create runtime dirs and prefetch signatures when possible.
 RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \

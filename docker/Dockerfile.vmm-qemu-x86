@@ -34,11 +34,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=artifacts /xen/boot/Image-domu /xen/boot/Image-domu
 COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
 # Pre-baked flavor templates — agent's bakery.ListTemplates() reads this
-# directory at startup so the desktop flavor surfaces in the pool image
-# picker without each orchestrator having to run `agent bake run`.
-RUN mkdir -p /xen/guests/templates
-COPY --from=artifacts /xen/guests/templates/devshot-guest-desktop.qcow2 /xen/guests/templates/devshot-guest-desktop.qcow2
-COPY --from=artifacts /xen/guests/templates/devshot-guest-desktop.json  /xen/guests/templates/devshot-guest-desktop.json
+# directory at startup. Runtime installs bind-mount /xen/guests, so keep
+# immutable copies in /opt/devshot/templates and sync them on container boot.
+RUN mkdir -p /xen/guests/templates /opt/devshot/templates
+COPY --from=artifacts /xen/guests/templates/ /opt/devshot/templates/
+RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
 COPY --from=artifacts /xen/configs/ /xen/configs/
 
 COPY bin/devshot-agent-linux-amd64 /opt/devshot/agent
@@ -51,8 +51,9 @@ COPY docker/apparmor/devshot-vmm-qemu.template /etc/devshot/apparmor/devshot-vmm
 COPY docker/seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
 
 COPY docker/load-credentials.sh /opt/devshot/load-credentials.sh
+COPY docker/sync-templates.sh /opt/devshot/sync-templates.sh
 COPY docker/entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
-RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh
+RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh /opt/devshot/sync-templates.sh
 
 RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \
   freshclam --stdout || echo "freshclam failed during image build (non-fatal)"

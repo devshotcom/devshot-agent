@@ -34,11 +34,20 @@ set -eux
 # at VM creation and 9p-shares that host dir into the bake VM as the
 # `apk_cache` mount tag. Mount it, install, done — no slirp NAT, no
 # DNS, no transient transfer failures on large packages.
-mkdir -p /tmp/apkcache
-mount -t 9p -o trans=virtio,version=9p2000.L,ro apk_cache /tmp/apkcache 2>&1
-ls /tmp/apkcache/*.apk 2>&1 | head -5
-apk add --no-network --allow-untrusted /tmp/apkcache/*.apk
-umount /tmp/apkcache 2>/dev/null || true
+#
+# Dockerfile prebakes run during CI image builds, not inside a bake VM, so
+# no apk_cache 9p mount exists there. In that one controlled path we use
+# Docker's normal networked apk install and keep the rest of the recipe
+# identical to live bakes.
+if [ "${DEVSHOT_RECIPE_DOCKER_BUILD:-0}" = "1" ]; then
+    apk add --no-cache nodejs ca-certificates
+else
+    mkdir -p /tmp/apkcache
+    mount -t 9p -o trans=virtio,version=9p2000.L,ro apk_cache /tmp/apkcache 2>&1
+    ls /tmp/apkcache/*.apk 2>&1 | head -5
+    apk add --no-network --allow-untrusted /tmp/apkcache/*.apk
+    umount /tmp/apkcache 2>/dev/null || true
+fi
 
 # Single-file server. node-stdlib only so install is just `apk add
 # nodejs`. The same script also runs as a one-liner on any VM that
