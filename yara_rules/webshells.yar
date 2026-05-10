@@ -45,7 +45,14 @@ rule Python_Webshell {
         $s2 = "subprocess.Popen(request" nocase
         $s3 = "subprocess.call(request" nocase
         $s4 = "__import__('os').popen" nocase
-        $s5 = "exec(compile(" nocase
+        // Removed bare "exec(compile(" — it matches Python stdlib pdb.py
+        // and doctest.py (legitimate users of compile()+exec for the
+        // debugger / doctest runner) and was auto-isolating every pool VM
+        // that shipped any Python at all. The four request-bound
+        // signatures above cover the actual webshell pattern; any
+        // future replacement needs to require the compiled string to
+        // come from request data, otherwise we just ship a new false
+        // positive in its place.
     condition:
         any of them
 }
