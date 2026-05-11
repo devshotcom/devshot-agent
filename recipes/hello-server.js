@@ -157,6 +157,33 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Calculator demo (mirrors the recipe path) — Playwright uptime tests
+  // open /calc, type into [data-testid="calc-expr"], click [data-testid=
+  // "calc-equals"], and assert the [data-testid="calc-result"] text.
+  if (req.url === '/calc' || req.url.startsWith('/calc?')) {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>DevShot Calculator</title>
+<style>body{font:14px/1.5 system-ui;max-width:360px;margin:2rem auto;padding:0 1rem}h1{font-size:1.2rem;margin:0 0 1rem}input,button{font:inherit;padding:.5rem;border-radius:4px;border:1px solid #888;background:#fff;color:#000}input{width:100%;margin-bottom:.5rem}button{cursor:pointer;background:#0a0;color:#fff;border:0;padding:.5rem 1rem}.result{font-size:1.5rem;font-family:ui-monospace,monospace;margin-top:1rem;padding:.75rem;border:1px solid #888;border-radius:4px;min-height:1.5em}</style>
+</head><body>
+  <h1>🧮 Calculator</h1>
+  <input id="expr" data-testid="calc-expr" placeholder="3+5" autocomplete="off" />
+  <button id="eq" data-testid="calc-equals" type="button">=</button>
+  <div class="result" id="result" data-testid="calc-result"></div>
+<script>
+function calc(expr){
+  if (!/^[\\d+\\-*/().\\s]+$/.test(expr)) return 'invalid';
+  try { return String(Function('return (' + expr + ')')()); } catch { return 'invalid'; }
+}
+const $ = (id) => document.getElementById(id);
+function run() { $('result').textContent = calc($('expr').value.trim()); }
+$('eq').addEventListener('click', run);
+$('expr').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
+</script>
+</body></html>`);
+    return;
+  }
+
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
   res.end(PAGE(req));
 });
