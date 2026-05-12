@@ -289,7 +289,9 @@ chmod 1777 /tmp/.X11-unix
 # Xvnc: X server with VNC export. -SecurityTypes None opens the wire to
 # whatever firewalled in front of it — for DevShot that's the spec-050
 # forward channel which already gates the connection on the user's
-# fingerprint allowlist. -localhost no lets dom0 dial 10.10.0.X:5900.
+# fingerprint allowlist. Keep Xvnc's own blacklist enabled; repeated bad
+# handshakes must not weaken the VNC server's security posture. -localhost
+# no lets the forwarder dial 10.10.0.X:5900.
 #
 # Use \`su -s /bin/sh devshot -c\` instead of \`runuser\` — runuser
 # ships with util-linux, which Alpine's busybox base does NOT include
