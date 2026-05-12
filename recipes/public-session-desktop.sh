@@ -4,10 +4,10 @@
 # Run via:
 #   devshot-agent bake run \
 #     --base=devshot-guest-desktop.qcow2 \
-#     --recipe=apps/agent/recipes/public-demo-desktop.sh \
-#     --name=public-demo-desktop
+#     --recipe=apps/agent/recipes/public-session-desktop.sh \
+#     --name=public-session-desktop
 #
-# Output template: devshot-guest-public-demo-desktop.qcow2.
+# Output template: devshot-guest-public-session-desktop.qcow2.
 #
 # Why a separate template?
 #   * The plain desktop image (recipes/desktop.sh) intentionally does
@@ -29,7 +29,7 @@
 # Spec 050 — both VNC and noVNC ports are pre-populated into the per-
 # VM forward allowlist via the magic-comment header below. The
 # anonymous proxy in tunnel-server.js looks up `expose_public=true`
-# in pool_claims (set by lib/demo-session.js on every demo claim) AND
+# in pool_claims (set by lib/session.js on every demo claim) AND
 # the agent enforces this allowlist — defense in depth.
 #
 # devshot:exposed_ports=[{"port":5900,"name":"vnc","proto":"tcp"},{"port":6080,"name":"novnc","proto":"http"}]
@@ -148,7 +148,7 @@ chmod +x /etc/init.d/devshot-novnc
 rc-update add devshot-novnc default
 
 # ── 5. Sanity log ──────────────────────────────────────────────────────
-echo "=== public-demo-desktop recipe complete ==="
+echo "=== public-session-desktop recipe complete ==="
 ls /usr/local/bin/start-novnc /etc/init.d/devshot-novnc
 ls /usr/share/novnc/vnc.html
 which websockify
