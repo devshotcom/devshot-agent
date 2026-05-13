@@ -33,6 +33,10 @@
 # the agent enforces this allowlist — defense in depth.
 #
 # devshot:exposed_ports=[{"port":5900,"name":"vnc","proto":"tcp"},{"port":6080,"name":"novnc","proto":"http"}]
+#
+# Memory floor: see desktop.sh — same Xvnc + openbox + agent footprint
+# plus websockify on top. 512MB matches the desktop floor.
+# devshot:memory_mb=512
 set -eux
 
 # ── 1. Packages ─────────────────────────────────────────────────────────

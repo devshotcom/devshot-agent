@@ -27,6 +27,15 @@
 # Spec 050 — declared listen ports auto-populate the per-VM forward
 # allowlist (and surface as Open buttons in the Servers tab):
 # devshot:exposed_ports=[{"port":5900,"name":"vnc","proto":"tcp"}]
+#
+# Memory floor: Xvnc + openbox + tint2 + picom + the agent (~104MB RSS)
+# does not fit in the default 256MB pool VM — we hit the kernel OOM
+# killer in production and lost the agent within seconds of boot. 512MB
+# leaves comfortable headroom for the operator to run a browser or
+# editor on top without the agent getting evicted. createVM honours
+# this and overrides the per-pool default when spawning from a template
+# that declares it.
+# devshot:memory_mb=512
 set -eux
 
 # ── 1. Packages ─────────────────────────────────────────────────────────
