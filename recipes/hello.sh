@@ -42,11 +42,22 @@ set -eux
 if [ "${DEVSHOT_RECIPE_DOCKER_BUILD:-0}" = "1" ]; then
     apk add --no-cache nodejs ca-certificates
 else
+    # Try the 9p apk-cache fast path; fall back to network apk if the
+    # orchestrator hasn't set BAKE_APK_CACHE_DIR (= no apk_cache 9p
+    # share). Linux orchestrators (sharp-ada, etc.) typically have
+    # working slirp DNS so the network fallback Just Works; the 9p path
+    # is the Mac-orchestrator optimization to skip DNS double-hops.
     mkdir -p /tmp/apkcache
-    mount -t 9p -o trans=virtio,version=9p2000.L,ro apk_cache /tmp/apkcache 2>&1
-    ls /tmp/apkcache/*.apk 2>&1 | head -5
-    apk add --no-network --allow-untrusted /tmp/apkcache/*.apk
-    umount /tmp/apkcache 2>/dev/null || true
+    if mount -t 9p -o trans=virtio,version=9p2000.L,ro apk_cache /tmp/apkcache 2>/dev/null && \
+       ls /tmp/apkcache/*.apk >/dev/null 2>&1; then
+        ls /tmp/apkcache/*.apk 2>&1 | head -5
+        apk add --no-network --allow-untrusted /tmp/apkcache/*.apk
+        umount /tmp/apkcache 2>/dev/null || true
+    else
+        echo "9p apk_cache unavailable — falling back to networked apk add"
+        umount /tmp/apkcache 2>/dev/null || true
+        apk update && apk add --no-cache nodejs ca-certificates
+    fi
 fi
 
 # Single-file server. node-stdlib only so install is just `apk add
@@ -268,6 +279,53 @@ else
 fi
 LAUNCHER
 chmod 0755 /usr/local/bin/start-hello
+
+# ── OpenRC service: auto-start hello-server on boot ────────────────────
+# Why: the AppsTab "Launch Hello" flow previously relied on a post-claim
+# /api/vms/<vm>/exec call to kick `start-hello -d`. That exec rides the
+# QGA virtio-serial channel — which is single-threaded, can wedge under
+# contention, and has no observable retry path. When the exec timed out
+# (or the channel was busy), the iframe loaded against a port nothing
+# was listening on and the user saw the SW upstream-timeout page.
+#
+# Same fix as the desktop recipe: bring the workload up via OpenRC at
+# boot, so the moment the VM reaches "ready" the forward chain finds a
+# live :8080. The console-side `startWorkloadInVM` exec is kept as a
+# best-effort kick for the very-first-second-after-claim case but is
+# no longer load-bearing.
+cat > /etc/init.d/devshot-hello <<'INITD'
+#!/sbin/openrc-run
+
+description="DevShot hello-server (node http on :8080)"
+
+depend() {
+    need net
+    after networking
+}
+
+start() {
+    ebegin "Starting DevShot hello-server"
+    /usr/local/bin/start-hello -d
+    eend $?
+}
+
+stop() {
+    ebegin "Stopping DevShot hello-server"
+    pkill -f 'node .*hello-server.js' 2>/dev/null || true
+    eend 0
+}
+
+status() {
+    if pgrep -f 'node .*hello-server.js' >/dev/null 2>&1; then
+        einfo "running (hello-server :8080 alive)"
+        return 0
+    fi
+    einfo "stopped"
+    return 3
+}
+INITD
+chmod +x /etc/init.d/devshot-hello
+rc-update add devshot-hello default
 
 echo "=== Hello recipe complete ==="
 node --version
