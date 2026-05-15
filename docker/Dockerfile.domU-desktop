@@ -38,6 +38,17 @@ RUN apk add --no-cache \
     pcmanfm xterm \
     # Desktop infrastructure
     dbus dbus-x11 \
+    # AI desktop control (spec 055): keyboard/mouse injection, screenshot,
+    # clipboard. xdotool drives XTEST against :0; scrot dumps PNGs without
+    # an extra ImageMagick dep. (wmctrl isn't in Alpine main; window
+    # enumeration is deferred until P2 needs it.)
+    xdotool scrot xclip \
+    # Browser scenario (spec 056): Chromium on shared :0, raised by
+    # /usr/local/bin/devshot-browser on Browser-tab activation. The
+    # in-process sandbox is disabled at launch because Alpine's seccomp
+    # profile in this container doesn't grant the required syscalls; the
+    # container is already the untrusted-compute boundary.
+    chromium \
     # GTK theme + icons
     greybird-themes-gtk2 greybird-themes-gtk3 numix-themes-openbox \
     adwaita-icon-theme papirus-icon-theme \
@@ -250,6 +261,12 @@ feh --bg-fill /home/devshot/.wallpaper.png &\n\
 tint2 &\n' > /home/devshot/.config/openbox/autostart \
  && chmod +x /home/devshot/.config/openbox/autostart \
  && chown -R devshot:devshot /home/devshot
+
+# Spec 056 — Browser scenario launcher. Idempotent: raises an existing
+# Chromium window on :0, or spawns a fresh maximized one. Called by the
+# console Browser tab on activation via /api/vms/<vm>/exec.
+COPY docker/devshot-browser.sh /usr/local/bin/devshot-browser
+RUN chmod 755 /usr/local/bin/devshot-browser
 
 COPY docker/load-credentials.sh ./load-credentials.sh
 COPY docker/entrypoint-domU-desktop.sh ./entrypoint.sh
