@@ -444,6 +444,60 @@ RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
     printf '{\n  "name": "desktop",\n  "image": "devshot-guest-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"},\n    {"port": 6080, "name": "novnc", "proto": "http"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-desktop.json && \
     rm /tmp/devshot-guest-base.qcow2
 
+# ─── Stage 4e: Android template — extends domu-rootfs with QEMU+Android-x86 ──
+# Same shape as the desktop pair above. The recipe pulls
+# qemu-system-x86_64, android-tools, websockify, novnc and downloads the
+# Android-x86 9.0-r2 ISO at bake time so spawned VMs come up phone-ready
+# with VNC on :5900 and adb on :5555 — no first-boot wait. Spec 057.
+# Without this stage /console/android claims fail with
+# "base image not found: /xen/guests/templates/devshot-guest-android.qcow2"
+# on every orchestrator that hadn't manually run `agent bake run`.
+FROM domu-rootfs AS android-rootfs
+
+COPY recipes/android.sh /tmp/android.sh
+RUN /bin/sh /tmp/android.sh && \
+    rm -f /tmp/android.sh /tmp/domu-rootfs.tar.gz
+
+RUN tar czf /tmp/android-rootfs.tar.gz \
+    --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
+    -C / .
+
+# ─── Stage 4f: Android template converter (rootfs → qcow2 + manifest) ────
+FROM debian:bookworm AS android-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=android-rootfs /tmp/android-rootfs.tar.gz /tmp/android-rootfs.tar.gz
+COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
+
+# Android-x86 ISO + extracted kernel/initrd + the qemu+adb host stack pile
+# ~1.1 GiB on top of the universal base. Pack into 6 GiB so first boot has
+# scratch room for the Android data partition without running out the
+# moment the Play Store starts unpacking apks.
+RUN mkdir -p /domu/rootfs && \
+    tar xzf /tmp/android-rootfs.tar.gz -C /domu/rootfs && \
+    rm /tmp/android-rootfs.tar.gz && \
+    echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
+    echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
+    echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
+    mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/android-disk.raw 6G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/android-disk.raw /tmp/devshot-guest-android.qcow2 && \
+    rm -rf /tmp/android-disk.raw /domu/rootfs
+
+# Sidecar manifest mirrors desktop's, with the three exposed ports the
+# android.sh recipe declares: VNC for the console's WebRTC pipe, noVNC
+# for the public-proxy fallback, ADB for the action API's input
+# injection. Memory floor is the recipe's devshot:memory_mb=2560 — set
+# in the manifest so the orchestrator picks it up as the per-template
+# default instead of falling through to the global pool default.
+RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
+    SIZE=$(stat -c%s /tmp/devshot-guest-android.qcow2) && \
+    BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
+    printf '{\n  "name": "android",\n  "image": "devshot-guest-android.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "memory_mb": 2560,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"},\n    {"port": 6080, "name": "novnc", "proto": "http"},\n    {"port": 5555, "name": "adb", "proto": "tcp"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-android.json && \
+    rm /tmp/devshot-guest-base.qcow2
+
 # ─── Stage 5: Final image ──────────────────────────────────────────────────
 FROM --platform=linux/amd64 debian:bookworm-slim
 
@@ -469,6 +523,8 @@ COPY --from=desktop-converter /tmp/devshot-guest-desktop.qcow2 /opt/devshot/temp
 COPY --from=desktop-converter /tmp/devshot-guest-desktop.json  /opt/devshot/templates/devshot-guest-desktop.json
 COPY --from=hello-converter   /tmp/devshot-guest-hello.qcow2   /opt/devshot/templates/devshot-guest-hello.qcow2
 COPY --from=hello-converter   /tmp/devshot-guest-hello.json    /opt/devshot/templates/devshot-guest-hello.json
+COPY --from=android-converter /tmp/devshot-guest-android.qcow2 /opt/devshot/templates/devshot-guest-android.qcow2
+COPY --from=android-converter /tmp/devshot-guest-android.json  /opt/devshot/templates/devshot-guest-android.json
 RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
 # boot-xen.sh — inlined
 RUN printf '#!/bin/bash\nset -e\necho "=== DevShot Xen Boot ==="\nfor f in /xen/xen /xen/vmlinuz /xen/dom0-rootfs.qcow2; do\n    if [ ! -f "$f" ]; then echo "ERROR: $f not found."; exit 1; fi\ndone\nif [ ! -f /xen/dom0-rootfs-work.qcow2 ]; then\n    qemu-img create -f qcow2 -b /xen/dom0-rootfs.qcow2 -F qcow2 /xen/dom0-rootfs-work.qcow2\nfi\necho "QEMU boot delegated to entrypoint"\n' > /xen/boot-xen.sh && \
