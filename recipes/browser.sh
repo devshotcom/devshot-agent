@@ -1,5 +1,5 @@
 #!/bin/sh
-# Recipe: Headless Chromium browser — Xvnc + Openbox + Chromium kiosk.
+# Recipe: Headless Chromium browser — Xvnc + Openbox + maximized Chromium.
 #
 # Run via: devshot-agent bake run --recipe=apps/agent/recipes/browser.sh --name=browser
 #
@@ -9,9 +9,11 @@
 # directly over WebRTC DataChannel — same transport as Desktop / Phone.
 #
 # Differences vs the desktop recipe:
-#   - No tint2 / picom / file manager / GTK theming. Browser-only kiosk.
-#   - Chromium auto-launches fullscreen as `devshot` after Xvnc binds
-#     :5900. tab/menu hidden via --kiosk + --start-fullscreen.
+#   - No tint2 / picom / file manager / GTK theming. Browser-only image.
+#   - Chromium auto-launches maximized as `devshot` after Xvnc binds
+#     :5900. Its own URL bar + tabs stay visible — Openbox just strips
+#     the window-manager decoration so Chromium's chrome is the only
+#     chrome the user sees.
 #   - Chrome DevTools opens on :9222 so the agent's
 #     detectBrowserCapability() probe lights up `caps:['browser']` and
 #     the console's /console/browser route picks this image specifically
@@ -40,8 +42,8 @@ apk update || (sleep 5 && apk update)
 # ── 2. Packages ────────────────────────────────────────────────────────
 # tigervnc:        Xvnc binary — same VNC server desktop uses.
 # openbox:         Tiny window manager Chromium runs under (Chromium
-#                  refuses to start without one — even in --kiosk it
-#                  asks the WM for a fullscreen frame).
+#                  refuses to start without one — it asks the WM for a
+#                  frame even when launched maximized).
 # chromium:        The actual browser. Alpine ships an aarch64/amd64
 #                  build under chromium and chromium-swiftshader.
 # ttf-dejavu / ttf-liberation / font-noto-emoji: enough fallback fonts
@@ -51,7 +53,7 @@ apk update || (sleep 5 && apk update)
 #                  ~3 s timing out per launch.
 # xset:            One-line trick to disable screen blanking; the
 #                  desktop recipe doesn't need it because tint2's idle
-#                  inhibits work, but kiosk-mode Chromium has no panel.
+#                  inhibits work, but this image has no panel.
 apk add --no-cache \
     tigervnc \
     openbox \
@@ -60,16 +62,21 @@ apk add --no-cache \
     ttf-dejavu ttf-liberation font-noto-emoji \
     xset
 
-# ── 3. Per-user kiosk config ───────────────────────────────────────────
+# ── 3. Per-user browser config ─────────────────────────────────────────
 # The universal base already created the `devshot` user. We just need
 # to drop a tiny Openbox config and a fresh Chromium profile.
 DEVSHOT_HOME=/home/devshot
 mkdir -p "$DEVSHOT_HOME/.config/openbox" "$DEVSHOT_HOME/.vnc" "$DEVSHOT_HOME/.config/chromium-data"
 
-# Openbox config — strip every key/title bar/menu/dock binding so the
-# user can't accidentally close the browser or open a context menu they
-# can't get out of. Only Alt+F4 (close window) and Super+Tab (cycle)
-# survive — operators sometimes need those for diagnostics.
+# Openbox config — every window opens maximized with no WM decoration.
+# We deliberately do NOT force <fullscreen>yes</fullscreen>: that flag
+# tells the app "you own the whole screen, hide your own chrome", which
+# Chromium honours by hiding its URL bar + tabs — leaving the user
+# staring at a blank about:blank with no way to navigate. <maximized>
+# fills the framebuffer without triggering that signal, so Chromium's
+# own chrome stays visible while still using every pixel of the VNC
+# canvas. <decor>no</decor> drops the WM title bar (Chromium provides
+# its own window controls in maximized mode).
 cat > "$DEVSHOT_HOME/.config/openbox/rc.xml" <<'OBRC'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc">
@@ -78,7 +85,6 @@ cat > "$DEVSHOT_HOME/.config/openbox/rc.xml" <<'OBRC'
   <applications>
     <application name="*">
       <decor>no</decor>
-      <fullscreen>yes</fullscreen>
       <maximized>true</maximized>
       <focus>yes</focus>
     </application>
@@ -92,7 +98,14 @@ OBRC
 # the user can't wake up from over VNC.
 #
 # Chromium flags:
-#   --kiosk + --start-fullscreen: borderless, no tabs, no menus.
+#   --start-maximized: window fills the Xvnc geometry. Combined with
+#       Openbox's <maximized>true</maximized> + <decor>no</decor>, the
+#       result is Chromium edge-to-edge with its own URL bar + tabs as
+#       the only visible chrome. We deliberately avoid --kiosk and
+#       --start-fullscreen here: both flags hide Chromium's URL bar,
+#       which leaves the user looking at a blank about:blank canvas
+#       with no way to navigate (the console doesn't render its own
+#       URL bar overlay).
 #   --no-sandbox: the universal base runs `devshot` as a regular user,
 #       but Chromium's namespace sandbox needs setuid bits the busybox
 #       coreutils don't ship with. --no-sandbox is fine here because the
@@ -105,14 +118,14 @@ OBRC
 #   --remote-allow-origins=*: required since Chrome 111 — DevTools
 #       refuses cross-origin WebSocket upgrades without the allowlist.
 #   --disable-features=...: kill the first-run nag screens and the
-#       password-leak nag that pops up in kiosk mode.
+#       password-leak nag.
 #   --homepage / start URL: about:blank lets the user / API drive.
 cat > "$DEVSHOT_HOME/.config/openbox/autostart" <<'AUTOSTART'
 #!/bin/sh
 xset s off -dpms &
 xset s noblank &
 exec chromium-browser \
-  --kiosk --start-fullscreen \
+  --start-maximized \
   --no-sandbox \
   --user-data-dir=/home/devshot/.config/chromium-data \
   --remote-debugging-port=9222 \
@@ -202,7 +215,7 @@ chmod 0755 /usr/local/bin/stop-browser
 cat > /etc/init.d/devshot-browser <<'INITD'
 #!/sbin/openrc-run
 
-description="DevShot kiosk Chromium (Xvnc + Openbox)"
+description="DevShot Chromium browser (Xvnc + Openbox)"
 
 depend() {
     need net
