@@ -74,33 +74,39 @@ jobs:
   build-dom0-amd64:
     runs-on: ubuntu-latest
     steps:
-      # Must run before checkout so the workspace lands on the extra
-      # space the action carves out, not the small default partition.
-      # Two things mattered in run 25958095131 (failed at 1m28s):
+      # Inline cleanup instead of easimon/maximize-build-space. Three
+      # earlier attempts failed:
+      #   - Default mount path → LV at /mnt/build, Docker still on root.
+      #   - build-mount-path=/var/lib/docker → daemon broke mid-build
+      #     ("ERROR: open /var/lib/docker/tmp/...: no such file or
+      #     directory" — the action mounted an empty fs over the dir
+      #     while dockerd held open handles to the old files).
+      #   - root-reserve=6144 → action still squeezed root to 100 MiB.
       #
-      # 1. Without `build-mount-path`, the action's freed disk lands on
-      #    a separate LVM volume at /mnt/build that Docker never touches.
-      #    Daemon keeps writing layers to /var/lib/docker on root → OOM.
-      #    Fix: mount the big LV AT /var/lib/docker so layers go there.
-      #
-      # 2. The runner's own _diag log lives on root at
-      #    /home/runner/actions-runner/cached/<ver>/_diag/. With the
-      #    default root-reserve-mb=1024 the action squeezes root down to
-      #    ~100 MB free, so the runner crashes the moment it writes a
-      #    chunk of build stdout to its trace log. Reserve 6 GiB on root
-      #    so the runner has breathing room. Swap is dropped to 1 GiB —
-      #    we don't need 4 GiB on amd64.
-      - name: Maximize runner free disk
-        uses: easimon/maximize-build-space@v10
-        with:
-          root-reserve-mb: '6144'
-          swap-size-mb: '1024'
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-          build-mount-path: '/var/lib/docker'
+      # GH-hosted ubuntu-24.04 ships with `/dev/root 72 G, 17 G free` and
+      # ~35 GiB of preinstalled toolchains we don't use (dotnet, android-
+      # sdk, ghc, haskell, codeql, hostedtoolcache). Deleting those
+      # in-place — no LV, no mount juggle — gets us to ~50 GiB free root
+      # without touching the docker daemon. /var/lib/docker stays on root.
+      - name: Free runner disk
+        run: |
+          echo "── before cleanup ────────────────────────────────────"
+          df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /opt/hostedtoolcache/Python
+          sudo rm -rf /opt/hostedtoolcache/PyPy
+          sudo rm -rf /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          sudo apt-get clean
+          echo "── after cleanup ─────────────────────────────────────"
+          df -h /
 
       - uses: actions/checkout@v4
 
@@ -140,31 +146,26 @@ jobs:
     needs: build-dom0-amd64
     runs-on: ubuntu-latest
     steps:
-      # Two things mattered in run 25958095131 (failed at 1m28s):
-      #
-      # 1. Without `build-mount-path`, the action's freed disk lands on
-      #    a separate LVM volume at /mnt/build that Docker never touches.
-      #    Daemon keeps writing layers to /var/lib/docker on root → OOM.
-      #    Fix: mount the big LV AT /var/lib/docker so layers go there.
-      #
-      # 2. The runner's own _diag log lives on root at
-      #    /home/runner/actions-runner/cached/<ver>/_diag/. With the
-      #    default root-reserve-mb=1024 the action squeezes root down to
-      #    ~100 MB free, so the runner crashes the moment it writes a
-      #    chunk of build stdout to its trace log. Reserve 6 GiB on root
-      #    so the runner has breathing room. Swap is dropped to 1 GiB —
-      #    we don't need 4 GiB on amd64.
-      - name: Maximize runner free disk
-        uses: easimon/maximize-build-space@v10
-        with:
-          root-reserve-mb: '6144'
-          swap-size-mb: '1024'
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-          build-mount-path: '/var/lib/docker'
+      # Same inline cleanup as build-dom0-amd64 — see comment there.
+      - name: Free runner disk
+        run: |
+          echo "── before cleanup ────────────────────────────────────"
+          df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /opt/hostedtoolcache/Python
+          sudo rm -rf /opt/hostedtoolcache/PyPy
+          sudo rm -rf /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          sudo apt-get clean
+          echo "── after cleanup ─────────────────────────────────────"
+          df -h /
 
       - uses: actions/checkout@v4
 
