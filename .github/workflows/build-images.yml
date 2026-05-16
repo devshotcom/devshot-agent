@@ -10,7 +10,8 @@ name: Build & Push Orchestrator Images
 #
 # Active groups:
 #   Group 1 (x86)            — dom0-amd64 + vmm-qemu-amd64
-#                              run on the self-hosted X64 runner (Hetzner)
+#                              run on GH-hosted ubuntu-latest +
+#                              easimon/maximize-build-space (~70 GB free)
 #
 # Disabled groups (commented out below — uncomment to re-enable):
 #   Group 2 (arm64)          — dom0-arm64 + vmm-qemu-arm64 + extract-boot-artifacts
@@ -51,36 +52,44 @@ env:
 jobs:
   # ═══════════════════════════════════════════════════════════════════════
   # Group 1 — x86 (active)
-  # Runs on self-hosted Hetzner runner (label: [self-hosted, X64]).
-  # Native amd64, no QEMU, no Build Cloud minutes.
+  # Runs on GH-hosted ubuntu-latest with easimon/maximize-build-space.
+  # Native amd64, no QEMU, no Build Cloud minutes — GH minutes only.
   # ═══════════════════════════════════════════════════════════════════════
 
   # ── Dom0 orchestrator: Linux x86_64 ────────────────────────────────────
+  # Moved off the self-hosted Hetzner runner to GH-hosted ubuntu-latest:
+  # Hetzner's box tops out at ~20 GB free (75 GB total, 53 GB of system
+  # + runner state we can't safely prune — see run 25957475459 where the
+  # `Free runner disk before build` step reclaimed only 2.36 GB and the
+  # build still OOM'd on disk). The dom0-x86 multi-stage build — Xen +
+  # kernel from source, a 5 GB desktop rootfs, a 6 GB android rootfs
+  # that bakes the 830 MB Android-x86 ISO, plus a 2 GB browser kiosk
+  # rootfs — peaks well above that, so we ended up shipping prod images
+  # that predate the browser template (1fb9533) and the KVM-in-DomU
+  # kernel (057f119). GH-hosted ubuntu-latest plus `maximize-build-space`
+  # (which evicts the preinstalled toolchains we don't need — dotnet,
+  # android-sdk, ghc, haskell, codeql) gets us to ~70 GB free. Minutes
+  # are billable on private repos but the cost (<$0.10/run) beats the
+  # constant infra babysitting.
   build-dom0-amd64:
-    runs-on: [self-hosted, X64]
+    runs-on: ubuntu-latest
     steps:
+      # Must run before checkout so the workspace lands on the extra
+      # space the action carves out, not the small default partition.
+      - name: Maximize runner free disk
+        uses: easimon/maximize-build-space@v10
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
       - uses: actions/checkout@v4
 
-      # The self-hosted Hetzner runner has finite disk. Dom0-x86 is a heavy
-      # multi-stage build — Xen + kernel from source, a 5 GB desktop rootfs,
-      # a 6 GB android rootfs that bakes the 830 MB Android-x86 ISO, plus a
-      # 2 GB browser kiosk rootfs — so a few back-to-back builds otherwise
-      # fill `/var/lib/docker` and crash the runner with
-      # `System.IO.IOException: No space left on device` (the exact crash
-      # that broke commit 62182272 → no `:amd64` push → prod still misses
-      # the browser template). Prune everything not currently referenced
-      # before every build; the registry-backed buildcache below is
-      # unaffected and rehydrates the layers we actually want to keep.
-      - name: Free runner disk before build
+      - name: Report disk space
         run: |
-          echo "── disk before prune ─────────────────────────────────"
-          df -h /
-          docker system prune -af --volumes || true
-          docker builder prune -af || true
-          # Trim the runner's own diagnostic logs (the file that filled
-          # the disk during the 62182272 crash lived under _diag/).
-          sudo find /opt/actions-runner-devshot/_diag -type f -mtime +1 -delete 2>/dev/null || true
-          echo "── disk after prune ──────────────────────────────────"
+          echo "── disk available for build ──────────────────────────"
           df -h /
 
       - uses: docker/login-action@v3
@@ -97,8 +106,14 @@ jobs:
           platforms: linux/amd64
           provenance: false
           push: true
+          # mode=min (was mode=max): only push the final image's layers
+          # to the registry cache, not every intermediate stage. Saves
+          # ~10 GB of buildkit disk pressure during the push phase of
+          # the heavy multi-stage build — the registry still rehydrates
+          # the most expensive layers (kernel, xen, android rootfs) on
+          # the next run because they all land in the final image too.
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=max
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min
           tags: |
             anticipatercom/devshot:amd64
             anticipatercom/devshot:amd64-${{ github.sha }}
@@ -106,22 +121,22 @@ jobs:
   # ── Direct QEMU backend: Linux x86_64 ──────────────────────────────────
   build-vmm-qemu-amd64:
     needs: build-dom0-amd64
-    runs-on: [self-hosted, X64]
+    runs-on: ubuntu-latest
     steps:
+      - name: Maximize runner free disk
+        uses: easimon/maximize-build-space@v10
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
       - uses: actions/checkout@v4
 
-      # Same disk hygiene as build-dom0-amd64: the dom0 build above leaves
-      # ~10 GB of intermediate layers behind, and vmm-qemu then COPYs from
-      # `BASE_IMAGE=anticipatercom/devshot:amd64-<sha>` (effectively another
-      # full pull). Without a prune the runner runs out mid-build.
-      - name: Free runner disk before build
+      - name: Report disk space
         run: |
-          echo "── disk before prune ─────────────────────────────────"
-          df -h /
-          docker system prune -af --volumes || true
-          docker builder prune -af || true
-          sudo find /opt/actions-runner-devshot/_diag -type f -mtime +1 -delete 2>/dev/null || true
-          echo "── disk after prune ──────────────────────────────────"
+          echo "── disk available for build ──────────────────────────"
           df -h /
 
       - uses: docker/login-action@v3
@@ -141,7 +156,7 @@ jobs:
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=max
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min
           tags: |
             anticipatercom/devshot:amd64-kvm
             anticipatercom/devshot:amd64-kvm-${{ github.sha }}
