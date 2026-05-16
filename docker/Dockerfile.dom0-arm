@@ -443,6 +443,103 @@ RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
     printf '{\n  "name": "desktop",\n  "image": "devshot-guest-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"},\n    {"port": 6080, "name": "novnc", "proto": "http"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-desktop.json && \
     rm /tmp/devshot-guest-base.qcow2
 
+# ─── Stage 5f: Android template — extends domu-rootfs with QEMU+Android-x86 ──
+# Parity with Dockerfile.dom0-x86 stage 4e. The recipe pulls
+# qemu-system-x86_64 (always x86, runs under TCG on arm64 hosts — slow
+# but boots), android-tools, websockify, novnc, and downloads the
+# Android-x86 9.0-r2 ISO at bake time. Without this stage /console/android
+# claims fail with "base image not found" on every arm64 orchestrator
+# that hadn't manually run `agent bake run`. Spec 057.
+FROM domu-rootfs AS android-rootfs
+
+COPY recipes/android.sh /tmp/android.sh
+RUN /bin/sh /tmp/android.sh && \
+    rm -f /tmp/android.sh /tmp/domu-rootfs.tar.gz
+
+RUN tar czf /tmp/android-rootfs.tar.gz \
+    --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
+    -C / .
+
+# ─── Stage 5g: Android template converter (rootfs → qcow2 + manifest) ────
+FROM debian:bookworm AS android-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=android-rootfs /tmp/android-rootfs.tar.gz /tmp/android-rootfs.tar.gz
+COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
+
+# Android-x86 ISO + extracted kernel/initrd + the qemu+adb host stack pile
+# ~1.1 GiB on top of the universal base. 6 GiB matches the x86 sibling so
+# the data partition has scratch room for Play Store apk unpacks.
+RUN mkdir -p /domu/rootfs && \
+    tar xzf /tmp/android-rootfs.tar.gz -C /domu/rootfs && \
+    rm /tmp/android-rootfs.tar.gz && \
+    echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
+    echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
+    echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
+    mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/android-disk.raw 6G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/android-disk.raw /tmp/devshot-guest-android.qcow2 && \
+    rm -rf /tmp/android-disk.raw /domu/rootfs
+
+# Manifest mirrors x86: VNC for the console's WebRTC pipe, noVNC for the
+# public-proxy fallback, ADB for the action API's input injection.
+# memory_mb=2560 matches the recipe's devshot:memory_mb declaration so
+# the orchestrator picks it up as the per-template default.
+RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
+    SIZE=$(stat -c%s /tmp/devshot-guest-android.qcow2) && \
+    BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
+    printf '{\n  "name": "android",\n  "image": "devshot-guest-android.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "memory_mb": 2560,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"},\n    {"port": 6080, "name": "novnc", "proto": "http"},\n    {"port": 5555, "name": "adb", "proto": "tcp"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-android.json && \
+    rm /tmp/devshot-guest-base.qcow2
+
+# ─── Stage 5h: Browser template — extends domu-rootfs with kiosk Chromium ──
+# Parity with Dockerfile.dom0-x86 stage 4g. Without this stage
+# /console/browser claims fail with "template claim failed" on arm64
+# orchestrators — the route picks devshot-guest-browser specifically
+# (caps:['browser']), not desktop. Spec 056.
+FROM domu-rootfs AS browser-rootfs
+
+COPY recipes/browser.sh /tmp/browser.sh
+RUN /bin/sh /tmp/browser.sh && \
+    rm -f /tmp/browser.sh /tmp/domu-rootfs.tar.gz
+
+RUN tar czf /tmp/browser-rootfs.tar.gz \
+    --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
+    -C / .
+
+# ─── Stage 5i: Browser template converter (rootfs → qcow2 + manifest) ────
+FROM debian:bookworm AS browser-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=browser-rootfs /tmp/browser-rootfs.tar.gz /tmp/browser-rootfs.tar.gz
+COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
+
+# Chromium (~250 MiB) + swiftshader fallback + Alpine fonts (~80 MiB) on
+# top of the universal base — same 5 GiB envelope as the x86 sibling.
+RUN mkdir -p /domu/rootfs && \
+    tar xzf /tmp/browser-rootfs.tar.gz -C /domu/rootfs && \
+    rm /tmp/browser-rootfs.tar.gz && \
+    echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
+    echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
+    echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
+    mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/browser-disk.raw 5G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/browser-disk.raw /tmp/devshot-guest-browser.qcow2 && \
+    rm -rf /tmp/browser-disk.raw /domu/rootfs
+
+# Manifest mirrors x86: VNC (raw RFB → console framebuffer) and Chrome
+# DevTools (:9222 — `detectBrowserCapability()` probes this to advertise
+# caps:['browser']). memory_mb=2048 tracks Chromium's ~700 MiB resident +
+# Xvnc + dbus + Openbox + headroom for a couple of tabs.
+RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
+    SIZE=$(stat -c%s /tmp/devshot-guest-browser.qcow2) && \
+    BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
+    printf '{\n  "name": "browser",\n  "image": "devshot-guest-browser.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "memory_mb": 2048,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"},\n    {"port": 9222, "name": "devtools", "proto": "http"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-browser.json && \
+    rm /tmp/devshot-guest-base.qcow2
+
 # ─── Stage 6: Final image ──────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
@@ -472,6 +569,10 @@ COPY --from=desktop-converter /tmp/devshot-guest-desktop.qcow2 /opt/devshot/temp
 COPY --from=desktop-converter /tmp/devshot-guest-desktop.json  /opt/devshot/templates/devshot-guest-desktop.json
 COPY --from=hello-converter   /tmp/devshot-guest-hello.qcow2   /opt/devshot/templates/devshot-guest-hello.qcow2
 COPY --from=hello-converter   /tmp/devshot-guest-hello.json    /opt/devshot/templates/devshot-guest-hello.json
+COPY --from=android-converter /tmp/devshot-guest-android.qcow2 /opt/devshot/templates/devshot-guest-android.qcow2
+COPY --from=android-converter /tmp/devshot-guest-android.json  /opt/devshot/templates/devshot-guest-android.json
+COPY --from=browser-converter /tmp/devshot-guest-browser.qcow2 /opt/devshot/templates/devshot-guest-browser.qcow2
+COPY --from=browser-converter /tmp/devshot-guest-browser.json  /opt/devshot/templates/devshot-guest-browser.json
 RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
 COPY                         roles/dom0/files/boot-xen.sh      /xen/boot-xen.sh
 RUN chmod +x /xen/boot-xen.sh

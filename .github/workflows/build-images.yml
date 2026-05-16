@@ -61,6 +61,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The self-hosted Hetzner runner has finite disk. Dom0-x86 is a heavy
+      # multi-stage build — Xen + kernel from source, a 5 GB desktop rootfs,
+      # a 6 GB android rootfs that bakes the 830 MB Android-x86 ISO, plus a
+      # 2 GB browser kiosk rootfs — so a few back-to-back builds otherwise
+      # fill `/var/lib/docker` and crash the runner with
+      # `System.IO.IOException: No space left on device` (the exact crash
+      # that broke commit 62182272 → no `:amd64` push → prod still misses
+      # the browser template). Prune everything not currently referenced
+      # before every build; the registry-backed buildcache below is
+      # unaffected and rehydrates the layers we actually want to keep.
+      - name: Free runner disk before build
+        run: |
+          echo "── disk before prune ─────────────────────────────────"
+          df -h /
+          docker system prune -af --volumes || true
+          docker builder prune -af || true
+          # Trim the runner's own diagnostic logs (the file that filled
+          # the disk during the 62182272 crash lived under _diag/).
+          sudo find /opt/actions-runner-devshot/_diag -type f -mtime +1 -delete 2>/dev/null || true
+          echo "── disk after prune ──────────────────────────────────"
+          df -h /
+
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -87,6 +109,20 @@ jobs:
     runs-on: [self-hosted, X64]
     steps:
       - uses: actions/checkout@v4
+
+      # Same disk hygiene as build-dom0-amd64: the dom0 build above leaves
+      # ~10 GB of intermediate layers behind, and vmm-qemu then COPYs from
+      # `BASE_IMAGE=anticipatercom/devshot:amd64-<sha>` (effectively another
+      # full pull). Without a prune the runner runs out mid-build.
+      - name: Free runner disk before build
+        run: |
+          echo "── disk before prune ─────────────────────────────────"
+          df -h /
+          docker system prune -af --volumes || true
+          docker builder prune -af || true
+          sudo find /opt/actions-runner-devshot/_diag -type f -mtime +1 -delete 2>/dev/null || true
+          echo "── disk after prune ──────────────────────────────────"
+          df -h /
 
       - uses: docker/login-action@v3
         with:
