@@ -162,6 +162,10 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
         --enable CONFIG_CGROUPS \
         --enable CONFIG_OVERLAY_FS \
         --enable CONFIG_NFSD \
+        --enable CONFIG_KVM \
+        --enable CONFIG_KVM_INTEL \
+        --enable CONFIG_KVM_AMD \
+        --enable CONFIG_HAVE_KVM \
         && \
     scripts/config \
         --set-val CONFIG_BLK_DEV_NBD y \
@@ -187,7 +191,7 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
         --set-val CONFIG_IP_NF_TARGET_MASQUERADE y \
         --set-val CONFIG_NF_CONNTRACK_IPV4 y && \
     make ARCH=x86_64 olddefconfig && \
-    sed -i 's/CONFIG_BRIDGE=m/CONFIG_BRIDGE=y/; s/CONFIG_BRIDGE_NETFILTER=m/CONFIG_BRIDGE_NETFILTER=y/; s/CONFIG_VETH=m/CONFIG_VETH=y/; s/CONFIG_TUN=m/CONFIG_TUN=y/; s/CONFIG_BLK_DEV_NBD=m/CONFIG_BLK_DEV_NBD=y/; s/CONFIG_NETFILTER_XT_MATCH_STATE=m/CONFIG_NETFILTER_XT_MATCH_STATE=y/; s/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=m/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y/' .config && \
+    sed -i 's/CONFIG_BRIDGE=m/CONFIG_BRIDGE=y/; s/CONFIG_BRIDGE_NETFILTER=m/CONFIG_BRIDGE_NETFILTER=y/; s/CONFIG_VETH=m/CONFIG_VETH=y/; s/CONFIG_TUN=m/CONFIG_TUN=y/; s/CONFIG_BLK_DEV_NBD=m/CONFIG_BLK_DEV_NBD=y/; s/CONFIG_NETFILTER_XT_MATCH_STATE=m/CONFIG_NETFILTER_XT_MATCH_STATE=y/; s/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=m/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y/; s/CONFIG_KVM=m/CONFIG_KVM=y/; s/CONFIG_KVM_INTEL=m/CONFIG_KVM_INTEL=y/; s/CONFIG_KVM_AMD=m/CONFIG_KVM_AMD=y/' .config && \
     make ARCH=x86_64 -j$(nproc) bzImage modules && \
     cp arch/x86/boot/bzImage /tmp/vmlinuz-dom0 && \
     mkdir -p /tmp/modules && \
