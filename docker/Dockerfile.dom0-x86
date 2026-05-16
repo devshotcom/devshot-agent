@@ -444,6 +444,58 @@ RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
     printf '{\n  "name": "desktop",\n  "image": "devshot-guest-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"},\n    {"port": 6080, "name": "novnc", "proto": "http"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-desktop.json && \
     rm /tmp/devshot-guest-base.qcow2
 
+# ─── Stage 4g: Browser template — extends domu-rootfs with kiosk Chromium ──
+# /console/browser used to share the desktop template, which dumped
+# the user on Openbox + tint2 with no auto-launched browser ("ups
+# browser should really just run chromium" — operator report). This
+# template ships an apk-installed Chromium that auto-starts under
+# Xvnc as the VM's only foreground process, with DevTools on :9222
+# so detectBrowserCapability() lights up `caps:['browser']` and the
+# console routes /console/browser claims here specifically.
+FROM domu-rootfs AS browser-rootfs
+
+COPY recipes/browser.sh /tmp/browser.sh
+RUN /bin/sh /tmp/browser.sh && \
+    rm -f /tmp/browser.sh /tmp/domu-rootfs.tar.gz
+
+RUN tar czf /tmp/browser-rootfs.tar.gz \
+    --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
+    -C / .
+
+# ─── Stage 4h: Browser template converter (rootfs → qcow2 + manifest) ────
+FROM debian:bookworm AS browser-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=browser-rootfs /tmp/browser-rootfs.tar.gz /tmp/browser-rootfs.tar.gz
+COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
+
+# Chromium itself is ~250 MiB on disk plus its swiftshader fallback;
+# Alpine's font packs add ~80 MiB. 5 GiB leaves enough room for a
+# session's worth of cache without bloating every fresh claim. Same
+# packaging shape as desktop-converter: ext4 → compressed qcow2.
+RUN mkdir -p /domu/rootfs && \
+    tar xzf /tmp/browser-rootfs.tar.gz -C /domu/rootfs && \
+    rm /tmp/browser-rootfs.tar.gz && \
+    echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
+    echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
+    echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
+    mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/browser-disk.raw 5G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/browser-disk.raw /tmp/devshot-guest-browser.qcow2 && \
+    rm -rf /tmp/browser-disk.raw /domu/rootfs
+
+# Sidecar manifest — exposes :5900 (raw RFB → console framebuffer) and
+# :9222 (Chrome DevTools). Memory floor at 2048 MiB tracks Chromium's
+# baseline (~700 MiB resident) + Xvnc + dbus + Openbox + headroom for
+# a couple of tabs. createVM picks this up as the per-template default.
+RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
+    SIZE=$(stat -c%s /tmp/devshot-guest-browser.qcow2) && \
+    BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
+    printf '{\n  "name": "browser",\n  "image": "devshot-guest-browser.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "memory_mb": 2048,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"},\n    {"port": 9222, "name": "devtools", "proto": "http"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-browser.json && \
+    rm /tmp/devshot-guest-base.qcow2
+
 # ─── Stage 4e: Android template — extends domu-rootfs with QEMU+Android-x86 ──
 # Same shape as the desktop pair above. The recipe pulls
 # qemu-system-x86_64, android-tools, websockify, novnc and downloads the
@@ -525,6 +577,8 @@ COPY --from=hello-converter   /tmp/devshot-guest-hello.qcow2   /opt/devshot/temp
 COPY --from=hello-converter   /tmp/devshot-guest-hello.json    /opt/devshot/templates/devshot-guest-hello.json
 COPY --from=android-converter /tmp/devshot-guest-android.qcow2 /opt/devshot/templates/devshot-guest-android.qcow2
 COPY --from=android-converter /tmp/devshot-guest-android.json  /opt/devshot/templates/devshot-guest-android.json
+COPY --from=browser-converter /tmp/devshot-guest-browser.qcow2 /opt/devshot/templates/devshot-guest-browser.qcow2
+COPY --from=browser-converter /tmp/devshot-guest-browser.json  /opt/devshot/templates/devshot-guest-browser.json
 RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
 # boot-xen.sh — inlined
 RUN printf '#!/bin/bash\nset -e\necho "=== DevShot Xen Boot ==="\nfor f in /xen/xen /xen/vmlinuz /xen/dom0-rootfs.qcow2; do\n    if [ ! -f "$f" ]; then echo "ERROR: $f not found."; exit 1; fi\ndone\nif [ ! -f /xen/dom0-rootfs-work.qcow2 ]; then\n    qemu-img create -f qcow2 -b /xen/dom0-rootfs.qcow2 -F qcow2 /xen/dom0-rootfs-work.qcow2\nfi\necho "QEMU boot delegated to entrypoint"\n' > /xen/boot-xen.sh && \
