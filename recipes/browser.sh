@@ -31,13 +31,29 @@ set -eux
 
 # ── 1. Network hardening (mirrors desktop.sh) ──────────────────────────
 # Inside Docker BUILD this is a no-op (the daemon already configured
-# DNS); inside a live bake VM it forces IPv4 to dodge IPv6-flaky
-# Alpine mirrors. Either path keeps the apk cycle reliable.
+# DNS); inside a live bake VM the QGA recipe runs ~1s after kernel boot,
+# well before busybox-init finishes networking, so we have to bring eth0
+# up by hand. Without this, every apk fetch fails with "DNS: transient
+# error" and the recipe aborts.
 sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
 sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-echo 'options single-request-reopen' >> /etc/resolv.conf 2>/dev/null || true
-echo 'nameserver 1.1.1.1'              >> /etc/resolv.conf 2>/dev/null || true
-apk update || (sleep 5 && apk update)
+# Manual eth0 bring-up — udhcpc is a noop without an interface up first.
+ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true
+udhcpc -i eth0 -t 5 -n -q 2>/dev/null || true
+# Force a clean resolv.conf — udhcpc.script may not run, leaving the
+# file empty; point at the QEMU user-mode DNS (10.0.2.3) + Cloudflare
+# fallback. options single-request-reopen dodges Alpine's IPv6 wait.
+printf 'options single-request-reopen\nnameserver 10.0.2.3\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+# Wait for outbound DNS to actually resolve — up to 30s, retry apk on
+# each tick. Even with eth0 up, the user-mode NAT slirp takes a moment.
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if apk update 2>&1 | grep -q 'OK:'; then
+    echo "[recipe] apk update succeeded on iteration $i"
+    break
+  fi
+  echo "[recipe] apk update attempt $i failed, retrying..."
+  sleep 2
+done
 
 # ── 2. Packages ────────────────────────────────────────────────────────
 # tigervnc:        Xvnc binary — same VNC server desktop uses.
