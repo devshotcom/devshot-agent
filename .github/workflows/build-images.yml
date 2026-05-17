@@ -10,8 +10,11 @@ name: Build & Push Orchestrator Images
 #
 # Active groups:
 #   Group 1 (x86)            — dom0-amd64 + vmm-qemu-amd64
-#                              run on GH-hosted ubuntu-latest +
-#                              easimon/maximize-build-space (~70 GB free)
+#                              run on the self-hosted runner on
+#                              sharp-ada (label: [self-hosted, Linux,
+#                              X64]). Moved off GH-hosted ubuntu-latest
+#                              after the devshotcom org's Actions
+#                              spending limit started rejecting jobs.
 #
 # Disabled groups (commented out below — uncomment to re-enable):
 #   Group 2 (arm64)          — dom0-arm64 + vmm-qemu-arm64 + extract-boot-artifacts
@@ -72,7 +75,14 @@ jobs:
   # are billable on private repos but the cost (<$0.10/run) beats the
   # constant infra babysitting.
   build-dom0-amd64:
-    runs-on: ubuntu-latest
+    # Self-hosted runner on sharp-ada (the prod orchestrator box, 108 GB
+    # disk, plenty for the multi-stage dom0 build). We moved off
+    # GH-hosted ubuntu-latest after the devshotcom org's Actions
+    # spending limit started rejecting jobs ("Job is waiting for a
+    # hosted runner" → instant fail with no steps, see run 25978742958).
+    # Sharp-ada has the disk headroom, the runner binary, and zero
+    # GH-Actions minutes cost.
+    runs-on: [self-hosted, Linux, X64]
     steps:
       # Inline cleanup instead of easimon/maximize-build-space. Three
       # earlier attempts failed:
@@ -90,22 +100,28 @@ jobs:
       # without touching the docker daemon. /var/lib/docker stays on root.
       - name: Free runner disk
         run: |
-          echo "── before cleanup ────────────────────────────────────"
+          echo "── disk before cleanup ──────────────────────────────"
           df -h /
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /opt/hostedtoolcache/Python
-          sudo rm -rf /opt/hostedtoolcache/PyPy
-          sudo rm -rf /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /usr/local/share/boost
-          sudo docker image prune --all --force || true
-          sudo apt-get clean
-          echo "── after cleanup ─────────────────────────────────────"
+          # On GH-hosted ubuntu-latest these dirs hold ~35 GiB of
+          # toolchains we don't use; rm reclaims them. On self-hosted
+          # (sharp-ada) they don't exist → no-op. Safe either way.
+          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                   /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/Python \
+                   /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk \
+                   /usr/share/swift /usr/local/share/powershell \
+                   /usr/local/share/chromium /usr/local/share/boost; do
+            [ -d "$d" ] && sudo rm -rf "$d" 2>/dev/null || true
+          done
+          # Guard: only prune on a clean GH-hosted runner. Sharp-ada
+          # has /var/lib/devshot from the prod orchestrator container —
+          # pruning its images would destroy the running devshot:amd64-kvm.
+          if [ ! -d /var/lib/devshot ]; then
+            sudo docker image prune --all --force 2>/dev/null || true
+            sudo apt-get clean 2>/dev/null || true
+          else
+            echo "self-hosted runner — skipping destructive prune"
+          fi
+          echo "── disk after cleanup ───────────────────────────────"
           df -h /
 
       - uses: actions/checkout@v4
@@ -144,27 +160,34 @@ jobs:
   # ── Direct QEMU backend: Linux x86_64 ──────────────────────────────────
   build-vmm-qemu-amd64:
     needs: build-dom0-amd64
-    runs-on: ubuntu-latest
+    # Same self-hosted runner as build-dom0-amd64.
+    runs-on: [self-hosted, Linux, X64]
     steps:
       # Same inline cleanup as build-dom0-amd64 — see comment there.
       - name: Free runner disk
         run: |
-          echo "── before cleanup ────────────────────────────────────"
+          echo "── disk before cleanup ──────────────────────────────"
           df -h /
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /opt/hostedtoolcache/Python
-          sudo rm -rf /opt/hostedtoolcache/PyPy
-          sudo rm -rf /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /usr/local/share/boost
-          sudo docker image prune --all --force || true
-          sudo apt-get clean
-          echo "── after cleanup ─────────────────────────────────────"
+          # On GH-hosted ubuntu-latest these dirs hold ~35 GiB of
+          # toolchains we don't use; rm reclaims them. On self-hosted
+          # (sharp-ada) they don't exist → no-op. Safe either way.
+          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                   /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/Python \
+                   /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk \
+                   /usr/share/swift /usr/local/share/powershell \
+                   /usr/local/share/chromium /usr/local/share/boost; do
+            [ -d "$d" ] && sudo rm -rf "$d" 2>/dev/null || true
+          done
+          # Guard: only prune on a clean GH-hosted runner. Sharp-ada
+          # has /var/lib/devshot from the prod orchestrator container —
+          # pruning its images would destroy the running devshot:amd64-kvm.
+          if [ ! -d /var/lib/devshot ]; then
+            sudo docker image prune --all --force 2>/dev/null || true
+            sudo apt-get clean 2>/dev/null || true
+          else
+            echo "self-hosted runner — skipping destructive prune"
+          fi
+          echo "── disk after cleanup ───────────────────────────────"
           df -h /
 
       - uses: actions/checkout@v4
