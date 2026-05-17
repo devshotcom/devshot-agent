@@ -173,7 +173,12 @@ chown -R devshot:devshot "$DEVSHOT_HOME/.android"
 #   ANDROID_DATA      — path to writable qcow2 (default: /opt/devshot/images/android-data.qcow2)
 #   ANDROID_DATA_GB   — data disk size if created on first boot (default: 4)
 #   ANDROID_RAM       — guest RAM in MiB (default: 2048)
-#   ANDROID_VCPUS     — guest vCPUs (default: 2)
+#   ANDROID_VCPUS     — guest vCPUs (default: 1 — must not exceed the
+#                       outer pool VM's vCPU count, or KVM warns
+#                       "SMP cpus exceeds recommended" and the SMP-aware
+#                       Android-x86 /init thrashes between TCG/KVM
+#                       vCPUs and eventually halts. Pool VMs are 1 vCPU
+#                       by default on sharp-ada; bump in lockstep.)
 #   VNC_PORT          — host port for the Android guest's RFB (default: 5900)
 #   ADB_PORT          — host port forwarded to the guest's adbd (default: 5555)
 #   NOVNC_PORT        — websockify port for the browser fallback (default: 6080)
@@ -191,7 +196,7 @@ ANDROID_INITRD="${ANDROID_INITRD:-/opt/devshot/images/android-initrd.img}"
 ANDROID_DATA="${ANDROID_DATA:-/opt/devshot/images/android-data.qcow2}"
 ANDROID_DATA_GB="${ANDROID_DATA_GB:-4}"
 ANDROID_RAM="${ANDROID_RAM:-2048}"
-ANDROID_VCPUS="${ANDROID_VCPUS:-2}"
+ANDROID_VCPUS="${ANDROID_VCPUS:-1}"
 ANDROID_SRC="${ANDROID_SRC:-}"
 VNC_PORT="${VNC_PORT:-5900}"
 ADB_PORT="${ADB_PORT:-5555}"
@@ -270,13 +275,18 @@ console=tty0 console=ttyS0,115200"
     -serial file:/tmp/qemu-serial.log \
     -monitor "telnet:127.0.0.1:4444,server,nowait" \
     >/tmp/qemu-android.log 2>&1 &
-  # Give QEMU a moment to bind ports. If it dies during early boot
-  # (missing kernel feature, invalid append) the log catches it.
+  QEMU_PID=$!
+  # Give QEMU a moment to bind ports. Capture $! and use `kill -0` rather
+  # than `pgrep -x qemu-system-x86_64` — the latter races with the
+  # backgrounded fork+exec on the first iteration (shell continues
+  # before nohup has replaced itself with qemu in the process table)
+  # and the false "QEMU exited during boot" message exits the launcher
+  # while the orphaned qemu is still spinning up.
   for _ in $(seq 1 24); do
     if (echo > /dev/tcp/127.0.0.1/"$VNC_PORT") 2>/dev/null; then
       break
     fi
-    if ! pgrep -x qemu-system-x86_64 >/dev/null 2>&1; then
+    if ! kill -0 "$QEMU_PID" 2>/dev/null; then
       echo "ERROR: QEMU exited during boot. Last log lines:" >&2
       tail -n 20 /tmp/qemu-android.log >&2 || true
       exit 1
