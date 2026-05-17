@@ -30,22 +30,24 @@
 set -eux
 
 # ── 1. Network hardening (mirrors desktop.sh) ──────────────────────────
-# Inside Docker BUILD this is a no-op (the daemon already configured
-# DNS); inside a live bake VM the QGA recipe runs ~1s after kernel boot,
-# well before busybox-init finishes networking, so we have to bring eth0
-# up by hand. Without this, every apk fetch fails with "DNS: transient
-# error" and the recipe aborts.
+# Two execution contexts to satisfy:
+#   - Docker BUILD: DNS is already wired by the daemon, /etc/resolv.conf
+#     is read-only bind-mount, no eth0 (build runs in a network ns the
+#     builder owns). Every step here must `|| true` so the build doesn't
+#     abort with "Read-only file system".
+#   - Live bake VM: QGA recipe fires ~1s after kernel boot, well before
+#     busybox-init finishes networking, so we manually bring eth0 up,
+#     run udhcpc, and write a known-good resolv.conf — otherwise every
+#     apk fetch fails with "DNS: transient error".
 sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
 sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-# Manual eth0 bring-up — udhcpc is a noop without an interface up first.
 ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true
 udhcpc -i eth0 -t 5 -n -q 2>/dev/null || true
-# Force a clean resolv.conf — udhcpc.script may not run, leaving the
-# file empty; point at the QEMU user-mode DNS (10.0.2.3) + Cloudflare
-# fallback. options single-request-reopen dodges Alpine's IPv6 wait.
-printf 'options single-request-reopen\nnameserver 10.0.2.3\nnameserver 1.1.1.1\n' > /etc/resolv.conf
-# Wait for outbound DNS to actually resolve — up to 30s, retry apk on
-# each tick. Even with eth0 up, the user-mode NAT slirp takes a moment.
+# Best-effort resolv.conf write — silently no-ops in Docker build where
+# the file is read-only. Live VM path picks up the new nameservers.
+printf 'options single-request-reopen\nnameserver 10.0.2.3\nnameserver 1.1.1.1\n' > /etc/resolv.conf 2>/dev/null || true
+# Retry apk update up to ~30s — Docker build usually succeeds on
+# iteration 1 (network already live); live bake rides out slirp warmup.
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   if apk update 2>&1 | grep -q 'OK:'; then
     echo "[recipe] apk update succeeded on iteration $i"
