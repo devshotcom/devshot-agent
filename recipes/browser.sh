@@ -72,13 +72,22 @@ done
 # xset:            One-line trick to disable screen blanking; the
 #                  desktop recipe doesn't need it because tint2's idle
 #                  inhibits work, but this image has no panel.
+# xdotool / scrot: Spec-055 desktop/browser-control endpoints
+#                  (/api/vms/:vm/desktop/{action,screenshot} and
+#                  /api/vms/:vm/browser/action) call these binaries
+#                  through vm-exec to synthesize input + capture frames.
+#                  Without them the screenshot endpoint returns 503 and
+#                  the type/key actions error with "sh: xdotool: not
+#                  found". The desktop recipe already pulls them in for
+#                  the same reason.
 apk add --no-cache \
     tigervnc \
     openbox \
     chromium \
     dbus dbus-x11 \
     ttf-dejavu ttf-liberation font-noto-emoji \
-    xset
+    xset \
+    xdotool scrot
 
 # ── 3. Per-user browser config ─────────────────────────────────────────
 # The universal base already created the `devshot` user. We just need
