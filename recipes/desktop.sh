@@ -64,10 +64,18 @@ apk add --no-cache \
     openbox tint2 picom \
     pcmanfm xterm \
     dbus dbus-x11 \
+    xdotool scrot \
     greybird-themes-gtk2 greybird-themes-gtk3 numix-themes-openbox \
     adwaita-icon-theme papirus-icon-theme \
     font-noto font-noto-emoji \
     feh
+
+# xdotool + scrot back the spec 055 AI-desktop-control surface:
+#   /api/vms/:vm/desktop/screenshot (scrot via vm-exec)
+#   /api/vms/:vm/desktop/action     (xdotool key/type/click via vm-exec)
+#   /api/vms/:vm/browser/action     (chromium URL bar via xdotool + scrot)
+# Without these baked in, screenshot endpoints return 503 and browser
+# actions error out with "sh: xdotool: not found".
 
 # ── 2. Per-user desktop config ─────────────────────────────────────────
 # The universal base already created the `devshot` user with a hidden
