@@ -48,7 +48,14 @@ RUN apk add --no-cache \
     # in-process sandbox is disabled at launch because Alpine's seccomp
     # profile in this container doesn't grant the required syscalls; the
     # container is already the untrusted-compute boundary.
-    chromium \
+    # chromium-swiftshader: software GL/Vulkan fallback for hosts with
+    # no GPU passthrough (Mac TCG, most Linux dom0s). Without it Chromium
+    # stalls 3-5 s on getContext("webgl") per page on llvmpipe.
+    chromium chromium-swiftshader \
+    # Trainer automation (spec 056): nodejs + npm host Playwright-core
+    # scripts; xrandr adjusts screen geometry from inside an automation
+    # run without restarting Xvnc.
+    nodejs npm xrandr \
     # GTK theme + icons
     greybird-themes-gtk2 greybird-themes-gtk3 numix-themes-openbox \
     adwaita-icon-theme papirus-icon-theme \
@@ -56,6 +63,17 @@ RUN apk add --no-cache \
     font-noto font-noto-emoji \
     # Wallpaper setter
     feh
+
+# Pre-install playwright-core at a stable path so the AI driver always
+# imports from the same location. `-core` skips Playwright's bundled
+# browser tarball (~200 MB) — we drive the system chromium installed
+# above via CDP. Anchored under /opt/pw with a tiny package.json so
+# `import { chromium } from 'playwright-core'` resolves without a
+# parent module-resolution dance.
+RUN mkdir -p /opt/pw && cd /opt/pw \
+ && printf '{"type":"module"}\n' > package.json \
+ && npm install --no-audit --no-fund playwright-core@latest \
+ && chown -R devshot:devshot /opt/pw
 
 WORKDIR /opt/devshot
 

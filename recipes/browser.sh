@@ -80,14 +80,49 @@ done
 #                  the type/key actions error with "sh: xdotool: not
 #                  found". The desktop recipe already pulls them in for
 #                  the same reason.
+# chromium-swiftshader: Software GL/Vulkan when no GPU is exposed to
+#                  the VM (Mac TCG, headless Linux dom0). Without this,
+#                  Chromium falls back to llvmpipe and many sites hang
+#                  on getContext("webgl") for 3-5 s per page.
+# nodejs / npm:    Trainer-browser automation runs Playwright scripts
+#                  inside the guest. Baking node + npm avoids a
+#                  per-claim `apk add` over the bake-VM's flaky slirp.
+# xclip:           Clipboard get/set. Lets the AI driver paste long
+#                  strings via clipboard (much faster than xdotool's
+#                  per-char type loop) and read out drag-drop content.
+# xrandr:          Screen geometry control — change resolution from a
+#                  scripted automation pass (resize for screenshots,
+#                  emulate mobile viewports) without restarting Xvnc.
+# playwright-core: Pre-installed at /opt/pw so automation scripts get
+#                  `import { chromium } from 'playwright-core'` for
+#                  CDP control of the system Chromium. `--no-audit
+#                  --no-fund` shaves seconds off npm's noise; we use
+#                  -core (no bundled browser) because Alpine's chromium
+#                  is already on PATH.
+# wmctrl is NOT installed — not packaged for Alpine v3.23 (community
+# repo lacks it). xdotool's `search`/`getactivewindow`/`windowactivate`
+# cover the same surface for our automation needs.
 apk add --no-cache \
     tigervnc \
     openbox \
-    chromium \
+    chromium chromium-swiftshader \
     dbus dbus-x11 \
     ttf-dejavu ttf-liberation font-noto-emoji \
-    xset \
-    xdotool scrot
+    xset xrandr \
+    xdotool scrot xclip \
+    nodejs npm
+
+# Playwright-core install. Pinned location so spec-056's automation
+# layer always finds it at the same path regardless of who started
+# Chromium. Using `playwright-core` (not full `playwright`) skips the
+# ~200 MB bundled browser download — we drive Alpine's system chromium
+# via CDP instead.
+mkdir -p /opt/pw
+cd /opt/pw
+printf '{"type":"module"}\n' > package.json
+npm install --no-audit --no-fund playwright-core@latest
+chown -R devshot:devshot /opt/pw
+cd /
 
 # ── 3. Per-user browser config ─────────────────────────────────────────
 # The universal base already created the `devshot` user. We just need
