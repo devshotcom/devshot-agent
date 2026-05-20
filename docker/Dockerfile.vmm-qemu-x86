@@ -38,6 +38,19 @@ COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow
 # immutable copies in /opt/devshot/templates and sync them on container boot.
 RUN mkdir -p /xen/guests/templates /opt/devshot/templates
 COPY --from=artifacts /xen/guests/templates/ /opt/devshot/templates/
+# Spec 058 phase 4: LAMP matrix (lamp-shared + 11 per-(app, version)
+# variants). Baked separately in build-agent.yml — see the
+# `Bake LAMP matrix` step there. Backing chain points each variant at
+# lamp-shared.qcow2 by relative filename, so cp -a-ing both into the
+# same templates dir preserves the chain at runtime. The directory may
+# be absent on a first-ever release (base qcow2 not yet in agent repo);
+# `COPY ... || true` isn't a thing in Dockerfile, so we COPY the parent
+# dir and let the runtime sync handle a missing lamp/ gracefully.
+COPY templates/ /opt/devshot/templates_extra/
+RUN if [ -d /opt/devshot/templates_extra/lamp ]; then \
+      mv /opt/devshot/templates_extra/lamp/* /opt/devshot/templates/ 2>/dev/null || true; \
+    fi && \
+    rm -rf /opt/devshot/templates_extra
 RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
 COPY --from=artifacts /xen/configs/ /xen/configs/
 

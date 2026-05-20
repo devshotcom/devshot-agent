@@ -68,6 +68,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=artifacts /xen/boot/Image-domu /xen/boot/Image-domu
 COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
 # Pre-baked flavor templates — see Dockerfile.vmm-qemu-x86 for design notes.
+# Spec 058 phase 4: LAMP matrix variants are NOT included on arm64
+# because the CI bake runs on linux/amd64 only — the resulting qcow2s
+# contain amd64 binaries that won't boot under arm64 KVM. When an
+# arm-native runner becomes available, mirror the COPY templates/
+# block from Dockerfile.vmm-qemu-x86 here.
 RUN mkdir -p /xen/guests/templates /opt/devshot/templates
 COPY --from=artifacts /xen/guests/templates/ /opt/devshot/templates/
 RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
