@@ -10,6 +10,17 @@ LAMP_ADMIN_USER="${LAMP_ADMIN_USER:-admin}"
 LAMP_ADMIN_PASSWORD="${LAMP_ADMIN_PASSWORD:-Admin12345!}"
 LAMP_ADMIN_EMAIL="${LAMP_ADMIN_EMAIL:-admin@example.com}"
 
+# set_editor_workspace <doc_root>
+# Tells the openvscode-server OpenRC service to open <doc_root> as
+# its default folder on boot. Called by install_<app> right after
+# the app filesystem lands, so claim → editor opens the variant's
+# own /var/www/<app> tree. The service start script reads from
+# /etc/openvscode-default-folder (a one-line plain text file) —
+# see _core.sh.
+set_editor_workspace() {
+  echo "$1" > /etc/openvscode-default-folder
+}
+
 # Start mariadb in the background for the bake step. Required because
 # every app's installer either runs SQL directly (wp install, typo3
 # setup) or connects via DATABASE_URL (shopware system:install).
@@ -81,6 +92,7 @@ install_wordpress() {
     --admin_password="${LAMP_ADMIN_PASSWORD}" \
     --admin_email="${LAMP_ADMIN_EMAIL}" \
     --skip-email
+  set_editor_workspace /var/www/wordpress
 }
 
 # install_shopware <version>
@@ -129,6 +141,7 @@ ENV
     -n
   ./bin/console user:change-password admin --password="${LAMP_ADMIN_PASSWORD}" -n
   ./bin/console assets:install
+  set_editor_workspace /var/www/shopware
 }
 
 # install_typo3 <version>
@@ -180,6 +193,7 @@ $c=require $f;
 if(!isset($c["SYS"])) $c["SYS"]=[];
 $c["SYS"]["trustedHostsPattern"]=".*";
 file_put_contents($f, "<?php\nreturn ".var_export($c, true).";\n");'
+  set_editor_workspace /var/www/typo3
 }
 
 # write_nginx_vhost <app> <port> <doc_root> <client_max_body_size>

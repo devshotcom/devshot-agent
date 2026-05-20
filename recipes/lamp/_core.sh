@@ -127,19 +127,89 @@ chmod 0755 /usr/local/bin/phpswitch
 # that would 404 every request if no variant overrode it.
 rm -f /etc/nginx/http.d/default.conf
 
+# --- openvscode-server (the in-browser editor for this stack) --------
+# Every LAMP variant inherits this layer, so the dev experience is:
+# claim "WordPress 6.9" → land in VSCode workbench at :8080 with
+# /var/www/wordpress as the open folder, live site on :80 visible
+# via the editor's port-forward panel or a sibling browser tab.
+#
+# Why openvscode-server (Gitpod fork) + system Node 22 instead of
+# Coder's code-server: the latter ships a glibc-bundled node and a
+# pinned argon2@0.28.4 native module that don't run on Alpine musl
+# even with gcompat (fcntl64 missing) and don't build with Node 24.
+# openvscode-server's tarball is plain JS we exec under apk's musl
+# Node 22 (Alpine 3.22 pin above; 3.23 ships Node 24 which the
+# editor warns against).
+apk add --no-cache nodejs npm
+
+OPENVSCODE_VERSION="${OPENVSCODE_VERSION:-1.95.2}"
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  OV_ARCH=x64 ;;
+  aarch64) OV_ARCH=arm64 ;;
+  *)       echo "ERROR: unsupported arch $ARCH for openvscode-server" >&2; exit 1 ;;
+esac
+mkdir -p /opt/openvscode-server
+wget -q -O /tmp/openvscode.tar.gz \
+  "https://github.com/gitpod-io/openvscode-server/releases/download/openvscode-server-v${OPENVSCODE_VERSION}/openvscode-server-v${OPENVSCODE_VERSION}-linux-${OV_ARCH}.tar.gz"
+tar -xzf /tmp/openvscode.tar.gz -C /opt/openvscode-server --strip-components=1
+rm /tmp/openvscode.tar.gz
+# Smoke test — system Node must be able to load the JS entry; the
+# bundled /opt/openvscode-server/node is glibc-only and stays unused.
+node /opt/openvscode-server/out/server-main.js --version | head -1
+
+# devshot user owns the editor state dir; variants will lay down
+# the per-app workspace settings on top of this.
+id -u devshot >/dev/null 2>&1 || adduser -D -s /bin/bash devshot
+mkdir -p /home/devshot/.openvscode-server/data/logs /home/devshot/projects
+chown -R devshot:devshot /home/devshot
+
+install -o devshot -g devshot -m 0644 /dev/null /var/log/openvscode-server.log
+
+cat > /etc/init.d/openvscode-server <<'SVC'
+#!/sbin/openrc-run
+
+name="openvscode-server"
+description="VSCode in the browser (openvscode-server) — DevShot Editor"
+# OPENVSCODE_DEFAULT_FOLDER is populated per-variant by _app_lib's
+# install_<app> step; falls back to /home/devshot/projects when
+# no app has claimed the editor (lamp-shared boot only — variants
+# always set it).
+DEFAULT_FOLDER="$(cat /etc/openvscode-default-folder 2>/dev/null || echo /home/devshot/projects)"
+command="/usr/bin/node"
+command_args="/opt/openvscode-server/out/server-main.js \
+  --host 0.0.0.0 --port 8080 \
+  --without-connection-token \
+  --disable-telemetry \
+  --server-data-dir /home/devshot/.openvscode-server \
+  --default-folder $DEFAULT_FOLDER"
+command_user="devshot:devshot"
+command_background=true
+pidfile="/run/openvscode-server.pid"
+output_log="/var/log/openvscode-server.log"
+error_log="/var/log/openvscode-server.log"
+
+depend() {
+    need net
+    after firewall
+}
+SVC
+chmod +x /etc/init.d/openvscode-server
+
 # --- OpenRC services auto-start on boot ------------------------------
 rc-update add mariadb default
 rc-update add php-fpm82 default
 rc-update add php-fpm83 default
 rc-update add php-fpm84 default
 rc-update add nginx default
+rc-update add openvscode-server default
 
 # --- Launcher --------------------------------------------------------
 # Belt-and-suspenders nudge for the very-first-second case (OpenRC
 # already brings these up at boot via the runlevel adds above).
 cat > /usr/local/bin/start-lamp <<'LAUNCHER'
 #!/bin/sh
-for svc in mariadb php-fpm82 php-fpm83 php-fpm84 nginx; do
+for svc in mariadb php-fpm82 php-fpm83 php-fpm84 nginx openvscode-server; do
   rc-service "$svc" status >/dev/null 2>&1 || rc-service "$svc" start || true
 done
 echo "lamp stack ready"
