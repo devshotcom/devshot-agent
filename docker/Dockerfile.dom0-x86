@@ -398,6 +398,50 @@ RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
     printf '{\n  "name": "hello",\n  "image": "devshot-guest-hello.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 8080, "name": "hello", "proto": "http"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-hello.json && \
     rm /tmp/devshot-guest-base.qcow2
 
+# ─── Stage 4b-editor: Editor template — openvscode-server on Alpine ─────
+# Pure HTTP app on :8080 (no VNC, no X server). Mirrors the hello
+# pattern — pre-baked at CI time so a fresh dom0 has the template
+# ready instantly. See recipes/editor.sh for the openvscode-server
+# (Gitpod fork) + system-Node-22 rationale; that's the only path
+# we found that survives Alpine musl.
+FROM domu-rootfs AS editor-rootfs
+
+COPY recipes/editor.sh /tmp/editor.sh
+RUN DEVSHOT_RECIPE_DOCKER_BUILD=1 /bin/sh /tmp/editor.sh && \
+    rm -f /tmp/editor.sh /tmp/domu-rootfs.tar.gz
+
+RUN tar czf /tmp/editor-rootfs.tar.gz \
+    --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
+    -C / .
+
+# ─── Stage 4b-editor-conv: Editor template converter (rootfs → qcow2) ────
+FROM debian:bookworm AS editor-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=editor-rootfs /tmp/editor-rootfs.tar.gz /tmp/editor-rootfs.tar.gz
+COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
+
+# Alpine + node + openvscode-server tarball (~300 MB unpacked) +
+# dev tools. 3 GiB raw → ~500 MB compressed qcow2.
+RUN mkdir -p /domu/rootfs && \
+    tar xzf /tmp/editor-rootfs.tar.gz -C /domu/rootfs && \
+    rm /tmp/editor-rootfs.tar.gz && \
+    echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
+    echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
+    echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
+    mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/editor-disk.raw 3G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/editor-disk.raw /tmp/devshot-guest-editor.qcow2 && \
+    rm -rf /tmp/editor-disk.raw /domu/rootfs
+
+RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
+    SIZE=$(stat -c%s /tmp/devshot-guest-editor.qcow2) && \
+    BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
+    printf '{\n  "name": "editor",\n  "image": "devshot-guest-editor.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 8080, "name": "editor", "proto": "http"}\n  ]\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-editor.json && \
+    rm /tmp/devshot-guest-base.qcow2
+
 # ─── Stage 4c: Desktop template — extends domu-rootfs with VNC desktop ────
 # Runs the same payload as apps/agent/recipes/desktop.sh, but inside a
 # Docker build stage instead of a live bake VM. The resulting rootfs is
@@ -579,6 +623,8 @@ COPY --from=desktop-converter /tmp/devshot-guest-desktop.qcow2 /opt/devshot/temp
 COPY --from=desktop-converter /tmp/devshot-guest-desktop.json  /opt/devshot/templates/devshot-guest-desktop.json
 COPY --from=hello-converter   /tmp/devshot-guest-hello.qcow2   /opt/devshot/templates/devshot-guest-hello.qcow2
 COPY --from=hello-converter   /tmp/devshot-guest-hello.json    /opt/devshot/templates/devshot-guest-hello.json
+COPY --from=editor-converter  /tmp/devshot-guest-editor.qcow2  /opt/devshot/templates/devshot-guest-editor.qcow2
+COPY --from=editor-converter  /tmp/devshot-guest-editor.json   /opt/devshot/templates/devshot-guest-editor.json
 COPY --from=android-converter /tmp/devshot-guest-android.qcow2 /opt/devshot/templates/devshot-guest-android.qcow2
 COPY --from=android-converter /tmp/devshot-guest-android.json  /opt/devshot/templates/devshot-guest-android.json
 COPY --from=browser-converter /tmp/devshot-guest-browser.qcow2 /opt/devshot/templates/devshot-guest-browser.qcow2
