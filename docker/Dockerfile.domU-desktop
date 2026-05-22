@@ -72,8 +72,7 @@ RUN apk add --no-cache \
 # parent module-resolution dance.
 RUN mkdir -p /opt/pw && cd /opt/pw \
  && printf '{"type":"module"}\n' > package.json \
- && npm install --no-audit --no-fund playwright-core@latest \
- && chown -R devshot:devshot /opt/pw
+ && npm install --no-audit --no-fund playwright-core@latest
 
 WORKDIR /opt/devshot
 
@@ -88,7 +87,7 @@ RUN adduser -D -s /bin/bash -h /home/devshot devshot \
  && echo "devshot ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/devshot \
  && chmod 440 /etc/sudoers.d/devshot \
  && mkdir -p /home/devshot/workspace /home/devshot/.vnc /home/devshot/.config/openbox \
- && chown -R devshot:devshot /home/devshot \
+ && chown -R devshot:devshot /home/devshot /opt/pw \
  && mkdir -p /tmp/xenstore /tmp/.X11-unix \
  && chmod 1777 /tmp/.X11-unix \
  && chmod 700 /opt/devshot /opt/devshot/agent \

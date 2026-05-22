@@ -15,6 +15,9 @@
 # devshot:memory_mb=1024
 set -eux
 
+# shellcheck disable=SC1091
+. /tmp/recipe.d/_app_lib.sh
+
 # --- Pin Alpine to v3.22 ---------------------------------------------
 # Alpine 3.23's community repo dropped php82 (it ships php83/84/85). We
 # want all three of 8.2/8.3/8.4 side-by-side, and v3.22 is the most
@@ -140,7 +143,19 @@ rm -f /etc/nginx/http.d/default.conf
 # openvscode-server's tarball is plain JS we exec under apk's musl
 # Node 22 (Alpine 3.22 pin above; 3.23 ships Node 24 which the
 # editor warns against).
-apk add --no-cache nodejs npm
+#
+# gcompat: openvscode-server ships a handful of OPTIONAL .node native
+# modules (spdlog for logging, @parcel/watcher for file change events,
+# vsda for license verification) built against glibc. Without gcompat
+# they fail to load with `Error: Error loading shared library
+# ld-linux-aarch64.so.1: No such file or directory`. The workbench
+# falls back to a JS path for each but the failure cascades — log
+# messages get swallowed, file watching misses changes, and (we
+# discovered the hard way) webview commands like simpleBrowser.api.open
+# silently no-op because the extension host's IPC layer chokes on the
+# missing watcher. gcompat ships the glibc-compat dynamic linker
+# stubs Alpine needs to dlopen those modules cleanly.
+apk add --no-cache nodejs npm gcompat
 
 OPENVSCODE_VERSION="${OPENVSCODE_VERSION:-1.95.2}"
 ARCH=$(uname -m)
@@ -162,6 +177,128 @@ node /opt/openvscode-server/out/server-main.js --version | head -1
 # the per-app workspace settings on top of this.
 id -u devshot >/dev/null 2>&1 || adduser -D -s /bin/bash devshot
 mkdir -p /home/devshot/.openvscode-server/data/logs /home/devshot/projects
+mkdir -p /home/devshot/.openvscode-server/data/User
+mkdir -p /home/devshot/.openvscode-server/data/Machine
+
+# DX: Dark Modern, no Welcome, terminal opens on boot, no popups.
+# These land in the user profile so they apply to whatever folder the
+# variant ends up opening (set_editor_workspace in _app_lib.sh).
+cat > /home/devshot/.openvscode-server/data/User/settings.json <<'SETTINGS'
+{
+  "workbench.colorTheme": "Default Dark Modern",
+  "workbench.startupEditor": "none",
+  "workbench.activityBar.location": "default",
+  "workbench.statusBar.visible": true,
+  "window.menuBarVisibility": "compact",
+  "telemetry.telemetryLevel": "off",
+  "update.mode": "none",
+  "extensions.autoCheckUpdates": false,
+  "extensions.autoUpdate": false,
+  "security.workspace.trust.enabled": false,
+  "security.workspace.trust.banner": "never",
+  "security.workspace.trust.startupPrompt": "never",
+  "security.workspace.trust.untrustedFiles": "open",
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "terminal.integrated.profiles.linux": {
+    "bash": { "path": "/bin/bash", "args": ["-l"] }
+  },
+  "terminal.integrated.cwd": "${workspaceFolder}",
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 800,
+  "editor.fontSize": 13,
+  "editor.minimap.enabled": true,
+  "editor.bracketPairColorization.enabled": true,
+  "explorer.compactFolders": false,
+  "explorer.confirmDelete": false,
+  "explorer.confirmDragAndDrop": false
+}
+SETTINGS
+
+mkdir -p /home/devshot/.openvscode-server/data/User/globalStorage
+cat > /home/devshot/.openvscode-server/data/User/globalStorage/storage.json <<'STORAGE'
+{
+  "workbench.welcomePage.walkthroughs.openOnInstall": false,
+  "workbench.welcomePageOnStartup": false
+}
+STORAGE
+
+# ─── DevShot Side Panel auto-open extension ─────────────────────────
+# A trivial built-in extension that fires on workspace open, resolves
+# the workload-local app URL through VS Code's external URI service,
+# and opens that browser-reachable URL in Simple Browser. Lands the
+# user in VSCode with the editor on the left and the live site rendered
+# in a webview tab on the right — one claim, code + preview, no further
+# clicks.
+EXT_DIR=/opt/openvscode-server/extensions/devshot-side-panel
+mkdir -p "$EXT_DIR"
+cat > "$EXT_DIR/package.json" <<'PKG'
+{
+  "name": "devshot-side-panel",
+  "displayName": "DevShot Side Panel",
+  "description": "Auto-opens the live app preview alongside the editor.",
+  "version": "0.0.1",
+  "publisher": "devshot",
+  "engines": { "vscode": "^1.60.0" },
+  "main": "./extension.js",
+  "browser": "./extension.js",
+  "extensionKind": ["ui"],
+  "activationEvents": ["onStartupFinished"]
+}
+PKG
+cat > "$EXT_DIR/package.nls.json" <<'NLS'
+{}
+NLS
+cat > "$EXT_DIR/extension.js" <<'EXT'
+// Web extension - runs in the workbench's web worker host. No fs, no
+// Node modules; URL is derived from the workspace folder name so we
+// don't need a side-channel file. Matches set_editor_workspace's
+// /var/www/<app> convention.
+const vscode = require('vscode');
+
+const URLS = {
+  wordpress: 'http://localhost:80/',
+  shopware:  'http://localhost:81/',
+  typo3:     'http://localhost:82/',
+};
+
+async function openPreview(url) {
+  const localUri = vscode.Uri.parse(url);
+  const externalUri = await vscode.env.asExternalUri(localUri);
+  const externalUrl = externalUri.toString(true);
+
+  try {
+    await vscode.commands.executeCommand(
+      'simpleBrowser.api.open',
+      externalUri,
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true }
+    );
+  } catch {
+    // Older simple-browser builds only expose the user-facing show
+    // command (with the URL prompt suppressed when an arg is given).
+    await vscode.commands.executeCommand('simpleBrowser.show', externalUrl);
+  }
+}
+
+async function activate(context) {
+  // The proxy reaches the live site at the workload-side port the
+  // bake exposed. workspace folder name = /var/www/<app>, basename is
+  // the lookup key.
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  const app = folder ? folder.name : 'wordpress';
+  const url = URLS[app] || URLS.wordpress;
+  // Fire after the workbench has settled — Simple Browser's command
+  // is registered the first time it activates, and the workbench's
+  // editor service needs to be ready to accept the Beside split.
+  setTimeout(() => {
+    openPreview(url).catch((error) => {
+      console.error('[DevShot Side Panel] failed to open preview', error);
+    });
+  }, 1800);
+}
+function deactivate() {}
+module.exports = { activate, deactivate };
+EXT
+
 chown -R devshot:devshot /home/devshot
 
 install -o devshot -g devshot -m 0644 /dev/null /var/log/openvscode-server.log
@@ -181,6 +318,7 @@ command_args="/opt/openvscode-server/out/server-main.js \
   --host 0.0.0.0 --port 8080 \
   --without-connection-token \
   --disable-telemetry \
+  --user-data-dir /home/devshot/.openvscode-server/data \
   --server-data-dir /home/devshot/.openvscode-server \
   --default-folder $DEFAULT_FOLDER"
 command_user="devshot:devshot"
@@ -207,15 +345,7 @@ rc-update add openvscode-server default
 # --- Launcher --------------------------------------------------------
 # Belt-and-suspenders nudge for the very-first-second case (OpenRC
 # already brings these up at boot via the runlevel adds above).
-cat > /usr/local/bin/start-lamp <<'LAUNCHER'
-#!/bin/sh
-for svc in mariadb php-fpm82 php-fpm83 php-fpm84 nginx openvscode-server; do
-  rc-service "$svc" status >/dev/null 2>&1 || rc-service "$svc" start || true
-done
-echo "lamp stack ready"
-echo "PHP versions available: 8.2, 8.3, 8.4 (default 8.3; switch with phpswitch)"
-LAUNCHER
-chmod 0755 /usr/local/bin/start-lamp
+install_lamp_launcher
 
 # --- Cleanup ---------------------------------------------------------
 rm -rf /root/.composer /home/*/.composer /tmp/*

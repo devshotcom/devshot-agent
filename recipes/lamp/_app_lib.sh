@@ -10,6 +10,18 @@ LAMP_ADMIN_USER="${LAMP_ADMIN_USER:-admin}"
 LAMP_ADMIN_PASSWORD="${LAMP_ADMIN_PASSWORD:-Admin12345!}"
 LAMP_ADMIN_EMAIL="${LAMP_ADMIN_EMAIL:-admin@example.com}"
 
+install_lamp_launcher() {
+  cat > /usr/local/bin/start-lamp <<'LAUNCHER'
+#!/bin/sh
+for svc in mariadb php-fpm82 php-fpm83 php-fpm84 nginx openvscode-server; do
+  rc-service "$svc" status >/dev/null 2>&1 || rc-service "$svc" start || true
+done
+echo "lamp stack ready"
+echo "PHP versions available: 8.2, 8.3, 8.4 (default 8.3; switch with phpswitch)"
+LAUNCHER
+  chmod 0755 /usr/local/bin/start-lamp
+}
+
 # set_editor_workspace <doc_root>
 # Tells the openvscode-server OpenRC service to open <doc_root> as
 # its default folder on boot. Called by install_<app> right after
@@ -17,8 +29,71 @@ LAMP_ADMIN_EMAIL="${LAMP_ADMIN_EMAIL:-admin@example.com}"
 # own /var/www/<app> tree. The service start script reads from
 # /etc/openvscode-default-folder (a one-line plain text file) —
 # see _core.sh.
+#
+# Also bakes a workspace .vscode/settings.json with the DX defaults
+# (Dark Modern, no Welcome, auto-save, no trust prompt) — VS Code Web
+# ignores the server-side User profile, so workspace settings are the
+# only way to ship a stunning out-of-the-box experience.
 set_editor_workspace() {
   echo "$1" > /etc/openvscode-default-folder
+  mkdir -p "$1/.vscode"
+  cat > "$1/.vscode/settings.json" <<JSON
+{
+  "workbench.colorTheme": "Default Dark Modern",
+  "workbench.iconTheme": "vs-seti",
+  "workbench.startupEditor": "none",
+  "workbench.tips.enabled": false,
+  "workbench.welcomePage.walkthroughs.openOnInstall": false,
+  "telemetry.telemetryLevel": "off",
+  "update.mode": "none",
+  "extensions.autoCheckUpdates": false,
+  "extensions.autoUpdate": false,
+  "security.workspace.trust.enabled": false,
+  "security.workspace.trust.banner": "never",
+  "security.workspace.trust.startupPrompt": "never",
+  "security.workspace.trust.untrustedFiles": "open",
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "terminal.integrated.profiles.linux": {
+    "bash": { "path": "/bin/bash", "args": ["-l"] }
+  },
+  "task.allowAutomaticTasks": "on",
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 800,
+  "editor.fontSize": 13,
+  "editor.minimap.enabled": true,
+  "editor.bracketPairColorization.enabled": true,
+  "explorer.compactFolders": false,
+  "explorer.confirmDelete": false,
+  "explorer.confirmDragAndDrop": false
+}
+JSON
+  # Auto-run task on folder open — VS Code's `runOn: folderOpen` is the
+  # only built-in hook that opens a terminal panel without a user
+  # gesture. The task does nothing useful (`true`), but its presence
+  # forces VS Code to spawn the integrated terminal at startup so the
+  # operator lands on a ready bash prompt without hunting for Ctrl-`.
+  cat > "$1/.vscode/tasks.json" <<JSON
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "DevShot: open terminal",
+      "type": "shell",
+      "command": "echo 'Welcome — you are in $1. PHP versions: 8.2 / 8.3 (default) / 8.4. Switch with phpswitch.'",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": false,
+        "echo": false,
+        "showReuseMessage": false,
+        "clear": false
+      },
+      "runOptions": { "runOn": "folderOpen" },
+      "problemMatcher": []
+    }
+  ]
+}
+JSON
 }
 
 # Start mariadb in the background for the bake step. Required because
@@ -92,6 +167,36 @@ install_wordpress() {
     --admin_password="${LAMP_ADMIN_PASSWORD}" \
     --admin_email="${LAMP_ADMIN_EMAIL}" \
     --skip-email
+  # WP canonical_redirect kicks in any time the request Host doesn't
+  # match the configured siteurl — that's exactly what happens when
+  # the DevShot proxy forwards `Host: <vm>.local:80` and WP tries to
+  # send the browser back to `http://localhost/`. The redirect goes
+  # to a host the browser can't reach, surfacing as a blank iframe
+  # (the parent's CSP refuses to follow the cross-origin navigation).
+  #
+  # Install a must-use plugin that:
+  #   (1) removes WP's redirect_canonical filter outright, and
+  #   (2) rewrites HOME_URL / SITE_URL to the incoming request's
+  #       scheme+host so subdir asset URLs (wp-content/...) resolve
+  #       relative to whatever Host the proxy is sending today.
+  # Must-use plugins live in /wp-content/mu-plugins/ and auto-load
+  # without admin activation — perfect for opinionated baked-in
+  # fixes.
+  mkdir -p /var/www/wordpress/wp-content/mu-plugins
+  cat > /var/www/wordpress/wp-content/mu-plugins/devshot-proxy.php <<'PHP'
+<?php
+// Devshot proxy compatibility — drop canonical redirects and let
+// siteurl/home follow whatever Host the proxy is forwarding.
+remove_filter('template_redirect', 'redirect_canonical');
+add_filter('redirect_canonical', '__return_false');
+$dynamic_url = function () {
+  $scheme = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
+  $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+  return $scheme . '://' . $host;
+};
+add_filter('option_siteurl', $dynamic_url);
+add_filter('option_home',    $dynamic_url);
+PHP
   set_editor_workspace /var/www/wordpress
 }
 
@@ -231,6 +336,8 @@ NGINX
 # clear composer caches. Idempotent per call so a multi-app wrapper
 # can run it once at end.
 finalize_app_bake() {
+  install_lamp_launcher
+
   chown -R nginx:nginx /var/www
   chmod -R u+w \
     /var/www/wordpress/wp-content 2>/dev/null \

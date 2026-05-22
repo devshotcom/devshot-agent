@@ -29,33 +29,37 @@
 
 set -eux
 
-# ── 1. Network hardening (mirrors desktop.sh) ──────────────────────────
-# Two execution contexts to satisfy:
-#   - Docker BUILD: DNS is already wired by the daemon, /etc/resolv.conf
-#     is read-only bind-mount, no eth0 (build runs in a network ns the
-#     builder owns). Every step here must `|| true` so the build doesn't
-#     abort with "Read-only file system".
+# ── 1. Network hardening ──────────────────────────────────────────────
+# Three execution contexts:
+#   - Docker BUILD: DNS is wired by the daemon, /etc/resolv.conf is a
+#     read-only bind-mount, eth0 already has a routable address.
+#   - build-templates.sh chroot: outer script populated /etc/resolv.conf
+#     with public DNS, eth0 inherits the Docker bridge.
 #   - Live bake VM: QGA recipe fires ~1s after kernel boot, well before
-#     busybox-init finishes networking, so we manually bring eth0 up,
-#     run udhcpc, and write a known-good resolv.conf — otherwise every
-#     apk fetch fails with "DNS: transient error".
-sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
-sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
-ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true
-udhcpc -i eth0 -t 5 -n -q 2>/dev/null || true
-# Best-effort resolv.conf write — silently no-ops in Docker build where
-# the file is read-only. Live VM path picks up the new nameservers.
-printf 'options single-request-reopen\nnameserver 10.0.2.3\nnameserver 1.1.1.1\n' > /etc/resolv.conf 2>/dev/null || true
-# Retry apk update up to ~30s — Docker build usually succeeds on
-# iteration 1 (network already live); live bake rides out slirp warmup.
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  if apk update 2>&1 | grep -q 'OK:'; then
-    echo "[recipe] apk update succeeded on iteration $i"
-    break
-  fi
-  echo "[recipe] apk update attempt $i failed, retrying..."
-  sleep 2
-done
+#     busybox-init finishes networking. eth0 is down; no resolv.conf.
+#
+# Probe first: if apk update already works, networking is fine and we
+# must NOT touch eth0 — udhcpc's deconfig hook on lease-failure poisons
+# DNS in the chroot/docker contexts (no DHCP server, lease fails, the
+# default-script wipes the routing state). Only run the manual bring-up
+# in the live VM, which is the only context where the probe will fail.
+echo 'options single-request-reopen' >> /etc/resolv.conf 2>/dev/null || true
+echo 'nameserver 1.1.1.1'              >> /etc/resolv.conf 2>/dev/null || true
+if ! apk update 2>&1 | grep -q 'OK:'; then
+  echo "[recipe] apk update failed cold — assuming live bake VM, bringing eth0 up"
+  sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
+  sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
+  ip link set eth0 up 2>/dev/null || ifconfig eth0 up 2>/dev/null || true
+  udhcpc -i eth0 -t 5 -n -q 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if apk update 2>&1 | grep -q 'OK:'; then
+      echo "[recipe] apk update succeeded on iteration $i"
+      break
+    fi
+    echo "[recipe] apk update attempt $i failed, retrying..."
+    sleep 2
+  done
+fi
 
 # ── 2. Packages ────────────────────────────────────────────────────────
 # tigervnc:        Xvnc binary — same VNC server desktop uses.
