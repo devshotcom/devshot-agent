@@ -105,6 +105,17 @@ chmod 0755 /usr/local/bin/wp
 mkdir -p /var/www
 chown nginx:nginx /var/www
 
+# --- Shared desktop surface -----------------------------------------
+# The public homepage maps Desktop, Web App, Code Editor, and Terminal
+# to the same WordPress VM. Reuse the canonical desktop recipe so the
+# LAMP template exposes Xvnc on :5900 without maintaining a second copy
+# of the Openbox/tint2/launcher setup.
+[ -f /tmp/recipe.d/desktop.sh ] || {
+  echo "ERROR: /tmp/recipe.d/desktop.sh missing — build-lamp-matrix must stage the shared desktop recipe" >&2
+  exit 1
+}
+/bin/sh /tmp/recipe.d/desktop.sh
+
 # --- phpswitch: one-shot fastcgi_pass swap ---------------------------
 # `phpswitch <app> <version>` rewrites the active vhost to point at a
 # different FPM pool. All three pools are already running, so this is
