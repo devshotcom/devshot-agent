@@ -188,6 +188,10 @@ UPSTREAM_VERSION=$(grep -m1 -E '^# *devshot:upstream_version=' /recipe.sh \
   | sed -E 's|^# *devshot:upstream_version=||' || true)
 [ -z "$UPSTREAM_VERSION" ] && UPSTREAM_VERSION=""
 
+MEMORY_MB=$(grep -m1 -E '^# *devshot:memory_mb=' /recipe.sh \
+  | sed -E 's|^# *devshot:memory_mb=||' || true)
+[ -z "$MEMORY_MB" ] && MEMORY_MB=0
+
 BASE_PATH_FOR_MANIFEST="devshot-guest-base.qcow2"
 [ -n "$BASE_TEMPLATE" ] && BASE_PATH_FOR_MANIFEST="devshot-guest-${BASE_TEMPLATE}.qcow2"
 
@@ -208,6 +212,7 @@ cat > "/output/devshot-guest-${OUTPUT_NAME}.json" <<MANIFEST
   "size_bytes": ${SIZE},
   "exit_code": 0,
   "exposed_ports": ${EXPOSED_PORTS},
+  "memory_mb": ${MEMORY_MB},
   "intermediate": ${INTERMEDIATE},
   "base_template": "${BASE_TEMPLATE}",
   "upstream_version": "${UPSTREAM_VERSION}"
