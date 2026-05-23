@@ -160,7 +160,6 @@ jobs:
 
   # ── Direct QEMU backend: Linux x86_64 ──────────────────────────────────
   build-vmm-qemu-amd64:
-    needs: build-dom0-amd64
     # Same self-hosted runner as build-dom0-amd64.
     runs-on: [self-hosted, Linux, X64]
     steps:
@@ -211,8 +210,8 @@ jobs:
 
           mkdir -p .build/lamp templates/lamp
 
-          docker pull anticipatercom/devshot:amd64-${{ github.sha }}
-          cid="$(docker create anticipatercom/devshot:amd64-${{ github.sha }})"
+          docker pull anticipatercom/devshot:amd64
+          cid="$(docker create anticipatercom/devshot:amd64)"
           trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
           docker cp "$cid:/xen/devshot-guest-base.qcow2" .build/lamp/devshot-guest-base.qcow2
 
@@ -236,7 +235,7 @@ jobs:
           provenance: false
           push: true
           build-args: |
-            BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
+            BASE_IMAGE=anticipatercom/devshot:amd64
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
           tags: |
