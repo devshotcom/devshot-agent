@@ -152,7 +152,8 @@ jobs:
           # the most expensive layers (kernel, xen, android rootfs) on
           # the next run because they all land in the final image too.
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min
+          # Cache export is best-effort; the image push above is the deploy artifact.
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min,ignore-error=true
           tags: |
             anticipatercom/devshot:amd64
             anticipatercom/devshot:amd64-${{ github.sha }}
@@ -214,7 +215,7 @@ jobs:
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
           tags: |
             anticipatercom/devshot:amd64-kvm
             anticipatercom/devshot:amd64-kvm-${{ github.sha }}
