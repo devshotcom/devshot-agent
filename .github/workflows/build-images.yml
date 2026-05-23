@@ -205,6 +205,29 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Bake WordPress public demo template
+        run: |
+          set -euo pipefail
+
+          mkdir -p .build/lamp templates/lamp
+
+          docker pull anticipatercom/devshot:amd64-${{ github.sha }}
+          cid="$(docker create anticipatercom/devshot:amd64-${{ github.sha }})"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/xen/devshot-guest-base.qcow2" .build/lamp/devshot-guest-base.qcow2
+
+          MATRIX_FILTER='^wp-6\.9$' \
+            bash roles/dom0/files/build-lamp-matrix.sh .build/lamp recipes/lamp
+
+          cp .build/lamp/devshot-guest-lamp-shared.qcow2 templates/lamp/
+          cp .build/lamp/devshot-guest-lamp-shared.json templates/lamp/
+          cp .build/lamp/devshot-guest-lamp-wp-6.9.qcow2 templates/lamp/
+          cp .build/lamp/devshot-guest-lamp-wp-6.9.json templates/lamp/
+          cp .build/lamp/lamp-matrix.lock.json templates/lamp/
+
+          echo "WordPress public demo templates:"
+          ls -lh templates/lamp/
+
       - uses: docker/build-push-action@v6
         with:
           context: .
