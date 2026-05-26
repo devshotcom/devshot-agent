@@ -329,6 +329,7 @@ command_args="/opt/openvscode-server/out/server-main.js \
   --host 0.0.0.0 --port 8080 \
   --without-connection-token \
   --disable-telemetry \
+  --disable-workspace-trust \
   --user-data-dir /home/devshot/.openvscode-server/data \
   --server-data-dir /home/devshot/.openvscode-server \
   --default-folder $DEFAULT_FOLDER"
