@@ -43,11 +43,6 @@ for ver in 82 83 84; do
 done
 apk add --no-cache $PKGS
 
-# The editor and PHP-FPM intentionally share one workload user. These
-# VMs are disposable dev environments, and keeping generated app files
-# under the same UID prevents VS Code save failures in /var/www.
-id -u devshot >/dev/null 2>&1 || adduser -D -s /bin/bash devshot
-
 # composer's apk wrapper depends on php84 and installs /usr/bin/php as
 # a symlink there. We want `php` to land on php83 because php83 is what
 # each app's FPM pool also uses by default — same engine across CLI
@@ -60,8 +55,8 @@ for ver in 82 83 84; do
   mkdir -p /run/php-fpm${ver}
   POOL=/etc/php${ver}/php-fpm.d/www.conf
   sed -i \
-    -e "s|^user = .*|user = devshot|" \
-    -e "s|^group = .*|group = devshot|" \
+    -e "s|^user = .*|user = nginx|" \
+    -e "s|^group = .*|group = nginx|" \
     -e "s|^listen = .*|listen = /run/php-fpm${ver}/php-fpm.sock|" \
     -e "s|^;\?listen.owner = .*|listen.owner = nginx|" \
     -e "s|^;\?listen.group = .*|listen.group = nginx|" \
@@ -108,7 +103,7 @@ chmod 0755 /usr/local/bin/wp
 
 # --- /var/www stage --------------------------------------------------
 mkdir -p /var/www
-chown devshot:devshot /var/www
+chown nginx:nginx /var/www
 
 # --- Shared desktop surface -----------------------------------------
 # The public homepage maps Desktop, Web App, Code Editor, and Terminal
@@ -191,6 +186,7 @@ node /opt/openvscode-server/out/server-main.js --version | head -1
 
 # devshot user owns the editor state dir; variants will lay down
 # the per-app workspace settings on top of this.
+id -u devshot >/dev/null 2>&1 || adduser -D -s /bin/bash devshot
 mkdir -p /home/devshot/.openvscode-server/data/logs /home/devshot/projects
 mkdir -p /home/devshot/.openvscode-server/data/User
 mkdir -p /home/devshot/.openvscode-server/data/Machine
