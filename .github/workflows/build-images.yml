@@ -46,6 +46,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -102,6 +106,7 @@ jobs:
         run: |
           echo "── disk before cleanup ──────────────────────────────"
           df -h /
+          docker system df || true
           # On GH-hosted ubuntu-latest these dirs hold ~35 GiB of
           # toolchains we don't use; rm reclaims them. On self-hosted
           # (sharp-ada) they don't exist → no-op. Safe either way.
@@ -115,6 +120,9 @@ jobs:
           # Guard: only prune on a clean GH-hosted runner. Sharp-ada
           # has /var/lib/devshot from the prod orchestrator container —
           # pruning its images would destroy the running devshot:amd64-kvm.
+          # BuildKit cache is independent of running prod containers, so
+          # prune it on every runner before this disk-heavy image build.
+          sudo docker builder prune --all --force 2>/dev/null || true
           if [ ! -d /var/lib/devshot ]; then
             sudo docker image prune --all --force 2>/dev/null || true
             sudo apt-get clean 2>/dev/null || true
@@ -123,6 +131,7 @@ jobs:
           fi
           echo "── disk after cleanup ───────────────────────────────"
           df -h /
+          docker system df || true
 
       - uses: actions/checkout@v4
 
@@ -137,6 +146,10 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
 
       - uses: docker/build-push-action@v6
         with:
@@ -168,6 +181,7 @@ jobs:
         run: |
           echo "── disk before cleanup ──────────────────────────────"
           df -h /
+          docker system df || true
           # On GH-hosted ubuntu-latest these dirs hold ~35 GiB of
           # toolchains we don't use; rm reclaims them. On self-hosted
           # (sharp-ada) they don't exist → no-op. Safe either way.
@@ -181,6 +195,9 @@ jobs:
           # Guard: only prune on a clean GH-hosted runner. Sharp-ada
           # has /var/lib/devshot from the prod orchestrator container —
           # pruning its images would destroy the running devshot:amd64-kvm.
+          # BuildKit cache is independent of running prod containers, so
+          # prune it on every runner before this disk-heavy image build.
+          sudo docker builder prune --all --force 2>/dev/null || true
           if [ ! -d /var/lib/devshot ]; then
             sudo docker image prune --all --force 2>/dev/null || true
             sudo apt-get clean 2>/dev/null || true
@@ -189,6 +206,7 @@ jobs:
           fi
           echo "── disk after cleanup ───────────────────────────────"
           df -h /
+          docker system df || true
 
       - uses: actions/checkout@v4
 
@@ -203,6 +221,10 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
 
       - name: Bake WordPress public demo template
         run: |

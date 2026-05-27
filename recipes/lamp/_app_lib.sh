@@ -338,17 +338,8 @@ NGINX
 finalize_app_bake() {
   install_lamp_launcher
 
-  chown -R nginx:nginx /var/www
-  chmod -R u+w \
-    /var/www/wordpress/wp-content 2>/dev/null \
-    || true
-  chmod -R u+w \
-    /var/www/typo3/var \
-    /var/www/typo3/public/typo3temp \
-    /var/www/typo3/public/typo3conf 2>/dev/null || true
-  chmod -R u+w \
-    /var/www/shopware/var \
-    /var/www/shopware/public 2>/dev/null || true
+  chown -R devshot:devshot /var/www
+  chmod -R u+rwX,go+rX /var/www
 
   # Vendor test suites + .git mirrors ship with composer create-project.
   # None are needed at runtime.
