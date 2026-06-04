@@ -41,6 +41,8 @@ npm run build || true   # best-effort prebuild of .next cache; dev still recompi
 cat > /usr/local/bin/start-studio <<'LAUNCHER'
 #!/bin/sh
 # Start the Next.js dev server (hot reload). -d runs detached and returns.
+# A sane PATH so this works under supervise-daemon's minimal environment too.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 detached=0
 [ "${1-}" = "-d" ] && detached=1
 cd /var/www/studio
@@ -60,33 +62,28 @@ chmod 0755 /usr/local/bin/start-studio
 cat > /etc/init.d/devshot-studio <<'INITD'
 #!/sbin/openrc-run
 
+name="devshot-studio"
 description="DevShot Studio app (next dev, hot reload on :3000)"
+
+# Supervised (not a hand-rolled `nohup … &`): supervise-daemon keeps the dev
+# server alive and AUTO-RESTARTS it on crash. The public readiness probe hits
+# :3000 — an unsupervised server that died at boot would otherwise leave the
+# visitor stuck on "booting" forever with no recovery. `rc-service
+# devshot-studio status` then reports the real state, which the boot screen
+# surfaces. Runs in the foreground (start-studio without -d) so the supervisor
+# tracks the actual process; stdout/stderr go to the log the boot screen tails.
+supervisor=supervise-daemon
+command="/usr/local/bin/start-studio"
+command_user="devshot:devshot"
+pidfile="/run/devshot-studio.pid"
+output_log="/tmp/studio-dev.log"
+error_log="/tmp/studio-dev.log"
+respawn_delay=3
+respawn_max=0
 
 depend() {
     need net
-    after networking
-}
-
-start() {
-    ebegin "Starting Studio dev server"
-    /usr/local/bin/start-studio -d
-    eend $?
-}
-
-stop() {
-    ebegin "Stopping Studio dev server"
-    pkill -f 'next dev' 2>/dev/null || true
-    pkill -f 'next-server' 2>/dev/null || true
-    eend 0
-}
-
-status() {
-    if pgrep -f 'next' >/dev/null 2>&1; then
-        einfo "running"
-        return 0
-    fi
-    einfo "stopped"
-    return 3
+    after networking firewall
 }
 INITD
 chmod +x /etc/init.d/devshot-studio
