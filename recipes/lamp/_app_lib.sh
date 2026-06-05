@@ -246,6 +246,18 @@ ENV
     -n
   ./bin/console user:change-password admin --password="${LAMP_ADMIN_PASSWORD}" -n
   ./bin/console assets:install
+
+  # Bake the official Shopware 6 developer docs into the image so the Studio
+  # agent can ground its plugin/theme/bugfix work in the real guidance — it is
+  # instructed to consult these plus the core under vendor/shopware before
+  # coding. A sibling of the project (not under /var/www/shopware) so it never
+  # pollutes the agent's in-project file searches; the agent greps it by
+  # absolute path. --depth 1 keeps the bake lean and finalize_app_bake strips
+  # the .git mirror. Best-effort: a transient clone failure must not abort the
+  # (expensive) Shopware template bake — the agent then falls back to the core.
+  git clone --depth 1 https://github.com/shopware/docs.git /var/www/shopware-docs \
+    || echo "WARN: shopware/docs clone failed — Studio agent will rely on core code only"
+
   set_editor_workspace /var/www/shopware
 }
 
