@@ -48,7 +48,12 @@ on:
 
 concurrency:
   group: build-images-${{ github.ref }}
-  cancel-in-progress: true
+  # Do NOT cancel an in-flight image build when a newer push lands. Every
+  # monorepo release tag pushes to this repo's `main`, so they all share one
+  # concurrency group — cancel-in-progress let a rapid run of release tags
+  # abort each other's image builds, leaving the registry stuck on a stale
+  # image (the "agent/orchestrator never updates" bug). Queue instead.
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -152,6 +157,8 @@ jobs:
               max-parallelism = 1
 
       - uses: docker/build-push-action@v6
+        id: build_dom0
+        continue-on-error: true
         with:
           context: .
           file: docker/Dockerfile.dom0-x86
@@ -166,6 +173,22 @@ jobs:
           # the next run because they all land in the final image too.
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
           # Cache export is best-effort; the image push above is the deploy artifact.
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min,ignore-error=true
+          tags: |
+            anticipatercom/devshot:amd64
+            anticipatercom/devshot:amd64-${{ github.sha }}
+      # Retry once on a transient Docker Build Cloud / Hub flake (builder
+      # graceful_stop, registry 400 on layer PUT). If this second attempt
+      # also fails the job fails (no continue-on-error here).
+      - uses: docker/build-push-action@v6
+        if: steps.build_dom0.outcome == 'failure'
+        with:
+          context: .
+          file: docker/Dockerfile.dom0-x86
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min,ignore-error=true
           tags: |
             anticipatercom/devshot:amd64
@@ -250,6 +273,25 @@ jobs:
           ls -lh templates/lamp/
 
       - uses: docker/build-push-action@v6
+        id: build_vmm
+        continue-on-error: true
+        with:
+          context: .
+          file: docker/Dockerfile.vmm-qemu-x86
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          build-args: |
+            BASE_IMAGE=anticipatercom/devshot:amd64
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
+          tags: |
+            anticipatercom/devshot:amd64-kvm
+            anticipatercom/devshot:amd64-kvm-${{ github.sha }}
+      # Retry once on a transient Docker Build Cloud / Hub flake. The bake step
+      # above already produced its artifacts, so only the push is re-attempted.
+      - uses: docker/build-push-action@v6
+        if: steps.build_vmm.outcome == 'failure'
         with:
           context: .
           file: docker/Dockerfile.vmm-qemu-x86
