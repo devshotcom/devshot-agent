@@ -272,6 +272,31 @@ jobs:
           echo "WordPress public demo templates:"
           ls -lh templates/lamp/
 
+          # ── Publish boot artifacts for the LAMP rebake ──────────────────
+          # lamp-rebake.yml (monorepo) pulls boot/devshot-guest-base.qcow2 from
+          # THIS repo as the base it overlays each variant on. The base is
+          # already extracted above (.build/lamp/); also pull the domU kernel,
+          # then commit both to boot/. Pushed with the workflow's GITHUB_TOKEN
+          # (contents:write) — which does NOT re-trigger workflows, so no rebuild
+          # loop. This replaces the old arm64-only extract-boot-artifacts job
+          # (disabled below): without it boot/ is never published and the nightly
+          # rebake's base-pull 404s, so lamp-sw-6.7 et al. never get baked.
+          mkdir -p boot
+          cp .build/lamp/devshot-guest-base.qcow2 boot/devshot-guest-base.qcow2
+          docker cp "$cid:/xen/boot/Image-domu" boot/Image-domu 2>/dev/null \
+            || docker cp "$cid:/xen/Image" boot/Image-domu 2>/dev/null \
+            || echo "WARN: Image-domu not found in image (boot/ will lack the kernel)"
+          ls -lh boot/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add boot/
+          if git diff --cached --quiet; then
+            echo "boot artifacts unchanged — nothing to commit"
+          else
+            git commit -m "Update boot artifacts (guest base + Image-domu) from ${GITHUB_SHA::8}"
+            git push origin HEAD:main || echo "WARN: boot/ push failed (will retry next build)"
+          fi
+
       - uses: docker/build-push-action@v6
         id: build_vmm
         continue-on-error: true
