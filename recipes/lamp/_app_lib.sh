@@ -13,8 +13,19 @@ LAMP_ADMIN_EMAIL="${LAMP_ADMIN_EMAIL:-admin@example.com}"
 install_lamp_launcher() {
   cat > /usr/local/bin/start-lamp <<'LAUNCHER'
 #!/bin/sh
-for svc in mariadb php-fpm82 php-fpm83 php-fpm84 nginx openvscode-server; do
-  rc-service "$svc" status >/dev/null 2>&1 || rc-service "$svc" start || true
+# Belt-and-suspenders nudge for the services OpenRC already boots. Only the
+# DEFAULT php-fpm (8.3) is touched — 8.2/8.4 start on demand via phpswitch, so
+# we don't pay 3x FPM startup + RAM here. Each start is retried once.
+for svc in mariadb php-fpm83 nginx openvscode-server; do
+  rc-service "$svc" status >/dev/null 2>&1 && continue
+  rc-service "$svc" start >/dev/null 2>&1 || rc-service "$svc" start >/dev/null 2>&1 || true
+done
+# Wait for MariaDB's socket so a cold first HTTP hit doesn't 500 on a DB query
+# (it settles on its own after; this just smooths the first request).
+i=0
+while [ "$i" -lt 20 ]; do
+  [ -S /run/mysqld/mysqld.sock ] && break
+  i=$((i + 1)); sleep 0.5
 done
 echo "lamp stack ready"
 echo "PHP versions available: 8.2, 8.3, 8.4 (default 8.3; switch with phpswitch)"

@@ -121,10 +121,12 @@ chown devshot:devshot /var/www
 }
 /bin/sh /tmp/recipe.d/desktop.sh
 
-# --- phpswitch: one-shot fastcgi_pass swap ---------------------------
+# --- phpswitch: start-on-demand + fastcgi_pass swap -----------------
 # `phpswitch <app> <version>` rewrites the active vhost to point at a
-# different FPM pool. All three pools are already running, so this is
-# just a config edit + nginx reload — no service restart cascade.
+# different FPM pool. Only the DEFAULT pool (8.3) auto-starts at boot —
+# booting all three is slow and RAM-heavy on a small VM — so phpswitch
+# starts the requested pool on demand first, then swaps the socket and
+# reloads nginx.
 cat > /usr/local/bin/phpswitch <<'SWITCH'
 #!/bin/sh
 set -eu
@@ -134,6 +136,7 @@ app=$1; ver=$2
 case "$ver" in 82|83|84) ;; *) usage;; esac
 conf=/etc/nginx/http.d/$app.conf
 [ -f "$conf" ] || { echo "no vhost for app '$app'" >&2; exit 3; }
+rc-service "php-fpm$ver" status >/dev/null 2>&1 || rc-service "php-fpm$ver" start
 sed -i "s|/run/php-fpm[0-9]*/php-fpm.sock|/run/php-fpm$ver/php-fpm.sock|" "$conf"
 nginx -t && rc-service nginx reload >/dev/null 2>&1 || nginx -s reload
 echo "$app -> php8.${ver#8}"
@@ -413,10 +416,12 @@ SVC
 chmod +x /etc/init.d/openvscode-server
 
 # --- OpenRC services auto-start on boot ------------------------------
+# Only the DEFAULT php-fpm (8.3) boots — running all three pools spins up
+# 3× the FPM masters/workers, which on a small VM both slows the boot (more
+# services to start before the app answers HTTP) and burns RAM that the app
+# itself needs. 8.2/8.4 are installed and start on demand via `phpswitch`.
 rc-update add mariadb default
-rc-update add php-fpm82 default
 rc-update add php-fpm83 default
-rc-update add php-fpm84 default
 rc-update add nginx default
 rc-update add openvscode-server default
 
