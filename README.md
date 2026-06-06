@@ -18,9 +18,16 @@ release tags whose commit is not reachable from `origin/main`.
 curl -fsSL https://devshot.com/install.sh | bash
 ```
 
-Or grab a copy-paste `docker run` from
+For Docker-free native Xen on Debian/Ubuntu x86_64 bare metal:
+
+```bash
+curl -fsSL https://console.devshot.com/install-xen.sh | sh
+sudo devshot up --auth-key=ds_<key> --target=linux-amd64-xen-baremetal
+```
+
+Or grab a copy-paste install command from
 [console.devshot.com](https://console.devshot.com) → **Servers** →
-**Add Server** — it selects the right image for your host.
+**Add Server** — it selects the right installer for your host.
 
 ## Docker Images
 
@@ -214,6 +221,6 @@ Stripped (`-ldflags="-s -w"`), statically linked (`CGO_ENABLED=0`).
 
 ## Build Info
 
-Auto-deployed by CI from [devshotcom/devshot@f20e5b09b9f9c290be331289415790434052a4c2](https://github.com/devshotcom/devshot/commit/f20e5b09b9f9c290be331289415790434052a4c2).
+Auto-deployed by CI from [devshotcom/devshot@cbd6ca84bd28ba206b13a3b84672ed6573a269f8](https://github.com/devshotcom/devshot/commit/cbd6ca84bd28ba206b13a3b84672ed6573a269f8).
 
-Last built: 2026-06-06T12:37:31Z
+Last built: 2026-06-06T13:09:25Z
