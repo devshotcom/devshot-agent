@@ -21,8 +21,9 @@ set -eux
 apk update
 # nodejs/npm for Next.js; gcompat so openvscode-server's optional glibc
 # .node modules (watcher/spdlog/vsda) dlopen cleanly under musl; wget/tar
-# for the editor tarball.
-apk add --no-cache nodejs npm gcompat ca-certificates wget tar
+# for the editor tarball. chromium (+swiftshader for GPU-less headless +
+# ttf-freefont) powers inspect_preview's real screenshot for the multimodal agent.
+apk add --no-cache nodejs npm gcompat ca-certificates wget tar chromium chromium-swiftshader ttf-freefont
 
 # --- Next.js starter at /var/www/studio ------------------------------
 # create-next-app@latest at bake time → always the current starter.
