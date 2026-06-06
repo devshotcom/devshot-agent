@@ -249,7 +249,7 @@ jobs:
             [worker.oci]
               max-parallelism = 1
 
-      - name: Bake WordPress public demo template
+      - name: Bake public LAMP Studio templates
         run: |
           set -euo pipefail
 
@@ -260,16 +260,18 @@ jobs:
           trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
           docker cp "$cid:/xen/devshot-guest-base.qcow2" .build/lamp/devshot-guest-base.qcow2
 
-          MATRIX_FILTER='^wp-6\.9$' \
+          MATRIX_FILTER='^(wp-6\.9|sw-6\.7)$' \
             bash roles/dom0/files/build-lamp-matrix.sh .build/lamp recipes/lamp
 
           cp .build/lamp/devshot-guest-lamp-shared.qcow2 templates/lamp/
           cp .build/lamp/devshot-guest-lamp-shared.json templates/lamp/
           cp .build/lamp/devshot-guest-lamp-wp-6.9.qcow2 templates/lamp/
           cp .build/lamp/devshot-guest-lamp-wp-6.9.json templates/lamp/
+          cp .build/lamp/devshot-guest-lamp-sw-6.7.qcow2 templates/lamp/
+          cp .build/lamp/devshot-guest-lamp-sw-6.7.json templates/lamp/
           cp .build/lamp/lamp-matrix.lock.json templates/lamp/
 
-          echo "WordPress public demo templates:"
+          echo "Public LAMP Studio templates:"
           ls -lh templates/lamp/
 
           # ── Publish boot artifacts for the LAMP rebake ──────────────────
