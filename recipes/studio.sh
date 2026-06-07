@@ -37,6 +37,31 @@ npx --yes create-next-app@latest studio --yes --use-npm
 # Warm the dependency tree / Next binary so the first request after boot
 # compiles fast rather than also resolving modules.
 cd /var/www/studio
+
+# --- Asset prefix for the path-based public proxy --------------------
+# The preview is served behind /api/public/p/<vm>/<port>/, but Next.js loads
+# its runtime chunks/fonts/CSS from the ORIGIN ROOT (/_next/...) by default —
+# which, inside the proxied iframe, resolves to the console origin and 404s
+# every asset (blank/unstyled preview). Point Next's assetPrefix at the per-VM
+# proxy path so every emitted /_next/... URL routes back through the proxy to
+# this VM. The value can't be baked (it depends on the VM name) — start-studio
+# exports DEVSHOT_ASSET_PREFIX per-VM and `next dev` reads it at launch. Replace
+# any starter config so there's a single next.config Next will read.
+rm -f next.config.js next.config.mjs next.config.ts
+cat > next.config.mjs <<'NEXTCONFIG'
+// Managed by the DevShot Studio recipe — serves build assets under the per-VM
+// public-proxy path. DEVSHOT_ASSET_PREFIX is exported by start-studio from this
+// VM's xenstore vm-name; unset in a plain `next build`, so config stays default.
+const assetPrefix = process.env.DEVSHOT_ASSET_PREFIX || undefined;
+
+/** @type {import('next').NextConfig} */
+const nextConfig = assetPrefix
+  ? { assetPrefix, images: { path: `${assetPrefix}/_next/image` } }
+  : {};
+
+export default nextConfig;
+NEXTCONFIG
+
 npm run build || true   # best-effort prebuild of .next cache; dev still recompiles
 
 cat > /usr/local/bin/start-studio <<'LAUNCHER'
@@ -49,6 +74,43 @@ detached=0
 cd /var/www/studio
 LOG="${LOG:-/tmp/studio-dev.log}"
 PORT="${PORT:-3000}"
+
+# Derive the public-proxy asset prefix from this VM's name so Next.js emits its
+# runtime /_next/... chunk/font/CSS URLs under /api/public/p/<vm>/<PORT>/...
+# instead of the iframe-origin root (which 404s behind the path proxy). The VM
+# name lives in xenstore: real xenstored under Xen, the 9p FileXenstore file
+# tree (mounted at $XS_ROOT by start-agent.sh) under QEMU. Both are root-owned
+# 0600 (the 9p files carry the orchestrator's uid), and this launcher runs as
+# the unprivileged `devshot` user — so read through the sandbox's passwordless
+# sudo rather than fail the perms check.
+read_xs_value() {
+    if [ -e /proc/xen/xenbus ]; then
+        _domid="$(sudo -n xenstore-read /local/domain/self/domid 2>/dev/null \
+            || xenstore-read /local/domain/self/domid 2>/dev/null || echo 0)"
+        sudo -n xenstore-read "/local/domain/${_domid}/data/$1" 2>/dev/null \
+            || xenstore-read "/local/domain/${_domid}/data/$1" 2>/dev/null || true
+    else
+        _xf="${XS_ROOT:-/tmp/xenstore}/local__domain__1__data__$1"
+        sudo -n cat "$_xf" 2>/dev/null || cat "$_xf" 2>/dev/null || true
+    fi
+}
+# The 9p share / xenstored may settle just after this service starts, so poll
+# briefly; fall back to no prefix (degraded, not hung) rather than block boot.
+VM_NAME=""
+i=0
+while [ "$i" -lt 15 ]; do
+    VM_NAME="$(read_xs_value vm-name)"
+    [ -n "$VM_NAME" ] && break
+    i=$((i + 1))
+    sleep 1
+done
+if [ -n "$VM_NAME" ]; then
+    export DEVSHOT_ASSET_PREFIX="/api/public/p/${VM_NAME}/${PORT}"
+    echo "Studio asset prefix: $DEVSHOT_ASSET_PREFIX"
+else
+    echo "WARN: vm-name not found in xenstore — assets may 404 behind the proxy" >&2
+fi
+
 # Bind 0.0.0.0 so the console public proxy can reach it; pass through the
 # project's dev script (Turbopack/webpack) with host+port.
 if [ "$detached" = "1" ]; then
