@@ -27,7 +27,15 @@ apply_tunnel_host_alias() {
 if [ -e /proc/xen/xenbus ]; then
     # Xen DomU: real xenstored talking over xenbus
     export XS_REAL=1
-    SELF_DOMID="$(xenstore-read /local/domain/self/domid 2>/dev/null || true)"
+    # A DomU's xenbus connection is rooted at /local/domain/<self>, so a
+    # connection-relative read of "domid" returns this guest's own domid.
+    # Prefer it: the absolute "/local/domain/self/domid" alias returns ENOENT
+    # under cxenstored (the impl on the bare-metal Xen pool hosts), which left
+    # DOMID unset → defaulted to "1" → agent read the wrong launch-nonce path →
+    # LAUNCH_NOT_AUTHORIZED → guest never connected. Keep the self alias as a
+    # fallback for xenstore impls that support it.
+    SELF_DOMID="$(xenstore-read domid 2>/dev/null || true)"
+    [ -n "$SELF_DOMID" ] || SELF_DOMID="$(xenstore-read /local/domain/self/domid 2>/dev/null || true)"
     [ -n "$SELF_DOMID" ] && export DOMID="$SELF_DOMID"
 else
     # Non-Xen: QEMU user-net exposes the parent orchestrator as 10.0.2.2.

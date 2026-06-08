@@ -25,28 +25,52 @@ apk update
 # ttf-freefont) powers inspect_preview's real screenshot for the multimodal agent.
 apk add --no-cache nodejs npm gcompat ca-certificates wget tar chromium chromium-swiftshader ttf-freefont
 
+# E2E browser-testing harness deps: puppeteer-core drives the chromium above so the
+# agent's run_e2e tool can PROVE functionality (clicks/inputs/assertions), not just
+# that a page renders. Installed into a fixed /opt path at BAKE time (network is
+# available here) so it works OFFLINE on the network-locked runtime VM. puppeteer-core
+# ships NO browser of its own (PUPPETEER_SKIP_DOWNLOAD=1; it uses the apk chromium),
+# so this stays small. The runner (.devshot/e2e-runner.cjs) requires it by absolute path.
+install -d /opt/devshot-e2e
+( cd /opt/devshot-e2e && npm init -y >/dev/null 2>&1 && PUPPETEER_SKIP_DOWNLOAD=1 npm install --no-audit --no-fund --omit=dev puppeteer-core )
+
 # --- Next.js starter at /var/www/studio ------------------------------
 # create-next-app@latest at bake time → always the current starter.
 # --yes accepts defaults (TypeScript + ESLint + Tailwind + App Router);
 # --use-npm pins the package manager. NOTE: we deliberately do NOT build
 # or prune — the VM runs `next dev`.
-mkdir -p /var/www
+# Build the starter AS the devshot user — the dev server, editor, and (at
+# runtime) the agent's vm-exec all run as devshot, so building as devshot makes
+# the WHOLE project tree devshot-owned from the start. No build-as-root +
+# chown-the-result: a fresh `npm install` mid-session can't leave root-owned
+# node_modules the dev server can't read. /var/www is created devshot-owned so
+# the app user can populate its own project dir; the build runs from a script
+# file so the nested next.config heredoc needs no `su` quoting.
+# NOTE: at BAKE the recipe runs as root (the bakery uses QGA ExecSimple
+# directly), so this `su` is what drops to devshot here.
+install -d -o devshot -g devshot /var/www
+cat > /tmp/devshot-build-studio.sh <<'BUILDSTUDIO'
+#!/bin/sh
+set -eux
+export HOME=/home/devshot
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# create-next-app@latest at bake time → always the current starter. --yes accepts
+# defaults (TypeScript + ESLint + Tailwind + App Router); --use-npm pins the
+# package manager. We deliberately do NOT prune — the VM runs `next dev`.
 cd /var/www
 npx --yes create-next-app@latest studio --yes --use-npm
-
-# Warm the dependency tree / Next binary so the first request after boot
-# compiles fast rather than also resolving modules.
 cd /var/www/studio
 
 # --- Asset prefix for the path-based public proxy --------------------
-# The preview is served behind /api/public/p/<vm>/<port>/, but Next.js loads
-# its runtime chunks/fonts/CSS from the ORIGIN ROOT (/_next/...) by default —
-# which, inside the proxied iframe, resolves to the console origin and 404s
-# every asset (blank/unstyled preview). Point Next's assetPrefix at the per-VM
-# proxy path so every emitted /_next/... URL routes back through the proxy to
-# this VM. The value can't be baked (it depends on the VM name) — start-studio
-# exports DEVSHOT_ASSET_PREFIX per-VM and `next dev` reads it at launch. Replace
-# any starter config so there's a single next.config Next will read.
+# The preview is served behind /api/public/p/<vm>/<port>/, but Next.js loads its
+# runtime chunks/fonts/CSS from the ORIGIN ROOT (/_next/...) by default — which,
+# inside the proxied iframe, resolves to the console origin and 404s every asset
+# (blank/unstyled preview). Point Next's assetPrefix at the per-VM proxy path so
+# every emitted /_next/... URL routes back through the proxy to this VM. The value
+# can't be baked (it depends on the VM name) — start-studio exports
+# DEVSHOT_ASSET_PREFIX per-VM and `next dev` reads it at launch. Replace any
+# starter config so there's a single next.config Next will read.
 rm -f next.config.js next.config.mjs next.config.ts
 cat > next.config.mjs <<'NEXTCONFIG'
 // Managed by the DevShot Studio recipe — serves build assets under the per-VM
@@ -62,7 +86,19 @@ const nextConfig = assetPrefix
 export default nextConfig;
 NEXTCONFIG
 
-npm run build || true   # best-effort prebuild of .next cache; dev still recompiles
+# Pre-install the libraries a "make it beautiful" build almost always reaches for
+# so the agent NEVER has to `npm install` them at runtime (a freshly-installed dep
+# isn't hot-resolved by Turbopack, and weaker models import without installing it
+# → "Module not found" white screens).
+npm install --save lucide-react framer-motion clsx tailwind-merge class-variance-authority || true
+
+# Warm .next so the first request after boot compiles fast; dev still recompiles.
+npm run build || true
+BUILDSTUDIO
+chmod +x /tmp/devshot-build-studio.sh
+su devshot -c /tmp/devshot-build-studio.sh
+rm -f /tmp/devshot-build-studio.sh
+cd /var/www/studio
 
 cat > /usr/local/bin/start-studio <<'LAUNCHER'
 #!/bin/sh
@@ -85,7 +121,11 @@ PORT="${PORT:-3000}"
 # sudo rather than fail the perms check.
 read_xs_value() {
     if [ -e /proc/xen/xenbus ]; then
-        _domid="$(sudo -n xenstore-read /local/domain/self/domid 2>/dev/null \
+        # Relative "domid" read works where the absolute self alias returns
+        # ENOENT (cxenstored). See docker/start-agent.sh for the full why.
+        _domid="$(sudo -n xenstore-read domid 2>/dev/null \
+            || xenstore-read domid 2>/dev/null \
+            || sudo -n xenstore-read /local/domain/self/domid 2>/dev/null \
             || xenstore-read /local/domain/self/domid 2>/dev/null || echo 0)"
         sudo -n xenstore-read "/local/domain/${_domid}/data/$1" 2>/dev/null \
             || xenstore-read "/local/domain/${_domid}/data/$1" 2>/dev/null || true
@@ -171,6 +211,12 @@ rm /tmp/openvscode.tar.gz
 node /opt/openvscode-server/out/server-main.js --version | head -1
 
 # Editor profile: Dark Modern, no welcome, trust off (it's a throwaway VM).
+# Written AS devshot (it's devshot's home) so the editor's user-data dir is
+# devshot-owned and openvscode (which runs as devshot) can write runtime state
+# into it — no chown needed.
+cat > /tmp/devshot-oc-settings.sh <<'OCSETTINGS'
+#!/bin/sh
+set -eux
 mkdir -p /home/devshot/.openvscode-server/data/User /home/devshot/.openvscode-server/data/Machine
 cat > /home/devshot/.openvscode-server/data/User/settings.json <<'SETTINGS'
 {
@@ -253,11 +299,16 @@ cat > /home/devshot/.openvscode-server/data/User/settings.json <<'SETTINGS'
   }
 }
 SETTINGS
+OCSETTINGS
+chmod +x /tmp/devshot-oc-settings.sh
+su devshot -c /tmp/devshot-oc-settings.sh
+rm -f /tmp/devshot-oc-settings.sh
 
 # The editor opens the studio project; the agent and editor share these files.
 echo /var/www/studio > /etc/openvscode-default-folder
-# Let the devshot user (editor) and root (agent vm-exec) both work the tree.
-chown -R devshot:devshot /home/devshot /var/www/studio
+# No chown: the project tree (built above) and the editor's user-data dir are
+# already devshot-owned, and vm-exec runs as devshot at runtime (see
+# handleVMExec) — so devshot (editor + agent) owns everything it touches.
 install -o devshot -g devshot -m 0644 /dev/null /var/log/openvscode-server.log
 
 cat > /etc/init.d/openvscode-server <<'SVC'
@@ -290,7 +341,8 @@ chmod +x /etc/init.d/openvscode-server
 rc-update add openvscode-server default
 
 # --- Cleanup ---------------------------------------------------------
-rm -rf /root/.npm /tmp/* /var/cache/apk/*
+# npm/npx ran as devshot, so the package cache is under devshot's home now.
+rm -rf /home/devshot/.npm /home/devshot/.cache /root/.npm /tmp/* /var/cache/apk/*
 
 echo "=== Studio recipe complete ==="
 node --version
