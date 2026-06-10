@@ -335,6 +335,18 @@ write_nginx_vhost() {
   # somewhere sane; the other apps live on dedicated ports.
   [ "$app" = "wordpress" ] && default_marker=" default_server"
 
+  # Shopware (Symfony) resolves the request host from HTTP_HOST and matches it
+  # against the baked sales-channel domain (http://localhost) — any other Host
+  # gets a 400. On a pool VM every reach path carries a non-localhost Host
+  # (dom0 vm-app-probe, the claim-gate readiness curl, the public preview
+  # proxy), so the storefront 400'd them all and Studio/Shopware never went
+  # ready (claim → probe-fail → destroy loop). Force HTTP_HOST=localhost at
+  # the fastcgi boundary — same override pattern as the httpoxy HTTP_PROXY
+  # line — so the storefront serves for ANY incoming Host. TYPO3's equivalent
+  # is trustedHostsPattern='.*' in install_typo3; WordPress is host-agnostic.
+  host_override=""
+  [ "$app" = "shopware" ] && host_override='fastcgi_param HTTP_HOST "localhost";'
+
   cat > /etc/nginx/http.d/${app}.conf <<NGINX
 server {
   listen ${port}${default_marker};
@@ -348,6 +360,7 @@ server {
     include /etc/nginx/fastcgi.conf;
     fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     fastcgi_param HTTP_PROXY "";
+    ${host_override}
   }
   location ~ /\\.ht { deny all; }
 }
