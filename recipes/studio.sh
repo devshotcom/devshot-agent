@@ -62,6 +62,25 @@ cd /var/www
 npx --yes create-next-app@latest studio --yes --use-npm
 cd /var/www/studio
 
+# --- Clean the create-next-app default cruft -------------------------
+# The default starter ships a branded welcome page.tsx that references
+# /next.svg + /vercel.svg, plus public/{next,vercel,file,globe,window}.svg.
+# Once a real app is built those are orphaned and the dev server 404s them —
+# noise weaker models fixate on every turn ("/next.svg is a 404 but that's
+# fine…"). Ship a clean, neutral starting page and drop the branding SVGs so a
+# fresh Studio app has ZERO create-next-app default cruft for the agent to chase.
+rm -f public/next.svg public/vercel.svg public/file.svg public/globe.svg public/window.svg
+cat > app/page.tsx <<'STARTPAGE'
+export default function Home() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center gap-3 p-8 text-center">
+      <h1 className="text-2xl font-semibold tracking-tight">Your app is ready</h1>
+      <p className="text-sm text-gray-500">Describe a change in the chat to start building.</p>
+    </main>
+  );
+}
+STARTPAGE
+
 # --- Asset prefix for the path-based public proxy --------------------
 # The preview is served behind /api/public/p/<vm>/<port>/, but Next.js loads its
 # runtime chunks/fonts/CSS from the ORIGIN ROOT (/_next/...) by default — which,
