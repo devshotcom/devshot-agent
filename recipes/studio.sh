@@ -70,6 +70,9 @@ cd /var/www/studio
 # fine…"). Ship a clean, neutral starting page and drop the branding SVGs so a
 # fresh Studio app has ZERO create-next-app default cruft for the agent to chase.
 rm -f public/next.svg public/vercel.svg public/file.svg public/globe.svg public/window.svg
+# The run_e2e harness writes .devshot/e2e-runner.cjs into the project each run;
+# git-ignore it so it never lands in the user's commits (auto-commit, spec 080).
+printf '\n# DevShot run_e2e harness (regenerated each run)\n.devshot/\n' >> .gitignore
 cat > app/page.tsx <<'STARTPAGE'
 export default function Home() {
   return (
