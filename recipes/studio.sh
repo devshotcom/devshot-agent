@@ -111,11 +111,28 @@ NEXTCONFIG
 # Pre-install the libraries a "make it beautiful" build almost always reaches for
 # so the agent NEVER has to `npm install` them at runtime (a freshly-installed dep
 # isn't hot-resolved by Turbopack, and weaker models import without installing it
-# → "Module not found" white screens).
-npm install --save lucide-react framer-motion clsx tailwind-merge class-variance-authority || true
+# → "Module not found" white screens). NO `|| true`: these are a hard requirement
+# (the agent system prompt promises they are pre-installed), network is available
+# at bake time, and a half-installed tree must never publish — `set -eux` aborts
+# the bake on failure.
+npm install --save lucide-react framer-motion clsx tailwind-merge class-variance-authority
 
 # Warm .next so the first request after boot compiles fast; dev still recompiles.
+# Best-effort (|| true): a build miss is a COMPILE concern, not a dependency one
+# (dev recompiles on demand), so it must not gate the dep-completeness check below.
 npm run build || true
+
+# --- Validate complete deps so the runtime install branch is DEAD (spec 090) ---
+# start-studio runs a BLOCKING `npm install` at boot iff node_modules/.bin/next is
+# absent — a 30-120s cold-boot tax. Baking node_modules is what makes that branch
+# unreachable; assert it HERE so an incomplete bake fails LOUD at build time
+# instead of silently shipping a template that reinstalls on every boot. Same
+# checks start-studio (.bin/next) and spec 082's restore (`npm ls`) gate on, so
+# "satisfied" means the same thing everywhere. Runs as devshot (this script's
+# user) — the perms the dev server sees.
+test -x node_modules/.bin/next || { echo "FATAL: node_modules/.bin/next missing after bake — template would reinstall on every boot" >&2; exit 1; }
+npm ls --depth=0 >/dev/null 2>&1 || { echo "FATAL: npm ls reports unsatisfied deps after bake:" >&2; npm ls --depth=0 >&2; exit 1; }
+echo "Studio template deps validated: node_modules/.bin/next present, npm ls clean"
 BUILDSTUDIO
 chmod +x /tmp/devshot-build-studio.sh
 su devshot -c /tmp/devshot-build-studio.sh
@@ -132,6 +149,16 @@ detached=0
 cd /var/www/studio
 LOG="${LOG:-/tmp/studio-dev.log}"
 PORT="${PORT:-3000}"
+
+# Boot-phase timing (spec 089). /proc/uptime is seconds since KERNEL boot, so
+# these markers also expose how long OpenRC took to reach this service — the gap
+# the console's claim→ready timing can't see from outside the VM. They append to
+# $LOG, which the boot screen tails and the console boot-probe harvests, so a
+# slow stage (xenstore settle, a cold `npm install`, dev-server launch) shows up
+# as a real timestamp instead of the boot screen's synthetic ones.
+boot_ts() { awk '{printf "%.1f", $1}' /proc/uptime 2>/dev/null || printf '?'; }
+boot_phase() { echo "[boot +$(boot_ts)s] $*" >> "$LOG"; }
+boot_phase "start-studio: launching (port $PORT)"
 
 # Derive the public-proxy asset prefix from this VM's name so Next.js emits its
 # runtime /_next/... chunk/font/CSS URLs under /api/public/p/<vm>/<PORT>/...
@@ -172,16 +199,21 @@ if [ -n "$VM_NAME" ]; then
 else
     echo "WARN: vm-name not found in xenstore — assets may 404 behind the proxy" >&2
 fi
+boot_phase "xenstore vm-name resolved after ${i}s: ${VM_NAME:-<none>}"
 
-# Dependency preflight. node_modules can go missing — a `git clean -fxd`, a
-# half-finished restore, or a connect-a-repo project switch leaves it (and
-# node_modules/.bin/next) absent. Without this, `npm run dev` just prints
-# "sh: next: not found", the supervisor respawns it every 3s forever
-# (respawn_max=0), the app NEVER binds :3000, and the boot screen / preview
-# hangs at "Starting the app server…". Install first when the dev binary is
-# missing — npm ci when a lockfile is present (fast, deterministic), else
-# npm install. Output streams to $LOG so the boot screen shows progress.
+# Dependency preflight — a last-resort RUNTIME net, NOT a boot-path expectation.
+# The bake guarantees a complete node_modules (spec 090 fails the build if
+# node_modules/.bin/next is missing or `npm ls` is unsatisfied), so on a
+# correctly-baked template this branch is DEAD at boot. It survives only for a
+# LIVE VM that loses node_modules mid-session — a `git clean -fxd`, a
+# connect-a-repo project switch — where `next dev` genuinely cannot serve and,
+# without this, the supervisor would respawn "sh: next: not found" every 3s
+# forever (respawn_max=0) and hang the preview. Install when the dev binary is
+# missing — npm ci with a lockfile (fast, deterministic), else npm install.
+# Output streams to $LOG and is announced via boot_phase (spec 089) so a cold
+# install is loudly visible, never a silent stall.
 if [ ! -x node_modules/.bin/next ]; then
+    boot_phase "deps MISSING (node_modules/.bin/next absent) — npm install starting (cold boot will be slow)"
     echo "Studio deps missing (node_modules/.bin/next absent) — installing before dev server…"
     if [ -f package-lock.json ]; then
         npm ci --prefer-offline --no-audit --no-fund 2>&1 | tee -a "$LOG" \
@@ -189,10 +221,14 @@ if [ ! -x node_modules/.bin/next ]; then
     else
         npm install --prefer-offline --no-audit --no-fund 2>&1 | tee -a "$LOG"
     fi
+    boot_phase "npm install finished"
+else
+    boot_phase "deps present — skipping install"
 fi
 
 # Bind 0.0.0.0 so the console public proxy can reach it; pass through the
 # project's dev script (Turbopack/webpack) with host+port.
+boot_phase "launching next dev on :$PORT (first compile follows)"
 if [ "$detached" = "1" ]; then
     nohup npm run dev -- -H 0.0.0.0 -p "$PORT" > "$LOG" 2>&1 &
     echo "Studio dev server started — log: $LOG (listening on :$PORT)"
