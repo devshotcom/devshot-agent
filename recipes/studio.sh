@@ -151,6 +151,24 @@ else
     echo "WARN: vm-name not found in xenstore — assets may 404 behind the proxy" >&2
 fi
 
+# Dependency preflight. node_modules can go missing — a `git clean -fxd`, a
+# half-finished restore, or a connect-a-repo project switch leaves it (and
+# node_modules/.bin/next) absent. Without this, `npm run dev` just prints
+# "sh: next: not found", the supervisor respawns it every 3s forever
+# (respawn_max=0), the app NEVER binds :3000, and the boot screen / preview
+# hangs at "Starting the app server…". Install first when the dev binary is
+# missing — npm ci when a lockfile is present (fast, deterministic), else
+# npm install. Output streams to $LOG so the boot screen shows progress.
+if [ ! -x node_modules/.bin/next ]; then
+    echo "Studio deps missing (node_modules/.bin/next absent) — installing before dev server…"
+    if [ -f package-lock.json ]; then
+        npm ci --prefer-offline --no-audit --no-fund 2>&1 | tee -a "$LOG" \
+            || npm install --prefer-offline --no-audit --no-fund 2>&1 | tee -a "$LOG"
+    else
+        npm install --prefer-offline --no-audit --no-fund 2>&1 | tee -a "$LOG"
+    fi
+fi
+
 # Bind 0.0.0.0 so the console public proxy can reach it; pass through the
 # project's dev script (Turbopack/webpack) with host+port.
 if [ "$detached" = "1" ]; then
