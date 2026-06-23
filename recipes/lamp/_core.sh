@@ -176,6 +176,19 @@ rm -f /etc/nginx/http.d/default.conf
 # stubs Alpine needs to dlopen those modules cleanly.
 apk add --no-cache nodejs npm gcompat
 
+# E2E browser-testing harness — parity with the studio recipe so EVERY LAMP-matrix
+# flavor (Shopware/WordPress/TYPO3/plain LAMP) can run the agent's run_e2e tool.
+# Without it, run_e2e fails on every Shopware build with "puppeteer-core not
+# installed — rebake the studio image" and the self-driving agent burns its whole
+# continuation budget retrying a tool it cannot fix from the workspace. chromium +
+# swiftshader give a GPU-less headless browser; puppeteer-core ships NO browser of
+# its own (PUPPETEER_SKIP_DOWNLOAD=1 → it drives the apk chromium) so it works
+# OFFLINE on the network-locked runtime VM. The runner (.devshot/e2e-runner.cjs)
+# requires it by absolute path at /opt/devshot-e2e/node_modules/puppeteer-core.
+apk add --no-cache chromium chromium-swiftshader ttf-freefont
+install -d /opt/devshot-e2e
+( cd /opt/devshot-e2e && npm init -y >/dev/null 2>&1 && PUPPETEER_SKIP_DOWNLOAD=1 npm install --no-audit --no-fund --omit=dev puppeteer-core )
+
 OPENVSCODE_VERSION="${OPENVSCODE_VERSION:-1.95.2}"
 ARCH=$(uname -m)
 case "$ARCH" in
