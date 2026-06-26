@@ -268,6 +268,35 @@ INITD
 chmod +x /etc/init.d/devshot-studio
 rc-update add devshot-studio default
 
+# --- devshot-perms: webroot writable to devshot ON EVERY BOOT (spec 110) ----
+# The dev server, editor, and the agent's vm-exec all run as devshot. If any
+# project file drifts to another owner — a root-context step, a churned-VM
+# restore — devshot can't write .next/node_modules and the dev server fails. This
+# boots BEFORE the dev server + editor and re-asserts devshot ownership + write
+# bits at the OS level, so it needs neither a console deploy nor an agent turn.
+# Drift-targeted (find ! -user) so a clean tree is a stat-walk, not a rewrite;
+# -xdev so it never crosses into another mount. (Restore-time drift is handled
+# separately in the restore command itself — this covers boot/bake drift.)
+cat > /etc/init.d/devshot-perms <<'PERMS'
+#!/sbin/openrc-run
+name="devshot-perms"
+description="Make /var/www owned by and writable to devshot before the app starts"
+depend() {
+    after localmount
+    before devshot-studio openvscode-server
+}
+start() {
+    ebegin "Normalizing /var/www ownership for devshot"
+    find /var/www -xdev \! -user devshot -exec chown devshot:devshot {} + 2>/dev/null
+    find /var/www -xdev \! -group devshot -exec chgrp devshot {} + 2>/dev/null
+    find /var/www -xdev -type d \! -perm -u+w -exec chmod u+rwX {} + 2>/dev/null
+    find /var/www -xdev -type f \! -perm -u+w -exec chmod u+rw {} + 2>/dev/null
+    eend 0
+}
+PERMS
+chmod +x /etc/init.d/devshot-perms
+rc-update add devshot-perms default
+
 # --- openvscode-server (in-browser editor on :8080) ------------------
 # Same Gitpod fork + system-Node approach the LAMP recipe uses (see
 # recipes/lamp/_core.sh for the gcompat rationale). Opened to the studio

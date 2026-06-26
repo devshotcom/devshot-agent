@@ -438,6 +438,37 @@ rc-update add php-fpm83 default
 rc-update add nginx default
 rc-update add openvscode-server default
 
+# --- devshot-perms: webroot writable to devshot ON EVERY BOOT (spec 110) ----
+# The app kernel (Shopware) AND the agent both run as devshot. If any project
+# file drifts to another owner — a root-context step, a churned-VM restore — the
+# kernel can't write var/cache and EVERY bin/console dies at container compile
+# (the live "Application.php line 759" dead-kernel incident). This boots BEFORE
+# php-fpm/nginx/the editor and re-asserts devshot ownership + write bits at the
+# OS level, so it needs neither a console deploy nor an agent turn — the only
+# layer that recovers a VM whose kernel is already dead. Drift-targeted
+# (find ! -user) so a clean tree is a stat-walk, not a rewrite; -xdev so it never
+# crosses into another mount. (Restore-time drift is handled separately, in the
+# restore command itself — this covers boot/bake drift before the first turn.)
+cat > /etc/init.d/devshot-perms <<'PERMS'
+#!/sbin/openrc-run
+name="devshot-perms"
+description="Make /var/www owned by and writable to devshot before the app starts"
+depend() {
+    after localmount
+    before php-fpm83 nginx openvscode-server
+}
+start() {
+    ebegin "Normalizing /var/www ownership for devshot"
+    find /var/www -xdev \! -user devshot -exec chown devshot:devshot {} + 2>/dev/null
+    find /var/www -xdev \! -group devshot -exec chgrp devshot {} + 2>/dev/null
+    find /var/www -xdev -type d \! -perm -u+w -exec chmod u+rwX {} + 2>/dev/null
+    find /var/www -xdev -type f \! -perm -u+w -exec chmod u+rw {} + 2>/dev/null
+    eend 0
+}
+PERMS
+chmod +x /etc/init.d/devshot-perms
+rc-update add devshot-perms default
+
 # --- Launcher --------------------------------------------------------
 # Belt-and-suspenders nudge for the very-first-second case (OpenRC
 # already brings these up at boot via the runlevel adds above).
