@@ -258,6 +258,23 @@ ENV
   ./bin/console user:change-password admin --password="${LAMP_ADMIN_PASSWORD}" -n
   ./bin/console assets:install
 
+  # Pre-populate the Storefront vendor/ folder so a CUSTOM theme that inherits
+  # @Storefront can compile on the FIRST try. @Storefront's own SCSS imports
+  # `~vendor/bootstrap`, which only exists after the storefront npm install +
+  # copy-to-vendor step — without it the agent's first theme:compile dies on
+  # "cannot resolve ~vendor/bootstrap", an opaque wall a small model loops on.
+  # Internet is available at bake; strictly best-effort so a transient npm hiccup
+  # never aborts the (expensive) Shopware template bake.
+  sf_app="vendor/shopware/storefront/Resources/app/storefront"
+  if command -v npm >/dev/null 2>&1 && [ -d "$sf_app" ]; then
+    ( cd "$sf_app" \
+      && { npm ci --no-audit --no-fund || npm install --no-audit --no-fund; } \
+      && { [ -f copy-to-vendor.js ] && node copy-to-vendor.js || true; } ) \
+      || echo "WARN: storefront vendor bootstrap failed — a custom @Storefront theme may need 'npm ci && node copy-to-vendor.js' in $sf_app before theme:compile"
+  else
+    echo "WARN: npm or $sf_app missing — skipping storefront vendor bootstrap"
+  fi
+
   # Bake the official Shopware 6 developer docs into the image so the Studio
   # agent can ground its plugin/theme/bugfix work in the real guidance — it is
   # instructed to consult these plus the core under vendor/shopware before
@@ -268,6 +285,105 @@ ENV
   # (expensive) Shopware template bake — the agent then falls back to the core.
   git clone --depth 1 https://github.com/shopware/docs.git /var/www/shopware-docs \
     || echo "WARN: shopware/docs clone failed — Studio agent will rely on core code only"
+
+  # Bake a SHORT curated reference of the non-obvious Shopware gotchas that bite
+  # real storefront builds — symptom -> cause -> fix KNOWLEDGE the agent greps and
+  # then implements in its OWN way. This is deliberately NOT a copy-me plugin
+  # skeleton (that would template the one happy path and make the agent narrower);
+  # it is the same head-start a strong agent gets from front-loaded domain rules.
+  # The agent is pointed here from buildShopwareSystemPrompt.
+  cat > /var/www/shopware-patterns.md <<'PATTERNS'
+# Shopware 6 — build patterns & gotchas (symptom -> cause -> fix)
+
+This is reference KNOWLEDGE to inform code YOU write — never a template to copy.
+Read the entry you need (`grep -n <topic> /var/www/shopware-patterns.md`), then
+write the plugin yourself. For deeper API detail consult /var/www/shopware-docs or
+one definition file under vendor/shopware/core/<Area>; the storefront theme test
+fixtures at vendor/shopware/storefront/Resources (and, on dev checkouts,
+tests/unit/Storefront/Theme/fixtures) are good structural references.
+
+## Theme (SCSS-only, no JS build)
+- A theme plugin's `Resources/theme.json` declares `style` SCSS files and inherits
+  the parent; for a pure restyle use `"style": ["@Storefront", "app/storefront/src/scss/base.scss"]`
+  and `"script": ["@Storefront"]` (inherit-only) — do NOT add your own `script` entry
+  pointing at a relative `app/storefront/dist/` JS bundle that `theme:compile` does NOT
+  build. The compiler logs and skips a missing dist dir, but a non-`@Namespace`
+  style/script path it cannot resolve throws `Unable to resolve file <path>` (run
+  `build-storefront.sh`) and breaks the storefront. Keep `script` to `@Storefront` for a
+  pure restyle.
+- Put brand variables in `app/storefront/src/scss/overrides.scss` and load it BEFORE
+  `@StorefrontBootstrap` so your `$var: ... !default;` overrides actually win; put
+  component styling in `base.scss`. (overrides.scss before the bootstrap import is
+  the difference between your palette applying and being ignored.)
+- @Storefront's SCSS imports `~vendor/bootstrap`. On a fresh install that folder is
+  populated by the storefront npm build; it is PRE-BAKED here, but if a compile ever
+  fails on "cannot resolve ~vendor/bootstrap", run `npm ci && node copy-to-vendor.js`
+  in vendor/shopware/storefront/Resources/app/storefront.
+- Assign a brand-new theme with `bin/console theme:change --all <TechnicalName>`
+  (the theme.json "name"); that command ALSO compiles — do not add a separate
+  theme:compile right after. A standalone `theme:compile` is only for restyling an
+  ALREADY-assigned theme. `theme:change` takes the TECHNICAL name (theme.json "name"),
+  never a display name — this also avoids shell-quoting issues with `&`/spaces. After any compile run `cache:clear` ONCE and
+  RELOAD the preview (a stale `/theme/<hash>/css/all.css` 404 is a CACHE problem,
+  not a reason to recompile — recompiling just mints another hash).
+
+## Catalog seeding (idempotent, survives VM churn)
+- Seed ALL catalog/CMS data as CODE in the plugin install()/activate() lifecycle
+  (where `$this->container->get('product.repository')->upsert(...)` works) — NEVER
+  via admin API, raw SQL, or a MigrationStep (a MigrationStep has only a Doctrine
+  \Connection, no container). The DB is wiped on every fresh VM; only lifecycle code
+  re-seeds. A clean pattern is a `SeedRunner` service the plugin bootstrap calls.
+- Every seeded id is a DETERMINISTIC 32-char hex: `Uuid::fromStringToHex('prod-eth-yirg')`
+  (NOT `fromStringToBytes` — that does not exist) or `md5('...')`. Use it on NESTED
+  rows too — product_visibility and media have their own BINARY(16) ids; without a
+  deterministic id they get a fresh random id on every activate and DUPLICATE.
+- For a product to RENDER it needs AT MINIMUM: a `tax`, a gross+net `price` in
+  `Defaults::CURRENCY`, `stock`, a `categories` link to an active+visible category, AND
+  a `visibilities` entry for the Storefront sales channel — these are the fields whose
+  ABSENCE makes it invisible/unbuyable (a product carries many more). Null-check the
+  sales channel: `salesChannelRepository->search(...)->first()` can return null —
+  guard before `->getId()` and log/return rather than fatal.
+- PROVE idempotency: after install+activate, re-activate (or run the seeder twice in a
+  test) and confirm the product COUNT is unchanged. Do NOT rely on a `dal:count` CLI
+  (it is not present in every version) — count in PHP via the repository
+  (`$productRepo->search((new Criteria())->setLimit(1), $ctx)->getTotal()`) or a raw
+  `SELECT COUNT(*) FROM product`. A PHPUnit test asserting the count is stable across
+  two ensureSeeded() calls is the Cursor-grade move.
+
+## Media / images
+- `MediaService` may not be fetchable from the container by class id (Symfony services
+  are private by default unless the bundle exposes them). If
+  `$container->get(MediaService::class)` throws, register a PUBLIC alias for it in your
+  plugin `Resources/config/services.xml` and resolve by that id. A silent catch here is
+  why product covers come back as 0 — fail loud instead.
+- `mediaService.saveFile()` only creates the media row when the media id is null. With
+  a deterministic media id you must UPSERT the media entity row FIRST, then saveFile
+  onto it. Verify GD is available before generating real images.
+
+## CMS homepage
+- The product-slider block template calls `block.slots.getSlot('productSlider')`, so
+  that slot MUST be named exactly `productSlider`. Seeding it as `content` (the text
+  block's slot name) renders an EMPTY slider with `data-cms-element-id=""` even though
+  the resolver has the right product ids. Slot names are a block-template contract.
+- The home page loads via `CategoryRoute` using the sales channel's `homeCmsPageId`
+  plus a `homeSlotConfig` override (NOT `CmsRoute`). Leave `homeSlotConfig` null — a
+  non-null-but-empty override wipes your slots. Store slot config in the translation.
+
+## Debugging an empty render
+- If a listing/slider/CMS block is empty but data should exist, do NOT clear-cache-
+  and-hope. PROVE the data layer first with `repl_eval` (php): boot the kernel and
+  count products in the sales-channel context or resolve the CMS page and dump the
+  slot's product count. Rows server-side => the bug is RENDERING (wrong slot name,
+  missing visibility, stale theme hash), not data and not cache.
+- Never swallow exceptions in a seeder — log/re-throw per item so a broken sub-step
+  is visible. Re-read every file you just wrote and fix your own typos / unused
+  imports / missed brackets (php -l) before moving on.
+
+## Env (already configured on this image — for reference only)
+- A base `.env` exists, `APP_SECRET` is set, and `APP_ENV=prod` (no dev toolbar).
+  These are baked; you should not need to touch them. composer require/update need
+  the paid (internet) plan.
+PATTERNS
 
   set_editor_workspace /var/www/shopware
 }
