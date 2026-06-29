@@ -142,6 +142,100 @@ WantedBy=multi-user.target
 UNIT
 chroot "$ROOTFS" bash -c 'systemctl enable devshot-agent 2>/dev/null || true'
 
+# ── Host overload / qemu-nbd-leak watchdog (spec 121) ──────────────────────
+# INDEPENDENT of devshot-agent (the agent's own crash-loop is a failure mode it
+# can't police). devshot-agent is KillMode=process, so a crash-loop leaves its
+# qemu-nbd disk backends alive; they pile up, hold write-locks on the pool
+# qcow2s, and deadlock pool recovery ("Pool recovered: 0 VMs") until a reboot.
+# This watchdog reaps orphaned qemu-nbd (domain gone, process old enough that it
+# is not a VM mid-creation), kills stray agents, and alerts on overload.
+cat > "$ROOTFS/usr/local/sbin/devshot-host-watchdog.sh" <<'WATCHDOG'
+#!/bin/sh
+# devshot-host-watchdog — independent dom0 overload/leak guard (spec 121).
+set -u
+LOG=/xen/host-watchdog.log
+STATE=/run/devshot-host-watchdog.state
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG" 2>/dev/null; logger -t devshot-watchdog "$*" 2>/dev/null || true; }
+
+REAP_MIN_AGE="${WATCHDOG_REAP_MIN_AGE:-180}"      # only reap qemu-nbd older than this (s) — protects VMs mid-creation
+LOAD_MULT="${WATCHDOG_LOAD_MULT:-4}"              # alert when 1-min load > cores * this
+MIN_MEM_MB="${WATCHDOG_MIN_MEM_MB:-512}"          # alert when MemAvailable below this (MB)
+CRASHLOOP_DELTA="${WATCHDOG_CRASHLOOP_DELTA:-3}"  # alert when agent NRestarts jumps >= this per run
+DRY="${WATCHDOG_DRY_RUN:-0}"                      # 1 = log what it would kill, kill nothing
+
+XL=xl; command -v /usr/sbin/xl >/dev/null 2>&1 && XL=/usr/sbin/xl
+domains="$($XL list 2>/dev/null | awk 'NR>1{print $1}')"
+is_domain() { printf '%s\n' "$domains" | grep -qxF "$1"; }
+do_kill() { if [ "$DRY" = "1" ]; then log "DRY would kill pid=$1 ($2)"; else kill "$1" 2>/dev/null && log "killed pid=$1 ($2)"; fi; }
+
+# 1) Reap orphaned qemu-nbd (domain gone + old enough to not be mid-creation)
+reaped=0
+for pid in $(pgrep -x qemu-nbd 2>/dev/null); do
+  cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+  qcow="$(printf '%s' "$cmd" | grep -oE '/xen/guests/[^/,]+\.qcow2' | head -n1)"
+  [ -n "$qcow" ] || continue
+  name="$(basename "$qcow" .qcow2)"
+  is_domain "$name" && continue
+  age="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [ -n "$age" ] && [ "$age" -ge "$REAP_MIN_AGE" ] 2>/dev/null || continue
+  do_kill "$pid" "orphaned qemu-nbd disk=$qcow domain-absent age=${age}s"
+  reaped=$((reaped+1))
+done
+
+# 2) Kill stray /opt/devshot/agent processes that are not the managed MainPID
+mainpid="$(systemctl show devshot-agent -p MainPID --value 2>/dev/null || echo 0)"
+for pid in $(pgrep -f '/opt/devshot/agent' 2>/dev/null); do
+  [ "$pid" = "$mainpid" ] && continue
+  case "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" in
+    */opt/devshot/agent*) do_kill "$pid" "stray agent (MainPID=$mainpid)" ;;
+  esac
+done
+
+# 3) Overload / crash-loop alerts
+cores="$(nproc 2>/dev/null || echo 1)"
+load1="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+memmb="$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 999999)"
+restarts="$(systemctl show devshot-agent -p NRestarts --value 2>/dev/null || echo 0)"
+prev="$restarts"; [ -f "$STATE" ] && prev="$(cat "$STATE" 2>/dev/null || echo "$restarts")"  # baseline on first run (no false crashloop alert)
+printf '%s' "$restarts" > "$STATE" 2>/dev/null || true
+alert=""
+awk "BEGIN{exit !($load1 > $cores*$LOAD_MULT)}" 2>/dev/null && alert="$alert load1=$load1(>${cores}x${LOAD_MULT})"
+[ "$memmb" -lt "$MIN_MEM_MB" ] 2>/dev/null && alert="$alert MemAvail=${memmb}MB(<${MIN_MEM_MB})"
+[ $((restarts - prev)) -ge "$CRASHLOOP_DELTA" ] 2>/dev/null && alert="$alert agent-crashloop(+$((restarts-prev)))"
+if [ -n "$alert" ]; then
+  msg="OVERLOAD $(hostname):$alert cores=$cores reaped=$reaped"
+  log "ALERT $msg"
+  [ -f /xen/agent.env ] && . /xen/agent.env 2>/dev/null
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+    curl -s -m 8 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=WARN devshot $msg" >/dev/null 2>&1 || true
+  fi
+fi
+[ "$reaped" -gt 0 ] && log "reaped $reaped orphaned qemu-nbd"
+exit 0
+WATCHDOG
+chmod 755 "$ROOTFS/usr/local/sbin/devshot-host-watchdog.sh"
+
+cat > "$ROOTFS/etc/systemd/system/devshot-host-watchdog.service" <<'UNIT'
+[Unit]
+Description=DevShot dom0 overload / qemu-nbd-leak watchdog
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/devshot-host-watchdog.sh
+UNIT
+
+cat > "$ROOTFS/etc/systemd/system/devshot-host-watchdog.timer" <<'UNIT'
+[Unit]
+Description=Run the DevShot dom0 watchdog every 60s
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=10s
+[Install]
+WantedBy=timers.target
+UNIT
+chroot "$ROOTFS" bash -c 'systemctl enable devshot-host-watchdog.timer 2>/dev/null || true'
+
 # Xen device model symlinks (ARM64 HVM -- Xen looks for both paths)
 mkdir -p "$ROOTFS/usr/libexec" "$ROOTFS/usr/lib/xen/bin"
 ln -sf /usr/bin/qemu-system-aarch64 "$ROOTFS/usr/libexec/xen-qemu-system-i386"
