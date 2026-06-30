@@ -23,7 +23,7 @@ apk update
 # .node modules (watcher/spdlog/vsda) dlopen cleanly under musl; wget/tar
 # for the editor tarball. chromium (+swiftshader for GPU-less headless +
 # ttf-freefont) powers inspect_preview's real screenshot for the multimodal agent.
-apk add --no-cache nodejs npm gcompat ca-certificates wget tar chromium chromium-swiftshader ttf-freefont
+apk add --no-cache git nodejs npm gcompat ca-certificates wget tar chromium chromium-swiftshader ttf-freefont
 
 # E2E browser-testing harness deps: puppeteer-core drives the chromium above so the
 # agent's run_e2e tool can PROVE functionality (clicks/inputs/assertions), not just

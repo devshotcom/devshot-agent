@@ -16,7 +16,7 @@
 set -eux
 
 apk update
-apk add --no-cache nodejs npm ca-certificates
+apk add --no-cache git nodejs npm ca-certificates
 
 # Latest Next.js starter. npx pulls create-next-app@latest from npm at
 # bake time, so every rebuild picks up whatever's current. --yes accepts
