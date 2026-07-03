@@ -48,6 +48,38 @@ detect_platform() {
   fi
 }
 
+# ── Compute the sha256 of a file, portably (sha256sum or shasum -a 256).
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    printf ''
+  fi
+}
+
+# ── Verify a downloaded CLI before installing + root-running it (audit #18).
+#    DEVSHOT_CLI_SHA256 pins the hash from the docs; a <url>.sha256 sidecar is
+#    verified when present. Neither present → warn and proceed (TLS-only).
+verify_cli_integrity() {
+  file="$1"; url="$2"
+  actual="$(sha256_of "$file")"
+  if [ -z "$actual" ]; then
+    warn "no sha256 tool found — cannot verify CLI integrity"; return 0
+  fi
+  if [ -n "${DEVSHOT_CLI_SHA256:-}" ]; then
+    [ "$actual" = "$DEVSHOT_CLI_SHA256" ] || fatal "CLI integrity check FAILED — expected $DEVSHOT_CLI_SHA256, got $actual. Refusing to install."
+    ok "CLI integrity verified against pinned DEVSHOT_CLI_SHA256"; return 0
+  fi
+  expected="$(curl -fsSL "${url}.sha256" 2>/dev/null | awk '{print $1; exit}')"
+  if [ -n "$expected" ]; then
+    [ "$actual" = "$expected" ] || fatal "CLI integrity check FAILED against ${url}.sha256 — expected $expected, got $actual. Refusing to install."
+    ok "CLI integrity verified against published sha256 sidecar"; return 0
+  fi
+  warn "CLI integrity: no pin or .sha256 sidecar available — proceeding on TLS trust only (pin with DEVSHOT_CLI_SHA256=<hash>)."
+}
+
 install_cli() {
   [ -d "$DEVSHOT_BIN_DIR" ] || $SUDO mkdir -p "$DEVSHOT_BIN_DIR"
   CLI_PATH="$DEVSHOT_BIN_DIR/devshot"
@@ -59,6 +91,7 @@ install_cli() {
     cli_url="${DEVSHOT_CLI_URL:-${DEVSHOT_API_BASE%/}/devshot.sh}"
     info "Downloading CLI from $cli_url"
     curl -fsSL "$cli_url" -o "$TMP_CLI" || fatal "failed to fetch CLI from $cli_url"
+    verify_cli_integrity "$TMP_CLI" "$cli_url"
   fi
   $SUDO install -m 0755 "$TMP_CLI" "$CLI_PATH"
   rm -f "$TMP_CLI"

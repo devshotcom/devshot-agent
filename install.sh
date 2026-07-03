@@ -84,7 +84,18 @@ ensure_docker() {
   case "$PLATFORM" in
     linux|wsl)
       info "Installing Docker via the official get.docker.com script…"
-      curl -fsSL https://get.docker.com | $SUDO sh
+      # Download-then-run rather than piping curl straight into a root shell
+      # (audit #18): this lets us reject a truncated transfer or a captive-
+      # portal HTML page before executing anything as root.
+      docker_script="$(mktemp)"
+      if ! curl -fsSL https://get.docker.com -o "$docker_script"; then
+        rm -f "$docker_script"; fatal "failed to download the Docker install script"
+      fi
+      if [ ! -s "$docker_script" ] || ! head -c2 "$docker_script" | grep -q '#!'; then
+        rm -f "$docker_script"; fatal "Docker install script looks invalid (empty or not a script) — aborting"
+      fi
+      $SUDO sh "$docker_script"
+      rm -f "$docker_script"
       if ! id -nG "$(id -un)" 2>/dev/null | grep -qw docker; then
         $SUDO usermod -aG docker "$(id -un)" || true
         warn "Added $(id -un) to docker group — log out and back in, or run 'newgrp docker'"
@@ -137,6 +148,52 @@ install_cli() {
   ok "Installed: $CLI_PATH"
 }
 
+# ── Compute the sha256 of a file, portably (sha256sum or shasum -a 256).
+#    Prints the hex digest, or empty if no tool is available.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    printf ''
+  fi
+}
+
+# ── Verify the integrity of a freshly-downloaded CLI before we install and
+#    run it as root (audit #18). The trust model is otherwise TLS-only, so a
+#    compromised origin / on-path proxy could ship a malicious script. Two
+#    ways to verify, strongest first:
+#      1. DEVSHOT_CLI_SHA256=<hex>  — pin from the install docs (hard fail).
+#      2. <cli_url>.sha256 sidecar  — published next to the CLI (hard fail).
+#    If neither is available we warn and proceed (TLS-only) so existing
+#    installs keep working until the sidecar is published.
+verify_cli_integrity() {
+  file="$1"; url="$2"
+  actual="$(sha256_of "$file")"
+  if [ -z "$actual" ]; then
+    warn "no sha256 tool (sha256sum/shasum) found — cannot verify CLI integrity"
+    return 0
+  fi
+  if [ -n "${DEVSHOT_CLI_SHA256:-}" ]; then
+    if [ "$actual" != "$DEVSHOT_CLI_SHA256" ]; then
+      fatal "CLI integrity check FAILED — expected $DEVSHOT_CLI_SHA256, got $actual. Refusing to install."
+    fi
+    ok "CLI integrity verified against pinned DEVSHOT_CLI_SHA256"
+    return 0
+  fi
+  expected="$(curl -fsSL "${url}.sha256" 2>/dev/null | awk '{print $1; exit}')"
+  if [ -n "$expected" ]; then
+    if [ "$actual" != "$expected" ]; then
+      fatal "CLI integrity check FAILED against ${url}.sha256 — expected $expected, got $actual. Refusing to install."
+    fi
+    ok "CLI integrity verified against published sha256 sidecar"
+    return 0
+  fi
+  warn "CLI integrity: no pin or .sha256 sidecar available — proceeding on TLS trust only."
+  warn "  To enforce, re-run with DEVSHOT_CLI_SHA256=<sha256-from-docs>."
+}
+
 # ── Fetch the CLI script. If we're being run via curl|sh, the same
 #    domain serves /devshot. Local invocation falls back to the sibling
 #    devshot.sh in this repo.
@@ -154,6 +211,8 @@ fetch_cli() {
   if ! curl -fsSL "$cli_url" -o "$out"; then
     fatal "failed to fetch CLI from $cli_url"
   fi
+  # Verify BEFORE the caller installs it 0755 and root-runs it.
+  verify_cli_integrity "$out" "$cli_url"
 }
 
 # ── Print the next-steps banner ─────────────────────────────────────────
