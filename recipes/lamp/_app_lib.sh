@@ -333,6 +333,11 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
 - Shopware 6.7's product detail override is
   `Resources/views/storefront/page/content/product-detail.html.twig`. The similarly
   named `page/product-detail/product-detail.html.twig` path is not the page template.
+- Shopware 6.7's cart page override is
+  `Resources/views/storefront/page/checkout/cart/index.html.twig`, not
+  `page/checkout/cart.html.twig`. Category CTAs use
+  `seoUrl('frontend.navigation.page', {navigationId: categoryId})` or
+  `category.seoUrl`; `frontend.cms.page` expects a real CMS-page id, never a slug.
 
 ## Catalog seeding (idempotent, survives VM churn)
 - Seed ALL catalog/CMS data as CODE in the plugin install()/activate() lifecycle
@@ -365,6 +370,10 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   persisted media entity plus both `media` and `cover` assignments; a card/PDP with
   an empty image is a failed catalog. Verify listing and PDP with run_e2e
   `expectImagesLoaded`, then add a real product and assert it in `/checkout/cart`.
+- `public/media` is Shopware-managed global state. Never write there and never
+  replace Demostore media to fake theme ownership; owned assets stay below the
+  plugin's `src/Resources/public/` tree and product files are persisted through
+  FileSaver + MediaFile.
 - Prefer the core `FileSaver` service for lifecycle seeding; a plugin-owned public alias
   is still unavailable during that plugin's first install. UPSERT the deterministic
   media entity row FIRST, then persist the bundled MediaFile onto it. A silent catch
