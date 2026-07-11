@@ -303,14 +303,15 @@ fixtures at vendor/shopware/storefront/Resources (and, on dev checkouts,
 tests/unit/Storefront/Theme/fixtures) are good structural references.
 
 ## Theme (SCSS-only, no JS build)
-- A theme plugin's `Resources/theme.json` declares `style` SCSS files and inherits
-  the parent; for a pure restyle use `"style": ["@Storefront", "app/storefront/src/scss/base.scss"]`
-  and `"script": ["@Storefront"]` (inherit-only) — do NOT add your own `script` entry
-  pointing at a relative `app/storefront/dist/` JS bundle that `theme:compile` does NOT
-  build. The compiler logs and skips a missing dist dir, but a non-`@Namespace`
-  style/script path it cannot resolve throws `Unable to resolve file <path>` (run
-  `build-storefront.sh`) and breaks the storefront. Keep `script` to `@Storefront` for a
-  pure restyle.
+- Create every new theme with `bin/console theme:create <UpperCamelCaseName>` and
+  edit that canonical scaffold. Its bootstrap MUST extend Plugin AND implement
+  `Shopware\Storefront\Framework\ThemeInterface`. A plain active plugin with a
+  theme.json is not a registered theme: `theme:change` stays "Invalid theme name".
+  Never insert a row into the theme table to compensate.
+- On this Shopware 6.7 image, omit `@Plugins` from theme.json views/assets. For a
+  SCSS/Twig-only theme, omit `script` entirely; a custom script path requires a real
+  compiled `app/storefront/dist/` bundle from `build-storefront.sh`. Use
+  `"style": ["app/storefront/src/scss/overrides.scss", "@Storefront", "app/storefront/src/scss/base.scss"]`.
 - Put brand variables in `app/storefront/src/scss/overrides.scss` and load it BEFORE
   `@StorefrontBootstrap` so your `$var: ... !default;` overrides actually win; put
   component styling in `base.scss`. (overrides.scss before the bootstrap import is
@@ -319,13 +320,17 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   populated by the storefront npm build; it is PRE-BAKED here, but if a compile ever
   fails on "cannot resolve ~vendor/bootstrap", run `npm ci && node copy-to-vendor.js`
   in vendor/shopware/storefront/Resources/app/storefront.
-- Assign a brand-new theme with `bin/console theme:change --all <TechnicalName>`
-  (the theme.json "name"); that command ALSO compiles — do not add a separate
+- Assign a brand-new generated theme with `bin/console theme:change --all <TechnicalName>`;
+  the generated plugin name and theme.json "name" are the same technical name. That
+  command ALSO compiles — do not add a separate
   theme:compile right after. A standalone `theme:compile` is only for restyling an
   ALREADY-assigned theme. `theme:change` takes the TECHNICAL name (theme.json "name"),
   never a display name — this also avoids shell-quoting issues with `&`/spaces. After any compile run `cache:clear` ONCE and
   RELOAD the preview (a stale `/theme/<hash>/css/all.css` 404 is a CACHE problem,
   not a reason to recompile — recompiling just mints another hash).
+- Shopware 6.7's product detail override is
+  `Resources/views/storefront/page/content/product-detail.html.twig`. The similarly
+  named `page/product-detail/product-detail.html.twig` path is not the page template.
 
 ## Catalog seeding (idempotent, survives VM churn)
 - Seed ALL catalog/CMS data as CODE in the plugin install()/activate() lifecycle
@@ -343,12 +348,10 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   ABSENCE makes it invisible/unbuyable (a product carries many more). Null-check the
   sales channel: `salesChannelRepository->search(...)->first()` can return null —
   guard before `->getId()` and log/return rather than fatal.
-- PROVE idempotency: after install+activate, re-activate (or run the seeder twice in a
-  test) and confirm the product COUNT is unchanged. Do NOT rely on a `dal:count` CLI
-  (it is not present in every version) — count in PHP via the repository
-  (`$productRepo->search((new Criteria())->setLimit(1), $ctx)->getTotal()`) or a raw
-  `SELECT COUNT(*) FROM product`. A PHPUnit test asserting the count is stable across
-  two ensureSeeded() calls is the Cursor-grade move.
+- PROVE idempotency: call the Studio `shopware_check` tool with `check:"catalog"`,
+  re-run the seeder once, then call the tool again and require both total and
+  Storefront-visible counts to stay unchanged. Do not run `dal:count`, mysql/mariadb,
+  or temporary PDO/Kernel probes; the tool already handles versioned/binary IDs.
 
 ## Media / images
 - `MediaService` may not be fetchable from the container by class id (Symfony services
@@ -371,10 +374,11 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
 
 ## Debugging an empty render
 - If a listing/slider/CMS block is empty but data should exist, do NOT clear-cache-
-  and-hope. PROVE the data layer first with `repl_eval` (php): boot the kernel and
-  count products in the sales-channel context or resolve the CMS page and dump the
-  slot's product count. Rows server-side => the bug is RENDERING (wrong slot name,
-  missing visibility, stale theme hash), not data and not cache.
+  and-hope. Call `shopware_check {check:"all"}` directly. Its total vs
+  Storefront-visible product counts and category/PDP render status distinguish a
+  missing visibility/category relation from a Twig/theme failure. Never read `.env`,
+  print DATABASE_URL/APP_SECRET, boot a Kernel in php -r, or query Shopware with a
+  database CLI just to diagnose the storefront.
 - Never swallow exceptions in a seeder — log/re-throw per item so a broken sub-step
   is visible. Re-read every file you just wrote and fix your own typos / unused
   imports / missed brackets (php -l) before moving on.
