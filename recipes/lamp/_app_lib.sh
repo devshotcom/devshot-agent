@@ -314,8 +314,10 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   `"style": ["app/storefront/src/scss/overrides.scss", "@Storefront", "app/storefront/src/scss/base.scss"]`.
 - Put brand variables in `app/storefront/src/scss/overrides.scss` and load it BEFORE
   `@StorefrontBootstrap` so your `$var: ... !default;` overrides actually win; put
-  component styling in `base.scss`. (overrides.scss before the bootstrap import is
-  the difference between your palette applying and being ignored.)
+  a short import manifest in `base.scss`, with tokens/layout/components/pages in
+  separate partials. Compose substantial homepage sections from Twig includes.
+  (overrides.scss before the bootstrap import is the difference between your palette
+  applying and being ignored.)
 - @Storefront's SCSS imports `~vendor/bootstrap`. On a fresh install that folder is
   populated by the storefront npm build; it is PRE-BAKED here, but if a compile ever
   fails on "cannot resolve ~vendor/bootstrap", run `npm ci && node copy-to-vendor.js`
@@ -337,7 +339,11 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   (where `$this->container->get('product.repository')->upsert(...)` works) — NEVER
   via admin API, raw SQL, or a MigrationStep (a MigrationStep has only a Doctrine
   \Connection, no container). The DB is wiped on every fresh VM; only lifecycle code
-  re-seeds. A clean pattern is a `SeedRunner` service the plugin bootstrap calls.
+  re-seeds. Keep the implementation in `Setup/CatalogSeeder.php`. On FIRST install,
+  the plugin's own services.xml is not in the current compiled container yet: never
+  call `$this->container->get(CatalogSeeder::class)` there. Instantiate the seeder
+  with core repository/FileSaver services from `$this->container`; do not inline or
+  duplicate its payload in the bootstrap.
 - Every seeded id is a DETERMINISTIC 32-char hex: `Uuid::fromStringToHex('prod-eth-yirg')`
   (NOT `fromStringToBytes` — that does not exist) or `md5('...')`. Use it on NESTED
   rows too — product_visibility and media have their own BINARY(16) ids; without a
@@ -354,14 +360,15 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   or temporary PDO/Kernel probes; the tool already handles versioned/binary IDs.
 
 ## Media / images
-- `MediaService` may not be fetchable from the container by class id (Symfony services
-  are private by default unless the bundle exposes them). If
-  `$container->get(MediaService::class)` throws, register a PUBLIC alias for it in your
-  plugin `Resources/config/services.xml` and resolve by that id. A silent catch here is
-  why product covers come back as 0 — fail loud instead.
-- `mediaService.saveFile()` only creates the media row when the media id is null. With
-  a deterministic media id you must UPSERT the media entity row FIRST, then saveFile
-  onto it. Verify GD is available before generating real images.
+- Download the exact topical URLs returned by curate_images into
+  `Resources/public/img/products/` before install. Every visible product needs a
+  persisted media entity plus both `media` and `cover` assignments; a card/PDP with
+  an empty image is a failed catalog. Verify listing and PDP with run_e2e
+  `expectImagesLoaded`, then add a real product and assert it in `/checkout/cart`.
+- Prefer the core `FileSaver` service for lifecycle seeding; a plugin-owned public alias
+  is still unavailable during that plugin's first install. UPSERT the deterministic
+  media entity row FIRST, then persist the bundled MediaFile onto it. A silent catch
+  here is why product covers come back as 0 — fail loud instead.
 
 ## CMS homepage
 - The product-slider block template calls `block.slots.getSlot('productSlider')`, so
