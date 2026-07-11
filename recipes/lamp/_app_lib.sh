@@ -338,6 +338,14 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   `page/checkout/cart.html.twig`. Category CTAs use
   `seoUrl('frontend.navigation.page', {navigationId: categoryId})` or
   `category.seoUrl`; `frontend.cms.page` expects a real CMS-page id, never a slug.
+- For a from-scratch seeded homepage, use deterministic category/product ids directly
+  with `seoUrl` instead of querying repositories from a Twig global. If page data is
+  genuinely dynamic, subscribe to `NavigationPageLoadedEvent`, attach an `ArrayStruct`
+  with `$event->getPage()->addExtension(...)`, and read `page.extensions.<name>` in
+  Twig. Never replace `NavigationController` or query DAL inside a Twig extension.
+- Preserve Shopware's native offcanvas markup, data attributes, and storefront plugin
+  for mobile navigation. Do not inject an inline menu script. A truly custom
+  interaction needs a storefront JS entry, `build-storefront.sh`, and a real dist bundle.
 
 ## Catalog seeding (idempotent, survives VM churn)
 - Seed ALL catalog/CMS data as CODE in the plugin install()/activate() lifecycle
@@ -347,8 +355,10 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   re-seeds. Keep the implementation in `Setup/CatalogSeeder.php`. On FIRST install,
   the plugin's own services.xml is not in the current compiled container yet: never
   call `$this->container->get(CatalogSeeder::class)` there. Instantiate the seeder
-  with core repository/FileSaver services from `$this->container`; do not inline or
-  duplicate its payload in the bootstrap.
+  with core repository/FileSaver services from `$this->container`; the exact core
+  service id is `Shopware\Core\Content\Media\File\FileSaver::class`. Pass that FQCN
+  into the directly-instantiated seeder and do not grep service configs or invent a
+  plugin alias. Do not inline or duplicate the payload in the bootstrap.
 - Every seeded id is a DETERMINISTIC 32-char hex: `Uuid::fromStringToHex('prod-eth-yirg')`
   (NOT `fromStringToBytes` — that does not exist) or `md5('...')`. Use it on NESTED
   rows too — product_visibility and media have their own BINARY(16) ids; without a
@@ -365,6 +375,10 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   or temporary PDO/Kernel probes; the tool already handles versioned/binary IDs.
 
 ## Media / images
+- After any source URL is rejected for subject, bytes, size, or transport, the NEXT
+  tool call is `curate_images` for that exact failed slot and subject. Do not walk a
+  previously-curated list after a failure. A MIME/suffix mismatch is the one exception:
+  retry the same URL once with the suffix named by `download_image`.
 - Download the exact topical URLs returned by curate_images into
   `Resources/public/img/products/` before install. Every visible product needs a
   persisted media entity plus both `media` and `cover` assignments; a card/PDP with
