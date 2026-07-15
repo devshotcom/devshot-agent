@@ -1036,6 +1036,14 @@ TWIG
     {% endif %}
 {% endblock %}
 TWIG
+
+  # The bake runs as root under a restrictive umask, which left the staged
+  # skeleton UNREADABLE for the devshot user on the VM ("Permission denied" on
+  # the very first synced template, 2026-07-15) — install.sh could never run.
+  # The skeleton is public boilerplate: make the tree world-readable and
+  # directories traversable, and keep the parent /opt/devshot enterable.
+  chmod a+rx /opt/devshot 2>/dev/null || true
+  chmod -R a+rX "$base"
 }
 
 # install_typo3 <version>
