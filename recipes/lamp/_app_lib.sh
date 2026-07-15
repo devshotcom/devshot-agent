@@ -433,7 +433,609 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
   the paid (internet) plan.
 PATTERNS
 
+  bake_shopware_base_theme
+
   set_editor_workspace /var/www/shopware
+}
+
+# Spec 170 — bake the parametric flagship-theme skeleton + demo-catalog seeder.
+#
+# DELIBERATE REVERSAL of the spec-148 "knowledge, not template" stance for the
+# THEME SKELETON specifically: authoring ~15 boilerplate files from scratch on a
+# slow hosted model is where Shopware builds burned their hours, while the
+# skeleton content is exactly the verified spec-148 recipe. This stages FILES
+# ONLY under /opt/devshot (no DB mutations, no compile — zero risk to the
+# expensive Shopware bake); at build time the agent pulls it into the workspace
+# with ONE command (install.sh <BrandName>) and spends its steps on brand,
+# content, and imagery instead of plumbing. The knowledge docs above remain the
+# reference for everything beyond the skeleton.
+bake_shopware_base_theme() {
+  base=/opt/devshot/shopware-base-theme
+  plugin="$base/plugin/DevshotBase"
+  mkdir -p \
+    "$plugin/src/Setup" \
+    "$plugin/src/Resources/app/storefront/src/scss" \
+    "$plugin/src/Resources/public/fonts" \
+    "$plugin/src/Resources/public/img/products" \
+    "$plugin/src/Resources/views/storefront/layout/header" \
+    "$plugin/src/Resources/views/storefront/layout/footer" \
+    "$plugin/src/Resources/views/storefront/page/content"
+
+  cat > "$base/install.sh" <<'INSTALL'
+#!/bin/sh
+# DevShot Studio — install the baked base theme as a brand-named plugin.
+# Usage: sh /opt/devshot/shopware-base-theme/install.sh <UpperCamelBrandName>
+# Copies the skeleton into custom/plugins/<Name>, renames class/namespace/theme
+# to the brand, installs + activates the plugin (which seeds the demo catalog).
+# It does NOT compile: edit the brand tokens first, then run
+#   bin/console theme:change --all <Name>
+# exactly once.
+set -eu
+
+NAME="${1:-}"
+if ! printf %s "$NAME" | grep -Eq '^[A-Z][A-Za-z0-9]{2,40}$'; then
+  echo "usage: install.sh <UpperCamelBrandName> (letters/digits, starts uppercase, 3-41 chars)" >&2
+  exit 1
+fi
+LOWER=$(printf %s "$NAME" | tr 'A-Z' 'a-z')
+PROJECT=/var/www/shopware
+SRC=/opt/devshot/shopware-base-theme/plugin/DevshotBase
+DEST="$PROJECT/custom/plugins/$NAME"
+
+[ -d "$PROJECT" ] || { echo "shopware project not found at $PROJECT" >&2; exit 1; }
+[ -e "$DEST" ] && { echo "$DEST already exists — edit it directly instead of re-installing" >&2; exit 1; }
+
+cp -R "$SRC" "$DEST"
+# POSIX-safe in-place rename (busybox and BSD sed disagree on -i semantics).
+find "$DEST" -type f \( -name '*.php' -o -name '*.json' -o -name '*.twig' -o -name '*.scss' \) | while read -r f; do
+  sed "s/DevshotBase/$NAME/g; s/devshotbase/$LOWER/g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+done
+mv "$DEST/src/DevshotBase.php" "$DEST/src/$NAME.php"
+
+cd "$PROJECT"
+bin/console plugin:refresh
+bin/console plugin:install --activate "$NAME"
+bin/console assets:install
+echo "OK: $NAME installed and activated (demo catalog seeded)."
+echo "NEXT: 1) edit brand tokens: custom/plugins/$NAME/src/Resources/app/storefront/src/scss/{overrides.scss,_tokens.scss}"
+echo "      2) edit wordmark/footer/hero copy in src/Resources/views/storefront/"
+echo "      3) replace the sample catalog in src/Setup/CatalogSeeder.php, re-run plugin:install --activate $NAME"
+echo "      4) remove the --devshot-unbranded line from _tokens.scss LAST, then: bin/console theme:change --all $NAME"
+INSTALL
+  chmod +x "$base/install.sh"
+
+  cat > "$plugin/composer.json" <<'JSON'
+{
+  "name": "devshot/devshotbase",
+  "description": "DevShot Studio base theme - customize tokens, copy, and catalog",
+  "version": "1.0.0",
+  "type": "shopware-platform-plugin",
+  "license": "MIT",
+  "extra": {
+    "shopware-plugin-class": "DevshotBase\\DevshotBase",
+    "label": {
+      "en-GB": "DevshotBase Theme"
+    }
+  },
+  "autoload": {
+    "psr-4": {
+      "DevshotBase\\": "src/"
+    }
+  }
+}
+JSON
+
+  cat > "$plugin/src/DevshotBase.php" <<'PHP'
+<?php declare(strict_types=1);
+
+namespace DevshotBase;
+
+use DevshotBase\Setup\CatalogSeeder;
+use Shopware\Core\Framework\Context;
+use Shopware\Core\Framework\Plugin;
+use Shopware\Core\Framework\Plugin\Context\ActivateContext;
+use Shopware\Core\Framework\Plugin\Context\InstallContext;
+use Shopware\Storefront\Framework\ThemeInterface;
+
+class DevshotBase extends Plugin implements ThemeInterface
+{
+    public function install(InstallContext $installContext): void
+    {
+        parent::install($installContext);
+        $this->seedCatalog($installContext->getContext());
+    }
+
+    public function activate(ActivateContext $activateContext): void
+    {
+        parent::activate($activateContext);
+        $this->seedCatalog($activateContext->getContext());
+    }
+
+    // First-install rule: this plugin's own services are not in the compiled
+    // container yet, so instantiate the seeder with CORE services from the
+    // current container, passed as named arguments.
+    private function seedCatalog(Context $context): void
+    {
+        $seeder = new CatalogSeeder(
+            productRepository: $this->container->get('product.repository'),
+            categoryRepository: $this->container->get('category.repository'),
+            taxRepository: $this->container->get('tax.repository'),
+            salesChannelRepository: $this->container->get('sales_channel.repository'),
+        );
+        $seeder->seed($context);
+    }
+}
+PHP
+
+  cat > "$plugin/src/Setup/CatalogSeeder.php" <<'PHP'
+<?php declare(strict_types=1);
+
+namespace DevshotBase\Setup;
+
+use Shopware\Core\Defaults;
+use Shopware\Core\Framework\Context;
+use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
+
+/**
+ * Idempotent demo-catalog seeder (baked skeleton).
+ *
+ * EDIT the payloads below to the brand's REAL categories and products; keep the
+ * deterministic md5() ids so re-running install/activate never duplicates.
+ * Product imagery: bundle files under src/Resources/public/img/products and
+ * attach them via the media repository + FileSaver (see the "media" entries in
+ * /var/www/shopware-patterns.md). Failures must throw - never catch-and-continue
+ * in a lifecycle seeder.
+ */
+class CatalogSeeder
+{
+    public function __construct(
+        private readonly EntityRepository $productRepository,
+        private readonly EntityRepository $categoryRepository,
+        private readonly EntityRepository $taxRepository,
+        private readonly EntityRepository $salesChannelRepository,
+    ) {
+    }
+
+    public function seed(Context $context): void
+    {
+        $salesChannel = $this->salesChannelRepository->search(
+            (new Criteria())->addFilter(new EqualsFilter('typeId', Defaults::SALES_CHANNEL_TYPE_STOREFRONT)),
+            $context,
+        )->first();
+        if ($salesChannel === null) {
+            throw new \RuntimeException('CatalogSeeder: no Storefront sales channel found.');
+        }
+
+        $rootId = $salesChannel->getNavigationCategoryId();
+        $salesChannelId = $salesChannel->getId();
+        $taxId = $this->resolveTaxId($context);
+
+        $this->categoryRepository->upsert($this->categories($rootId), $context);
+        $this->productRepository->upsert($this->products($taxId, $salesChannelId), $context);
+    }
+
+    private function resolveTaxId(Context $context): string
+    {
+        $tax = $this->taxRepository->search(new Criteria(), $context)->first();
+        if ($tax !== null) {
+            return $tax->getId();
+        }
+        $taxId = md5('devshot-tax-standard');
+        $this->taxRepository->upsert([[
+            'id' => $taxId,
+            'name' => 'Standard rate',
+            'taxRate' => 19.0,
+        ]], $context);
+        return $taxId;
+    }
+
+    /**
+     * EDIT: rename to the brand's real collections. afterCategoryId chaining
+     * keeps the storefront nav in this exact order.
+     */
+    private function categories(string $rootId): array
+    {
+        $one = md5('devshot-cat-one');
+        $two = md5('devshot-cat-two');
+        $three = md5('devshot-cat-three');
+        return [
+            ['id' => $one, 'parentId' => $rootId, 'name' => 'Collection One', 'active' => true, 'visible' => true],
+            ['id' => $two, 'parentId' => $rootId, 'name' => 'Collection Two', 'active' => true, 'visible' => true, 'afterCategoryId' => $one],
+            ['id' => $three, 'parentId' => $rootId, 'name' => 'Collection Three', 'active' => true, 'visible' => true, 'afterCategoryId' => $two],
+        ];
+    }
+
+    /**
+     * EDIT: the brand's real products (names, numbers, prices, descriptions,
+     * category slugs). Every product already carries the assignments that make
+     * it RENDER: a tax, a gross/net price, stock, a category link, and a
+     * visibility row for the default Storefront sales channel.
+     */
+    private function products(string $taxId, string $salesChannelId): array
+    {
+        $definitions = [
+            ['slug' => 'devshot-prod-1', 'name' => 'Sample Product One', 'number' => 'DV-1001', 'gross' => 29.0, 'cat' => 'devshot-cat-one'],
+            ['slug' => 'devshot-prod-2', 'name' => 'Sample Product Two', 'number' => 'DV-1002', 'gross' => 39.0, 'cat' => 'devshot-cat-one'],
+            ['slug' => 'devshot-prod-3', 'name' => 'Sample Product Three', 'number' => 'DV-1003', 'gross' => 49.0, 'cat' => 'devshot-cat-one'],
+            ['slug' => 'devshot-prod-4', 'name' => 'Sample Product Four', 'number' => 'DV-1004', 'gross' => 25.0, 'cat' => 'devshot-cat-two'],
+            ['slug' => 'devshot-prod-5', 'name' => 'Sample Product Five', 'number' => 'DV-1005', 'gross' => 59.0, 'cat' => 'devshot-cat-two'],
+            ['slug' => 'devshot-prod-6', 'name' => 'Sample Product Six', 'number' => 'DV-1006', 'gross' => 19.0, 'cat' => 'devshot-cat-two'],
+            ['slug' => 'devshot-prod-7', 'name' => 'Sample Product Seven', 'number' => 'DV-1007', 'gross' => 79.0, 'cat' => 'devshot-cat-three'],
+            ['slug' => 'devshot-prod-8', 'name' => 'Sample Product Eight', 'number' => 'DV-1008', 'gross' => 89.0, 'cat' => 'devshot-cat-three'],
+        ];
+        $products = [];
+        foreach ($definitions as $def) {
+            $products[] = [
+                'id' => md5($def['slug']),
+                'name' => $def['name'],
+                'productNumber' => $def['number'],
+                'description' => 'EDIT: a real, specific product description.',
+                'stock' => 25,
+                'active' => true,
+                'taxId' => $taxId,
+                'price' => [[
+                    'currencyId' => Defaults::CURRENCY,
+                    'gross' => $def['gross'],
+                    'net' => round($def['gross'] / 1.19, 2),
+                    'linked' => false,
+                ]],
+                'visibilities' => [[
+                    'id' => md5('vis-' . $def['slug']),
+                    'salesChannelId' => $salesChannelId,
+                    'visibility' => 30,
+                ]],
+                'categories' => [['id' => md5($def['cat'])]],
+            ];
+        }
+        return $products;
+    }
+}
+PHP
+
+  cat > "$plugin/src/Resources/theme.json" <<'JSON'
+{
+  "name": "DevshotBase",
+  "author": "DevShot Studio",
+  "views": ["@Storefront", "@DevshotBase"],
+  "style": [
+    "app/storefront/src/scss/overrides.scss",
+    "@Storefront",
+    "app/storefront/src/scss/base.scss"
+  ]
+}
+JSON
+
+  scss="$plugin/src/Resources/app/storefront/src/scss"
+  cat > "$scss/overrides.scss" <<'SCSS'
+// Token sheet - EDIT these to the brand. Declared BEFORE @Storefront so the
+// framework's !default variables take our values and every stock component
+// (buttons, links, breadcrumbs, badges) inherits the brand automatically.
+$dv-bone: #f7f5f0;
+$dv-ink: #17160f;
+$dv-accent: #b4552d;
+$dv-hairline: #e5e1d6;
+
+$sw-color-brand-primary: $dv-ink;
+$sw-color-brand-secondary: $dv-accent;
+$sw-color-buy-button: $dv-ink;
+$sw-background-color: $dv-bone;
+$sw-border-color: $dv-hairline;
+
+$font-family-base: 'Inter', system-ui, sans-serif;
+$headings-font-family: 'Fraunces', Georgia, serif;
+
+$border-radius: 0;
+$border-radius-sm: 0;
+$border-radius-lg: 0;
+$btn-border-radius: 0;
+$input-border-radius: 0;
+$card-border-radius: 0;
+$badge-border-radius: 0;
+$modal-content-border-radius: 0;
+SCSS
+
+  cat > "$scss/base.scss" <<'SCSS'
+// Import manifest ONLY - keep this file tiny; tokens, layout, components, and
+// page rules live in their partials.
+@import 'fonts';
+@import 'tokens';
+@import 'layout';
+@import 'components';
+@import 'pages';
+SCSS
+
+  cat > "$scss/_fonts.scss" <<'SCSS'
+// Placeholder so theme:compile never fails on a missing import. To self-host
+// real webfonts: fetch the Google css2 stylesheet with a browser User-Agent,
+// download each woff2 into ../../public/fonts/, rewrite the urls to
+// /bundles/devshotbase/fonts/, and replace this file with that css.
+SCSS
+
+  cat > "$scss/_tokens.scss" <<'SCSS'
+// Brand tokens as custom properties - components build on these. EDIT the
+// values together with overrides.scss.
+//
+// REMOVE the --devshot-unbranded line below as your LAST branding step: it is
+// the machine-checked signal that this skeleton has not been branded yet, and
+// completion is blocked while it is compiled in.
+:root {
+  --devshot-unbranded: 1;
+  --dv-bone: #f7f5f0;
+  --dv-ink: #17160f;
+  --dv-accent: #b4552d;
+  --dv-hairline: #e5e1d6;
+  --dv-font-display: 'Fraunces', Georgia, serif;
+  --dv-font-body: 'Inter', system-ui, sans-serif;
+}
+SCSS
+
+  cat > "$scss/_layout.scss" <<'SCSS'
+// Shared layout primitives.
+.dv-section {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 6rem 1.5rem;
+}
+
+.dv-eyebrow {
+  text-transform: uppercase;
+  font-size: .76rem;
+  font-weight: 600;
+  letter-spacing: .16em;
+  color: var(--dv-accent);
+}
+
+.dv-announce {
+  background: var(--dv-ink);
+  color: var(--dv-bone);
+  text-align: center;
+  text-transform: uppercase;
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .16em;
+  padding: .55rem 1rem;
+}
+
+.dv-wordmark {
+  font-family: var(--dv-font-display);
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--dv-ink);
+  text-decoration: none;
+
+  &:hover { color: var(--dv-accent); text-decoration: none; }
+}
+SCSS
+
+  cat > "$scss/_components.scss" <<'SCSS'
+// Gallery product cards - the Storefront hardcodes .product-image-wrapper
+// heights (200px card / 332px listing); aspect-ratio alone then derives WIDTH
+// from that fixed height and cards collapse to ~160px thumbnails. This is the
+// production-verified recipe. Ratios stay DECIMALS (0.8), never 4 / 5.
+.product-box {
+  border: 0;
+
+  .product-image-wrapper {
+    height: auto !important;
+    width: 100%;
+    aspect-ratio: 0.8;
+    overflow: hidden;
+    border: 1px solid var(--dv-hairline);
+    background: #fff;
+  }
+
+  .product-image-link { display: block; width: 100%; height: 100%; }
+
+  .product-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform .7s cubic-bezier(.22, 1, .36, 1);
+  }
+
+  &:hover .product-image { transform: scale(1.04); }
+
+  .product-name { font-family: var(--dv-font-display); }
+
+  // gallery-quiet: the card sells with image + name + price.
+  .product-description,
+  .product-rating { display: none; }
+}
+
+// Money chrome sweep - the underlined caps "Prices incl. VAT" is the loudest
+// "still a demo" tell after brand blue.
+.product-price-tax-link,
+.product-price-unit {
+  font-size: .72rem;
+  text-transform: none;
+  text-decoration: none;
+  color: rgba(23, 22, 15, .55);
+}
+SCSS
+
+  cat > "$scss/_pages.scss" <<'SCSS'
+// Homepage sections (see views/storefront/page/content/index.html.twig).
+.dv-hero {
+  background: var(--dv-bone);
+
+  .dv-hero-title {
+    font-family: var(--dv-font-display);
+    font-size: clamp(2.9rem, 6vw, 5.2rem);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    margin: 1rem 0;
+  }
+
+  .dv-hero-sub { max-width: 40rem; font-size: 1.1rem; }
+  .dv-hero-actions { margin-top: 2rem; display: flex; gap: 1rem; }
+}
+
+.dv-tile {
+  display: flex;
+  align-items: flex-end;
+  aspect-ratio: 0.8;
+  border: 1px solid var(--dv-hairline);
+  background: #fff;
+  padding: 1.25rem;
+  text-decoration: none;
+
+  span {
+    font-family: var(--dv-font-display);
+    font-size: 1.3rem;
+    color: var(--dv-ink);
+  }
+
+  &:hover { border-color: var(--dv-ink); text-decoration: none; }
+}
+
+.dv-story .dv-story-title { font-family: var(--dv-font-display); font-size: 2.2rem; }
+.dv-story .dv-story-media {
+  aspect-ratio: 1.25;
+  border: 1px solid var(--dv-hairline);
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(23, 22, 15, .45);
+}
+
+.dv-quote {
+  background: var(--dv-ink);
+  color: var(--dv-bone);
+
+  blockquote {
+    font-family: var(--dv-font-display);
+    font-style: italic;
+    font-size: 1.6rem;
+    margin: 0;
+    max-width: 46rem;
+  }
+}
+
+.dv-footer .dv-footer-heading {
+  text-transform: uppercase;
+  font-size: .74rem;
+  font-weight: 600;
+  letter-spacing: .14em;
+}
+.dv-footer .dv-footer-list { list-style: none; padding: 0; }
+.dv-footer .dv-footer-list a { color: var(--dv-ink); text-decoration: none; }
+.dv-footer .dv-footer-list a:hover { color: var(--dv-accent); }
+.dv-footer-bottom {
+  text-align: center;
+  font-size: .78rem;
+  color: rgba(23, 22, 15, .55);
+  padding: 1rem 0 2rem;
+}
+SCSS
+
+  views="$plugin/src/Resources/views/storefront"
+  cat > "$views/layout/header/header.html.twig" <<'TWIG'
+{% sw_extends '@Storefront/storefront/layout/header/header.html.twig' %}
+
+{# EDIT: announcement copy + wordmark text. Keep the block names and the col-
+   classes on the logo wrapper. The announcement bar replaces the default
+   currency/language switcher top bar. #}
+{% block layout_top_bar %}
+    <div class="dv-announce">Complimentary shipping on every order</div>
+{% endblock %}
+
+{% block layout_header_logo %}
+    <div class="col-4 col-lg-auto header-logo-col">
+        <a class="dv-wordmark" href="{{ path('frontend.home.page') }}">DevshotBase</a>
+    </div>
+{% endblock %}
+TWIG
+
+  cat > "$views/layout/footer/footer.html.twig" <<'TWIG'
+{% sw_extends '@Storefront/storefront/layout/footer/footer.html.twig' %}
+
+{# EDIT: brand blurb + link columns. This override removes the service-hotline
+   column and the "Realised with Shopware" line in one move. The navigationId
+   values are the seeded categories (md5 of devshot-cat-one/-two/-three). #}
+{% block layout_footer_inner_container %}
+    <div class="container dv-footer">
+        <div class="row">
+            <div class="col-12 col-md-5">
+                <p class="dv-wordmark">DevshotBase</p>
+                <p class="dv-footer-blurb">EDIT: one-sentence brand statement.</p>
+            </div>
+            <div class="col-6 col-md-3">
+                <p class="dv-footer-heading">Shop</p>
+                <ul class="dv-footer-list">
+                    <li><a href="{{ seoUrl('frontend.navigation.page', { navigationId: 'fe09f1156a77492e6c7931081b13a1a0' }) }}">Collection One</a></li>
+                    <li><a href="{{ seoUrl('frontend.navigation.page', { navigationId: '2f46f4f0a8f7f6ec9ce85ce0e8c659e9' }) }}">Collection Two</a></li>
+                    <li><a href="{{ seoUrl('frontend.navigation.page', { navigationId: 'e3ec47f6c13603e65c5977c3c8ebce98' }) }}">Collection Three</a></li>
+                </ul>
+            </div>
+            <div class="col-6 col-md-3">
+                <p class="dv-footer-heading">Service</p>
+                <ul class="dv-footer-list">
+                    <li><a href="{{ path('frontend.home.page') }}">EDIT: Contact</a></li>
+                    <li><a href="{{ path('frontend.home.page') }}">EDIT: Shipping &amp; returns</a></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+{% endblock %}
+
+{% block layout_footer_bottom %}
+    <div class="dv-footer-bottom">&copy; {{ "now"|date("Y") }} DevshotBase</div>
+{% endblock %}
+TWIG
+
+  cat > "$views/page/content/index.html.twig" <<'TWIG'
+{% sw_extends '@Storefront/storefront/page/content/index.html.twig' %}
+
+{# GATED bespoke homepage: this template renders EVERY navigation/CMS page, so
+   the bespoke sections only render on the shop root - category pages keep
+   parent(). EDIT the copy and wire real imagery (curate_images) into the hero
+   and story slots; the section structure and the gate are production-verified.
+   navigationId values = the seeded categories (md5 of devshot-cat-one/...). #}
+{% block base_main_inner %}
+    {% if shopware.navigation.id != context.salesChannel.navigationCategoryId %}
+        {{ parent() }}
+    {% else %}
+        <section class="dv-hero">
+            <div class="dv-section">
+                <p class="dv-eyebrow">EDIT: eyebrow line</p>
+                <h1 class="dv-hero-title">EDIT: the brand promise in one confident line</h1>
+                <p class="dv-hero-sub">EDIT: one supporting sentence about the brand.</p>
+                <p class="dv-hero-actions">
+                    <a class="btn btn-primary" href="{{ seoUrl('frontend.navigation.page', { navigationId: 'fe09f1156a77492e6c7931081b13a1a0' }) }}">Shop the collection</a>
+                    <a class="btn btn-outline-secondary" href="{{ seoUrl('frontend.navigation.page', { navigationId: '2f46f4f0a8f7f6ec9ce85ce0e8c659e9' }) }}">Discover more</a>
+                </p>
+            </div>
+        </section>
+        <section class="dv-section">
+            <div class="row g-3">
+                <div class="col-12 col-md-4"><a class="dv-tile" href="{{ seoUrl('frontend.navigation.page', { navigationId: 'fe09f1156a77492e6c7931081b13a1a0' }) }}"><span>Collection One</span></a></div>
+                <div class="col-12 col-md-4"><a class="dv-tile" href="{{ seoUrl('frontend.navigation.page', { navigationId: '2f46f4f0a8f7f6ec9ce85ce0e8c659e9' }) }}"><span>Collection Two</span></a></div>
+                <div class="col-12 col-md-4"><a class="dv-tile" href="{{ seoUrl('frontend.navigation.page', { navigationId: 'e3ec47f6c13603e65c5977c3c8ebce98' }) }}"><span>Collection Three</span></a></div>
+            </div>
+        </section>
+        <section class="dv-story dv-section">
+            <div class="row align-items-center g-4">
+                <div class="col-12 col-md-6">
+                    <h2 class="dv-story-title">EDIT: brand story headline</h2>
+                    <p>EDIT: two or three sentences of brand story.</p>
+                </div>
+                <div class="col-12 col-md-6">
+                    <div class="dv-story-media">EDIT: story image via curate_images</div>
+                </div>
+            </div>
+        </section>
+        <section class="dv-quote">
+            <div class="dv-section">
+                <blockquote>&ldquo;EDIT: one short customer or founder quote.&rdquo;</blockquote>
+            </div>
+        </section>
+    {% endif %}
+{% endblock %}
+TWIG
 }
 
 # install_typo3 <version>
