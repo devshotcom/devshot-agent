@@ -632,8 +632,11 @@ class CatalogSeeder
     }
 
     /**
-     * EDIT: rename to the brand's real collections. afterCategoryId chaining
-     * keeps the storefront nav in this exact order.
+     * EDIT IN PLACE: rename these to the brand's real collections and KEEP the
+     * md5() ids — the id is what makes the upsert OVERWRITE this row. Adding new
+     * categories alongside these leaves "Collection One/Two/Three" live in the
+     * storefront navigation next to the real ones (observed on a real build).
+     * afterCategoryId chaining keeps the nav in this exact order.
      */
     private function categories(string $rootId): array
     {
@@ -648,10 +651,14 @@ class CatalogSeeder
     }
 
     /**
-     * EDIT: the brand's real products (names, numbers, prices, descriptions,
-     * category slugs). Every product already carries the assignments that make
-     * it RENDER: a tax, a gross/net price, stock, a category link, and a
-     * visibility row for the default Storefront sales channel.
+     * EDIT IN PLACE: rewrite these into the brand's real products (names,
+     * numbers, prices, descriptions, category slugs) and KEEP the 'slug' values
+     * — they seed the md5() ids that make the upsert OVERWRITE these rows.
+     * Adding products alongside them leaves "Sample Product …" in the listing.
+     * Only a product BEYOND these eight needs a new slug.
+     * Every entry already carries the assignments that make it RENDER: a tax, a
+     * gross/net price, stock, a category link, and a visibility row for the
+     * default Storefront sales channel.
      */
     private function products(string $taxId, string $salesChannelId): array
     {
@@ -861,6 +868,16 @@ SCSS
 .dv-hero {
   background: var(--dv-bone);
 
+  // Editorial default: full-width photo, copy beneath on paper — always legible,
+  // no scrim needed. Restyle to a full-bleed overlay or a split layout if the
+  // brand calls for it; keep object-fit: cover either way.
+  .dv-hero-media {
+    display: block;
+    width: 100%;
+    height: clamp(18rem, 46vh, 34rem);
+    object-fit: cover;
+  }
+
   .dv-hero-title {
     font-family: var(--dv-font-display);
     font-size: clamp(2.9rem, 6vw, 5.2rem);
@@ -893,13 +910,12 @@ SCSS
 
 .dv-story .dv-story-title { font-family: var(--dv-font-display); font-size: 2.2rem; }
 .dv-story .dv-story-media {
+  display: block;
+  width: 100%;
   aspect-ratio: 1.25;
+  object-fit: cover;
   border: 1px solid var(--dv-hairline);
   background: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: rgba(23, 22, 15, .45);
 }
 
 .dv-quote {
@@ -1000,6 +1016,12 @@ TWIG
         {{ parent() }}
     {% else %}
         <section class="dv-hero">
+            {# The asset() call + the bundles/<pluginnamelower>/ prefix is the ONLY
+               path that resolves: assets:install publishes src/Resources/public/
+               there. A bare "/img/hero.jpg" 404s (observed on a real build — it
+               blanked the whole hero). Curate/download into
+               src/Resources/public/img/ and swap ONLY the filename below. #}
+            <img class="dv-hero-media" src="{{ asset('bundles/devshotbase/img/hero.jpg') }}" alt="EDIT: describe the hero image">
             <div class="dv-section">
                 <p class="dv-eyebrow">EDIT: eyebrow line</p>
                 <h1 class="dv-hero-title">EDIT: the brand promise in one confident line</h1>
@@ -1024,7 +1046,8 @@ TWIG
                     <p>EDIT: two or three sentences of brand story.</p>
                 </div>
                 <div class="col-12 col-md-6">
-                    <div class="dv-story-media">EDIT: story image via curate_images</div>
+                    {# Same asset() contract as the hero — swap the filename only. #}
+                    <img class="dv-story-media" src="{{ asset('bundles/devshotbase/img/story.jpg') }}" alt="EDIT: describe the story image">
                 </div>
             </div>
         </section>
