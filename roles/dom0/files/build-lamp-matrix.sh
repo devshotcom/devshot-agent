@@ -38,7 +38,12 @@
 #                      for spot-checks before committing to the full set.
 #   MATRIX_FILTER=re   Bake only variants whose variant_id matches the
 #                      egrep regex. E.g. MATRIX_FILTER='^(wp-6\.[7-9]|sw-)'
+#   BAKE_TIMEOUT_SECONDS=N  Hard deadline for each Docker bake (default 3600).
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bounded-docker-run.sh
+source "$SCRIPT_DIR/bounded-docker-run.sh"
 
 # Docker -v needs absolute paths or it interprets the argument as a
 # named volume and rejects names with '/' or '.'. Canonicalize both
@@ -53,7 +58,7 @@ BASE_QCOW="$BUILD_DIR/devshot-guest-base.qcow2"
 SHARED_QCOW="$BUILD_DIR/devshot-guest-lamp-shared.qcow2"
 CORE_RECIPE="$LAMP_DIR/_core.sh"
 APP_LIB="$LAMP_DIR/_app_lib.sh"
-DISCOVERY="$(dirname "$0")/discover-lamp-variants.py"
+DISCOVERY="$SCRIPT_DIR/discover-lamp-variants.py"
 
 [ -f "$BASE_QCOW" ]   || { echo "ERROR: base qcow not found at $BASE_QCOW" >&2; exit 1; }
 [ -d "$LAMP_DIR" ]    || { echo "ERROR: lamp recipes dir not found: $LAMP_DIR" >&2; exit 1; }
@@ -73,8 +78,18 @@ echo "  intermediate: $CORE_RECIPE  ->  $SHARED_QCOW"
 # Resolves which variants to bake. Writes lamp-matrix.lock.json next to
 # the qcow2 outputs so the same matrix can be replayed.
 echo ""
-echo "=== Discovery (upstream API query) ==="
-MATRIX_JSON=$(python3 "$DISCOVERY" "$BUILD_DIR")
+if [ -n "${MATRIX_LOCK_FILE:-}" ]; then
+  echo "=== Discovery (validated precomputed lock) ==="
+  python3 "$DISCOVERY" --validate-lock "$MATRIX_LOCK_FILE"
+  MATRIX_JSON=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["variants"]))' "$MATRIX_LOCK_FILE")
+  lock_path="$(cd "$(dirname "$MATRIX_LOCK_FILE")" && pwd)/$(basename "$MATRIX_LOCK_FILE")"
+  if [ "$lock_path" != "$BUILD_DIR/lamp-matrix.lock.json" ]; then
+    cp "$MATRIX_LOCK_FILE" "$BUILD_DIR/lamp-matrix.lock.json"
+  fi
+else
+  echo "=== Discovery (upstream API query) ==="
+  MATRIX_JSON=$(python3 "$DISCOVERY" "$BUILD_DIR")
+fi
 TOTAL_VARIANTS=$(echo "$MATRIX_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 echo "  resolved variants: $TOTAL_VARIANTS"
 
@@ -99,9 +114,19 @@ if [ -n "${MATRIX_LIMIT:-}" ]; then
 fi
 
 # ── Inner bake script (unchanged from earlier iteration) ─────────────────
+INNER_SCRIPT=""
+TMP_RECIPES_DIR=""
+cleanup() {
+  bounded_docker_cleanup
+  [ -z "$INNER_SCRIPT" ] || rm -f -- "$INNER_SCRIPT"
+  [ -z "$TMP_RECIPES_DIR" ] || rm -rf -- "$TMP_RECIPES_DIR"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+bounded_docker_init
 INNER_SCRIPT="$(mktemp)"
 TMP_RECIPES_DIR="$(mktemp -d)"
-trap 'rm -f "$INNER_SCRIPT"; rm -rf "$TMP_RECIPES_DIR"' EXIT
 cat > "$INNER_SCRIPT" << 'INNEREOF'
 #!/bin/bash
 set -euxo pipefail
@@ -228,7 +253,7 @@ if [ -n "${SKIP_SHARED:-}" ] && [ -f "$SHARED_QCOW" ]; then
 else
   echo ""
   echo "=== Pass 1: lamp-shared (intermediate) ==="
-  docker run --rm --privileged \
+  bounded_docker_run lamp-shared --privileged \
     -e STAGE=core \
     -e OUTPUT_NAME=lamp-shared \
     -e BASE_TEMPLATE="" \
@@ -297,7 +322,7 @@ RECIPE
 
   echo ""
   echo "=== Pass 2: $out_name ($app $version) ==="
-  if docker run --rm --privileged \
+  if bounded_docker_run "$out_name" --privileged \
     -e STAGE=variant \
     -e OUTPUT_NAME="$out_name" \
     -e BASE_TEMPLATE=lamp-shared \

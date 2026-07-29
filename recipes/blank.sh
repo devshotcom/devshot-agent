@@ -83,10 +83,12 @@ rc-update add docker default
 # map from openvscode's x64/arm64 below (do NOT share it). The tarball bundles
 # `ddev`, `ddev-hostname`, `mkcert`, a LICENSE and shell completions (verified
 # against the real v1.25.2 asset); we install `ddev` + the bundled `mkcert`
-# (so there is NO second download from dl.filippo.io). `ddev version` is a HARD
-# bake gate: if the binary can't exec, `set -eux` aborts the bake loud rather
-# than shipping a broken template. v1.25.2 is well past the host_webserver_port
-# bug fixed in v1.22.3 (issue #5341), which goal C relies on.
+# (so there is NO second download from dl.filippo.io). `ddev --version` is a
+# HARD bake gate: Cobra handles that flag before DDEV probes the Docker socket,
+# which is intentionally absent in the offline build chroot. The `ddev version`
+# subcommand is NOT equivalent: it queries Docker and made the nightly bake
+# silently omit this production template. v1.25.2 is well past the
+# host_webserver_port bug fixed in v1.22.3 (issue #5341), which goal C relies on.
 case "$(uname -m)" in
   aarch64) DDEV_ARCH=arm64 ;;
   x86_64)  DDEV_ARCH=amd64 ;;
@@ -111,7 +113,7 @@ if [ -f /tmp/ddev-extract/ddev-hostname ]; then
     install -m 0755 /tmp/ddev-extract/ddev-hostname /usr/local/bin/ddev-hostname
 fi
 rm -rf /tmp/ddev.tar.gz /tmp/ddev-extract
-ddev version   # fail-fast gate: proves the static binary execs on this musl arch
+ddev --version   # fail-fast gate: proves the static binary execs without Docker
 
 # mkcert local CA (best-effort, headless-safe; non-fatal — preview is plain HTTP)
 mkcert -install 2>/dev/null || true

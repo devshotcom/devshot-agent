@@ -9,12 +9,8 @@ name: Build & Push Orchestrator Images
 # to the devshot-agent repo.
 #
 # Active groups:
-#   Group 1 (x86)            — dom0-amd64 + vmm-qemu-amd64
-#                              run on the self-hosted runner on
-#                              sharp-ada (label: [self-hosted, Linux,
-#                              X64]). Moved off GH-hosted ubuntu-latest
-#                              after the devshotcom org's Actions
-#                              spending limit started rejecting jobs.
+#   Group 1 (x86)            — dom0-amd64 followed by vmm-qemu-amd64 on
+#                              isolated GitHub-hosted Ubuntu runners.
 #
 # Disabled groups (commented out below — uncomment to re-enable):
 #   Group 2 (arm64)          — dom0-arm64 + vmm-qemu-arm64 + extract-boot-artifacts
@@ -29,8 +25,6 @@ name: Build & Push Orchestrator Images
 # Required repo secrets (configure in devshot-agent repo Settings → Secrets):
 #   DOCKERHUB_USERNAME — Docker Hub user with push access to anticipatercom
 #   DOCKERHUB_TOKEN    — Docker Hub access token
-#   BOOT_ARTIFACTS_PUSH_TOKEN — only needed for Group 2 (arm64); commit boot/
-#                               artifacts back to devshot-agent main.
 #
 # Required Docker Build Cloud setup — only used by Groups 2 & 3 when enabled:
 #   1. Subscribe to Docker Build Cloud on the anticipatercom org
@@ -44,7 +38,6 @@ name: Build & Push Orchestrator Images
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 concurrency:
   group: build-images-${{ github.ref }}
@@ -56,7 +49,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   BUILDX_CLOUD_ENDPOINT: anticipatercom/devshot
@@ -64,99 +57,59 @@ env:
 jobs:
   # ═══════════════════════════════════════════════════════════════════════
   # Group 1 — x86 (active)
-  # Runs on GH-hosted ubuntu-latest with easimon/maximize-build-space.
+  # Runs on isolated GitHub-hosted Ubuntu 24.04 runners.
   # Native amd64, no QEMU, no Build Cloud minutes — GH minutes only.
   # ═══════════════════════════════════════════════════════════════════════
 
   # ── Dom0 orchestrator: Linux x86_64 ────────────────────────────────────
-  # Moved off the self-hosted Hetzner runner to GH-hosted ubuntu-latest:
-  # Hetzner's box tops out at ~20 GB free (75 GB total, 53 GB of system
-  # + runner state we can't safely prune — see run 25957475459 where the
-  # `Free runner disk before build` step reclaimed only 2.36 GB and the
-  # build still OOM'd on disk). The dom0-x86 multi-stage build — Xen +
-  # kernel from source, a 5 GB desktop rootfs, a 6 GB android rootfs
-  # that bakes the 830 MB Android-x86 ISO, plus a 2 GB browser kiosk
-  # rootfs — peaks well above that, so we ended up shipping prod images
-  # that predate the browser template (1fb9533) and the KVM-in-DomU
-  # kernel (057f119). GH-hosted ubuntu-latest plus `maximize-build-space`
-  # (which evicts the preinstalled toolchains we don't need — dotnet,
-  # android-sdk, ghc, haskell, codeql) gets us to ~70 GB free. Minutes
-  # are billable on private repos but the cost (<$0.10/run) beats the
-  # constant infra babysitting.
   build-dom0-amd64:
-    # Self-hosted runner on sharp-ada (the prod orchestrator box, 108 GB
-    # disk, plenty for the multi-stage dom0 build). We moved off
-    # GH-hosted ubuntu-latest after the devshotcom org's Actions
-    # spending limit started rejecting jobs ("Job is waiting for a
-    # hosted runner" → instant fail with no steps, see run 25978742958).
-    # Sharp-ada has the disk headroom, the runner binary, and zero
-    # GH-Actions minutes cost.
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 270
     steps:
-      # Inline cleanup instead of easimon/maximize-build-space. Three
-      # earlier attempts failed:
-      #   - Default mount path → LV at /mnt/build, Docker still on root.
-      #   - build-mount-path=/var/lib/docker → daemon broke mid-build
-      #     ("ERROR: open /var/lib/docker/tmp/...: no such file or
-      #     directory" — the action mounted an empty fs over the dir
-      #     while dockerd held open handles to the old files).
-      #   - root-reserve=6144 → action still squeezed root to 100 MiB.
-      #
-      # GH-hosted ubuntu-24.04 ships with `/dev/root 72 G, 17 G free` and
-      # ~35 GiB of preinstalled toolchains we don't use (dotnet, android-
-      # sdk, ghc, haskell, codeql, hostedtoolcache). Deleting those
-      # in-place — no LV, no mount juggle — gets us to ~50 GiB free root
-      # without touching the docker daemon. /var/lib/docker stays on root.
       - name: Free runner disk
         run: |
+          set -euo pipefail
           echo "── disk before cleanup ──────────────────────────────"
           df -h /
-          docker system df || true
-          # On GH-hosted ubuntu-latest these dirs hold ~35 GiB of
-          # toolchains we don't use; rm reclaims them. On self-hosted
-          # (sharp-ada) they don't exist → no-op. Safe either way.
+          # This workflow runs only on disposable GitHub-hosted runners.
           for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                    /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/Python \
                    /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk \
                    /usr/share/swift /usr/local/share/powershell \
                    /usr/local/share/chromium /usr/local/share/boost; do
-            [ -d "$d" ] && sudo rm -rf "$d" 2>/dev/null || true
+            if [ -d "$d" ]; then
+              sudo rm -rf -- "$d"
+            fi
           done
-          # Guard: only prune on a clean GH-hosted runner. Sharp-ada
-          # has /var/lib/devshot from the prod orchestrator container —
-          # pruning its images would destroy the running devshot:amd64-kvm.
-          # BuildKit cache is independent of running prod containers, so
-          # prune it on every runner before this disk-heavy image build.
-          sudo docker builder prune --all --force 2>/dev/null || true
-          if [ ! -d /var/lib/devshot ]; then
-            sudo docker image prune --all --force 2>/dev/null || true
-            sudo apt-get clean 2>/dev/null || true
-          else
-            echo "self-hosted runner — skipping destructive prune"
-          fi
+          sudo docker system prune --all --force --volumes
+          sudo apt-get clean
           echo "── disk after cleanup ───────────────────────────────"
           df -h /
-          docker system df || true
+          available_gib="$(df --output=avail -BG / | tail -n 1 | tr -dc '0-9')"
+          if [ -z "$available_gib" ] || [ "$available_gib" -lt 40 ]; then
+            echo "ERROR: image build requires at least 40 GiB free; found ${available_gib:-unknown} GiB" >&2
+            exit 1
+          fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Report disk space
         run: |
           echo "── disk available for build ──────────────────────────"
           df -h /
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 1
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         id: build_dom0
         continue-on-error: true
         with:
@@ -177,10 +130,10 @@ jobs:
           tags: |
             anticipatercom/devshot:amd64
             anticipatercom/devshot:amd64-${{ github.sha }}
-      # Retry once on a transient Docker Build Cloud / Hub flake (builder
+      # Retry once on a transient BuildKit / Docker Hub flake (builder
       # graceful_stop, registry 400 on layer PUT). If this second attempt
       # also fails the job fails (no continue-on-error here).
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         if: steps.build_dom0.outcome == 'failure'
         with:
           context: .
@@ -196,54 +149,48 @@ jobs:
 
   # ── Direct QEMU backend: Linux x86_64 ──────────────────────────────────
   build-vmm-qemu-amd64:
-    # Same self-hosted runner as build-dom0-amd64.
-    runs-on: [self-hosted, Linux, X64]
+    needs: build-dom0-amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
     steps:
-      # Same inline cleanup as build-dom0-amd64 — see comment there.
       - name: Free runner disk
         run: |
+          set -euo pipefail
           echo "── disk before cleanup ──────────────────────────────"
           df -h /
-          docker system df || true
-          # On GH-hosted ubuntu-latest these dirs hold ~35 GiB of
-          # toolchains we don't use; rm reclaims them. On self-hosted
-          # (sharp-ada) they don't exist → no-op. Safe either way.
+          # This workflow runs only on disposable GitHub-hosted runners.
           for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                    /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/Python \
                    /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk \
                    /usr/share/swift /usr/local/share/powershell \
                    /usr/local/share/chromium /usr/local/share/boost; do
-            [ -d "$d" ] && sudo rm -rf "$d" 2>/dev/null || true
+            if [ -d "$d" ]; then
+              sudo rm -rf -- "$d"
+            fi
           done
-          # Guard: only prune on a clean GH-hosted runner. Sharp-ada
-          # has /var/lib/devshot from the prod orchestrator container —
-          # pruning its images would destroy the running devshot:amd64-kvm.
-          # BuildKit cache is independent of running prod containers, so
-          # prune it on every runner before this disk-heavy image build.
-          sudo docker builder prune --all --force 2>/dev/null || true
-          if [ ! -d /var/lib/devshot ]; then
-            sudo docker image prune --all --force 2>/dev/null || true
-            sudo apt-get clean 2>/dev/null || true
-          else
-            echo "self-hosted runner — skipping destructive prune"
-          fi
+          sudo docker system prune --all --force --volumes
+          sudo apt-get clean
           echo "── disk after cleanup ───────────────────────────────"
           df -h /
-          docker system df || true
+          available_gib="$(df --output=avail -BG / | tail -n 1 | tr -dc '0-9')"
+          if [ -z "$available_gib" ] || [ "$available_gib" -lt 40 ]; then
+            echo "ERROR: image build requires at least 40 GiB free; found ${available_gib:-unknown} GiB" >&2
+            exit 1
+          fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Report disk space
         run: |
           echo "── disk available for build ──────────────────────────"
           df -h /
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           buildkitd-config-inline: |
             [worker.oci]
@@ -255,10 +202,14 @@ jobs:
 
           mkdir -p .build/lamp templates/lamp
 
-          docker pull anticipatercom/devshot:amd64
-          cid="$(docker create anticipatercom/devshot:amd64)"
-          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
-          docker cp "$cid:/xen/devshot-guest-base.qcow2" .build/lamp/devshot-guest-base.qcow2
+          source roles/dom0/files/bounded-docker-run.sh
+          trap bounded_docker_cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          bounded_docker_extract_file \
+            anticipatercom/devshot:amd64-${{ github.sha }} \
+            /xen/devshot-guest-base.qcow2 \
+            .build/lamp/devshot-guest-base.qcow2
 
           MATRIX_FILTER='^(wp-6\.9|sw-6\.7)$' \
             bash roles/dom0/files/build-lamp-matrix.sh .build/lamp recipes/lamp
@@ -274,32 +225,7 @@ jobs:
           echo "Public LAMP Studio templates:"
           ls -lh templates/lamp/
 
-          # ── Publish boot artifacts for the LAMP rebake ──────────────────
-          # lamp-rebake.yml (monorepo) pulls boot/devshot-guest-base.qcow2 from
-          # THIS repo as the base it overlays each variant on. The base is
-          # already extracted above (.build/lamp/); also pull the domU kernel,
-          # then commit both to boot/. Pushed with the workflow's GITHUB_TOKEN
-          # (contents:write) — which does NOT re-trigger workflows, so no rebuild
-          # loop. This replaces the old arm64-only extract-boot-artifacts job
-          # (disabled below): without it boot/ is never published and the nightly
-          # rebake's base-pull 404s, so lamp-sw-6.7 et al. never get baked.
-          mkdir -p boot
-          cp .build/lamp/devshot-guest-base.qcow2 boot/devshot-guest-base.qcow2
-          docker cp "$cid:/xen/boot/Image-domu" boot/Image-domu 2>/dev/null \
-            || docker cp "$cid:/xen/Image" boot/Image-domu 2>/dev/null \
-            || echo "WARN: Image-domu not found in image (boot/ will lack the kernel)"
-          ls -lh boot/
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add boot/
-          if git diff --cached --quiet; then
-            echo "boot artifacts unchanged — nothing to commit"
-          else
-            git commit -m "Update boot artifacts (guest base + Image-domu) from ${GITHUB_SHA::8}"
-            git push origin HEAD:main || echo "WARN: boot/ push failed (will retry next build)"
-          fi
-
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         id: build_vmm
         continue-on-error: true
         with:
@@ -309,15 +235,15 @@ jobs:
           provenance: false
           push: true
           build-args: |
-            BASE_IMAGE=anticipatercom/devshot:amd64
+            BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
           tags: |
             anticipatercom/devshot:amd64-kvm
             anticipatercom/devshot:amd64-kvm-${{ github.sha }}
-      # Retry once on a transient Docker Build Cloud / Hub flake. The bake step
+      # Retry once on a transient BuildKit / Docker Hub flake. The bake step
       # above already produced its artifacts, so only the push is re-attempted.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         if: steps.build_vmm.outcome == 'failure'
         with:
           context: .
@@ -326,7 +252,7 @@ jobs:
           provenance: false
           push: true
           build-args: |
-            BASE_IMAGE=anticipatercom/devshot:amd64
+            BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
           tags: |
@@ -341,23 +267,23 @@ jobs:
   #
   # # ── Dom0 orchestrator: Linux ARM64 (+ arm64-mac alias) ─────────────────
   # build-dom0-arm64:
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #
-  #     - uses: docker/login-action@v3
+  #     - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
   #       with:
   #         username: ${{ secrets.DOCKERHUB_USERNAME }}
   #         password: ${{ secrets.DOCKERHUB_TOKEN }}
   #
-  #     - uses: docker/setup-buildx-action@v3
+  #     - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
   #       with:
   #         version: "lab:latest"
   #         driver: cloud
   #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
   #         install: true
   #
-  #     - uses: docker/build-push-action@v6
+  #     - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
   #       with:
   #         context: .
   #         file: docker/Dockerfile.dom0-arm
@@ -375,23 +301,23 @@ jobs:
   # # ── Direct QEMU backend: Linux ARM64 ───────────────────────────────────
   # build-vmm-qemu-arm64:
   #   needs: build-dom0-arm64
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #
-  #     - uses: docker/login-action@v3
+  #     - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
   #       with:
   #         username: ${{ secrets.DOCKERHUB_USERNAME }}
   #         password: ${{ secrets.DOCKERHUB_TOKEN }}
   #
-  #     - uses: docker/setup-buildx-action@v3
+  #     - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
   #       with:
   #         version: "lab:latest"
   #         driver: cloud
   #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
   #         install: true
   #
-  #     - uses: docker/build-push-action@v6
+  #     - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
   #       with:
   #         context: .
   #         file: docker/Dockerfile.vmm-qemu-arm
@@ -410,9 +336,9 @@ jobs:
   # # homebrew-tap.
   # extract-boot-artifacts:
   #   needs: build-dom0-arm64
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #       with:
   #         token: ${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}
   #
@@ -452,23 +378,23 @@ jobs:
   #
   # # ── DomU standalone: multi-arch manifest (amd64 + arm64) ──────────────
   # build-domu:
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #
-  #     - uses: docker/login-action@v3
+  #     - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
   #       with:
   #         username: ${{ secrets.DOCKERHUB_USERNAME }}
   #         password: ${{ secrets.DOCKERHUB_TOKEN }}
   #
-  #     - uses: docker/setup-buildx-action@v3
+  #     - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
   #       with:
   #         version: "lab:latest"
   #         driver: cloud
   #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
   #         install: true
   #
-  #     - uses: docker/build-push-action@v6
+  #     - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
   #       with:
   #         context: .
   #         file: docker/Dockerfile.domU
@@ -483,23 +409,23 @@ jobs:
   #
   # # ── DomU desktop (VNC + noVNC): multi-arch manifest (amd64 + arm64) ───
   # build-domu-desktop:
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #
-  #     - uses: docker/login-action@v3
+  #     - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
   #       with:
   #         username: ${{ secrets.DOCKERHUB_USERNAME }}
   #         password: ${{ secrets.DOCKERHUB_TOKEN }}
   #
-  #     - uses: docker/setup-buildx-action@v3
+  #     - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
   #       with:
   #         version: "lab:latest"
   #         driver: cloud
   #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
   #         install: true
   #
-  #     - uses: docker/build-push-action@v6
+  #     - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
   #       with:
   #         context: .
   #         file: docker/Dockerfile.domU-desktop

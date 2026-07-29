@@ -7,7 +7,7 @@ This repo is **auto-generated** on every push to
 branch. Do not edit files here directly — they will be overwritten.
 The Docker images published to Docker Hub (`anticipatercom/devshot:*`)
 are built from this repo by `.github/workflows/build-images.yml`
-on Docker Build Cloud.
+on isolated GitHub-hosted Ubuntu runners.
 
 Release policy: create `v*` and `backend-v*` tags from `main` only. CI rejects
 release tags whose commit is not reachable from `origin/main`.
@@ -221,6 +221,6 @@ Stripped (`-ldflags="-s -w"`), statically linked (`CGO_ENABLED=0`).
 
 ## Build Info
 
-Auto-deployed by CI from [devshotcom/devshot@7eaf7de96613bbb71098a251827b33f991b1ff02](https://github.com/devshotcom/devshot/commit/7eaf7de96613bbb71098a251827b33f991b1ff02).
+Auto-deployed by CI from [devshotcom/devshot@cc9e8319735ebb2dde3a2559ecb9505f0f10e117](https://github.com/devshotcom/devshot/commit/cc9e8319735ebb2dde3a2559ecb9505f0f10e117).
 
-Last built: 2026-07-22T23:28:23Z
+Last built: 2026-07-29T02:28:28Z

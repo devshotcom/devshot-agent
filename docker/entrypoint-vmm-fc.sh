@@ -17,6 +17,9 @@ set -u
 # ── Force backend selection ─────────────────────────────────────────────────
 export DEVSHOT_HYPERVISOR=firecracker
 export ROLE=dom0
+export LAMP_RELEASE_INDEX_URL="${LAMP_RELEASE_INDEX_URL:-https://github.com/devshotcom/devshot-agent/releases/download/lamp-matrix-latest/lamp-matrix-index-v2.json}"
+export LAMP_SYNC_INTERVAL="${LAMP_SYNC_INTERVAL:-5m}"
+export LAMP_SYNC_DOWNLOAD_TIMEOUT="${LAMP_SYNC_DOWNLOAD_TIMEOUT:-30m}"
 export XS_REAL=0
 export XS_ROOT=/tmp/xenstore-dom0
 export GUESTS_DIR="${GUESTS_DIR:-/xen/guests}"

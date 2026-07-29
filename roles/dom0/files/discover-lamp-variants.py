@@ -23,6 +23,7 @@ Usage:
 """
 
 import json
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -59,6 +60,70 @@ WP_MAX_MAJORS = int(os.environ.get("WP_MAX_MAJORS", "5"))
 HTTP_TIMEOUT_S = 15
 
 
+class DiscoveryError(RuntimeError):
+    """Expected network or upstream-payload failure eligible for lock fallback."""
+
+APP_CONTRACTS = {
+    "wordpress": {"prefix": "wp-", "port": 80, "doc_root": "/var/www/wordpress", "max_body": "64M", "major": re.compile(r"^\d+\.\d+$")},
+    "shopware": {"prefix": "sw-", "port": 81, "doc_root": "/var/www/shopware/public", "max_body": "128M", "major": re.compile(r"^\d+\.\d+$")},
+    "typo3": {"prefix": "t3-v", "port": 82, "doc_root": "/var/www/typo3/public", "max_body": "64M", "major": re.compile(r"^\d+$")},
+}
+VERSION_RE = re.compile(r"^\d+(?:\.\d+){1,3}$")
+VARIANT_KEYS = {"app", "major_minor", "resolved_version", "variant_id", "port", "doc_root", "max_body"}
+
+
+def validate_lock_data(data):
+    """Reject any fallback lock that is not an exact safe discovery result."""
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise ValueError("lock must be a schema_version 1 object")
+    if set(data) != {"schema_version", "discovered_at", "denied", "variants"}:
+        raise ValueError("lock has missing or unknown top-level fields")
+    if not isinstance(data.get("discovered_at"), str) or not data["discovered_at"]:
+        raise ValueError("lock discovered_at must be a non-empty string")
+    if not isinstance(data.get("denied"), list) or not isinstance(data.get("variants"), list) or not data["variants"]:
+        raise ValueError("lock denied/variants must be lists and variants must not be empty")
+
+    seen_pairs = set()
+    seen_ids = set()
+    for index, variant in enumerate(data["variants"]):
+        if not isinstance(variant, dict) or set(variant) != VARIANT_KEYS:
+            raise ValueError(f"variant {index} has missing or unknown fields")
+        app = variant.get("app")
+        contract = APP_CONTRACTS.get(app)
+        if contract is None:
+            raise ValueError(f"variant {index} has unsupported app")
+        major = variant.get("major_minor")
+        version = variant.get("resolved_version")
+        variant_id = variant.get("variant_id")
+        if not isinstance(major, str) or not contract["major"].fullmatch(major):
+            raise ValueError(f"variant {index} has invalid major_minor")
+        if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+            raise ValueError(f"variant {index} has invalid resolved_version")
+        expected_version_prefix = major.split(".") if app != "typo3" else [major]
+        if version.split(".")[:len(expected_version_prefix)] != expected_version_prefix:
+            raise ValueError(f"variant {index} version does not match its major")
+        if variant_id != f"{contract['prefix']}{major}":
+            raise ValueError(f"variant {index} has noncanonical variant_id")
+        for key in ("port", "doc_root", "max_body"):
+            if variant.get(key) != contract[key]:
+                raise ValueError(f"variant {index} has invalid {key}")
+        pair = (app, major)
+        if pair in seen_pairs or variant_id in seen_ids:
+            raise ValueError(f"variant {index} is duplicated")
+        seen_pairs.add(pair)
+        seen_ids.add(variant_id)
+
+    for index, denied in enumerate(data["denied"]):
+        if not isinstance(denied, dict) or set(denied) != {"app", "major_minor", "reason"}:
+            raise ValueError(f"denied entry {index} has invalid fields")
+        contract = APP_CONTRACTS.get(denied.get("app"))
+        if contract is None or not isinstance(denied.get("major_minor"), str) or not contract["major"].fullmatch(denied["major_minor"]):
+            raise ValueError(f"denied entry {index} has invalid app/version")
+        if not isinstance(denied.get("reason"), str) or not denied["reason"].strip():
+            raise ValueError(f"denied entry {index} requires a reason")
+    return data
+
+
 def _fetch_json(url):
     """
     Fetch URL via curl (subprocess) and json.loads the body.
@@ -72,7 +137,7 @@ def _fetch_json(url):
     try:
         out = subprocess.run(
             [
-                "curl", "-sfSL",
+                "curl", "-q", "-sfSL",
                 "--max-time", str(HTTP_TIMEOUT_S),
                 "-A", "devshot-lamp-discovery/1",
                 url,
@@ -81,9 +146,23 @@ def _fetch_json(url):
             check=True,
             timeout=HTTP_TIMEOUT_S + 5,
         )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"curl failed for {url}: {e.stderr.decode().strip()}") from e
-    return json.loads(out.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        stderr = getattr(error, "stderr", b"") or b""
+        detail = stderr.decode(errors="replace").strip() if isinstance(stderr, bytes) else str(stderr).strip()
+        raise DiscoveryError(f"curl failed for {url}: {detail or type(error).__name__}") from error
+    try:
+        return json.loads(out.stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise DiscoveryError(f"invalid JSON from {url}") from error
+
+
+def _run_discovery(fn):
+    try:
+        return fn()
+    except DiscoveryError:
+        raise
+    except (KeyError, TypeError, AttributeError, IndexError, ValueError) as error:
+        raise DiscoveryError(f"invalid upstream payload: {error}") from error
 
 
 def _parse_packagist_time(s):
@@ -239,6 +318,13 @@ def discover_typo3(now):
 
 # ── Entry point ────────────────────────────────────────────────────────────
 def main(argv):
+    if len(argv) == 3 and argv[1] == "--validate-lock":
+        try:
+            validate_lock_data(json.loads(Path(argv[2]).read_text()))
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            print(f"ERROR: invalid LAMP discovery lock: {error}", file=sys.stderr)
+            return 2
+        return 0
     if len(argv) < 2:
         print("usage: discover-lamp-variants.py <build-dir>", file=sys.stderr)
         return 2
@@ -258,19 +344,27 @@ def main(argv):
         ("typo3",     lambda: discover_typo3(now)),
     ):
         try:
-            discovered[label] = fn()
-        except (RuntimeError, json.JSONDecodeError, KeyError) as e:
+            discovered[label] = _run_discovery(fn)
+        except DiscoveryError as e:
             errors.append((label, repr(e)))
             discovered[label] = None
 
     # Lock-file fallback for any app that failed.
     if any(v is None for v in discovered.values()):
         if lock_file.exists():
-            with open(lock_file) as f:
-                prior = json.load(f).get("variants", [])
+            try:
+                with open(lock_file) as f:
+                    prior = validate_lock_data(json.load(f))["variants"]
+            except (OSError, json.JSONDecodeError, ValueError) as error:
+                print(f"ERROR: refusing invalid fallback lock: {error}", file=sys.stderr)
+                return 1
             for label in discovered:
                 if discovered[label] is None:
-                    discovered[label] = [v for v in prior if v["app"] == label]
+                    fallback = [v for v in prior if v["app"] == label]
+                    if not fallback:
+                        print(f"ERROR: discovery failed for {label} and fallback lock has no entries for it", file=sys.stderr)
+                        return 1
+                    discovered[label] = fallback
                     print(
                         f"WARN: discovery failed for {label}; using "
                         f"{len(discovered[label])} entries from lock file",
@@ -300,6 +394,11 @@ def main(argv):
         ],
         "variants": matrix,
     }
+    try:
+        validate_lock_data(lock_data)
+    except ValueError as error:
+        print(f"ERROR: live discovery produced an unsafe matrix: {error}", file=sys.stderr)
+        return 1
     with open(lock_file, "w") as f:
         json.dump(lock_data, f, indent=2)
         f.write("\n")

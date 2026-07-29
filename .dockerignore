@@ -1,0 +1,22 @@
+# Deny everything, then allow only what the Dockerfiles need
+*
+
+# Pre-built Go agent binaries (amd64 + arm64, stripped, static) —
+# Dockerfile.dom0-{arm,x86} and Dockerfile.domU{,-desktop} COPY from here.
+!bin/
+
+# YARA rules (data files, not Go code) — copied into Dom0 rootfs for clamav
+!yara_rules/
+
+# Dockerfiles + entrypoint scripts
+!docker/
+
+# Prebaked pool templates
+!templates/
+!templates/**
+
+# LAMP recipe sources used by the public template bake
+!recipes/
+
+# Dom0 role support scripts (configure-dom0.sh, boot-xen.sh)
+!roles/dom0/files/
