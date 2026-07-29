@@ -287,7 +287,7 @@ FROM --platform=linux/arm64 alpine:3.23 AS domu-rootfs
 RUN apk add --no-cache \
     alpine-base openssh openrc e2fsprogs xe-guest-utilities \
     qemu-guest-agent \
-    iputils sudo tmux curl bash openssl tini
+    iputils sudo tmux curl bash openssl tini coreutils
 
 COPY roles/dom0/files/verify-studio-runtime-prerequisites.sh /tmp/verify-studio-runtime-prerequisites.sh
 RUN /bin/sh /tmp/verify-studio-runtime-prerequisites.sh && \

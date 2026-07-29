@@ -18,9 +18,18 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
+timeout_version=$(LC_ALL=C timeout --version 2>/dev/null) || timeout_version=""
+case "$timeout_version" in
+    "timeout (GNU coreutils) "*) ;;
+    *)
+        echo "ERROR: Studio runtime requires GNU coreutils timeout; BusyBox timeout leaves orphan watchdog processes" >&2
+        exit 1
+        ;;
+esac
+
 if ! timeout -k 1 5 setsid tini -s -- /bin/sh -c 'exit 0'; then
     echo "ERROR: Studio supervised-command smoke check failed" >&2
     exit 1
 fi
 
-echo "Studio runtime prerequisites verified: timeout setsid mktemp tini dd tail"
+echo "Studio runtime prerequisites verified: GNU timeout, setsid, mktemp, tini, dd, tail"

@@ -24,7 +24,11 @@
 
 FROM alpine:3.23
 
-RUN apk add --no-cache tmux openssl tini bash sudo
+RUN apk add --no-cache tmux openssl tini bash sudo coreutils
+
+COPY roles/dom0/files/verify-studio-runtime-prerequisites.sh /tmp/verify-studio-runtime-prerequisites.sh
+RUN /bin/sh /tmp/verify-studio-runtime-prerequisites.sh && \
+    rm -f /tmp/verify-studio-runtime-prerequisites.sh
 
 WORKDIR /opt/devshot
 

@@ -25,7 +25,7 @@ FROM alpine:3.23
 
 RUN apk add --no-cache \
     # Base (same as terminal DomU)
-    tmux openssl tini bash sudo \
+    tmux openssl tini bash sudo coreutils \
     # VNC server (Xvnc = X server + VNC combined)
     tigervnc \
     # Browser-based VNC access (websockify proxies WS→TCP, novnc serves the HTML client)
@@ -63,6 +63,10 @@ RUN apk add --no-cache \
     font-noto font-noto-emoji \
     # Wallpaper setter
     feh
+
+COPY roles/dom0/files/verify-studio-runtime-prerequisites.sh /tmp/verify-studio-runtime-prerequisites.sh
+RUN /bin/sh /tmp/verify-studio-runtime-prerequisites.sh && \
+    rm -f /tmp/verify-studio-runtime-prerequisites.sh
 
 # Pre-install playwright-core at a stable path so the AI driver always
 # imports from the same location. `-core` skips Playwright's bundled

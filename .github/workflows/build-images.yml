@@ -10,7 +10,7 @@ name: Build & Push Orchestrator Images
 #
 # Active groups:
 #   Group 1 (x86)            — dom0-amd64 followed by vmm-qemu-amd64 on
-#                              isolated GitHub-hosted Ubuntu runners.
+#                              the isolated devshot-agent builder group.
 #
 # Disabled groups (commented out below — uncomment to re-enable):
 #   Group 2 (arm64)          — dom0-arm64 + vmm-qemu-arm64 + extract-boot-artifacts
@@ -57,54 +57,61 @@ env:
 jobs:
   # ═══════════════════════════════════════════════════════════════════════
   # Group 1 — x86 (active)
-  # Runs on isolated GitHub-hosted Ubuntu 24.04 runners.
-  # Native amd64, no QEMU, no Build Cloud minutes — GH minutes only.
+  # Runs on the isolated self-hosted devshot-agent builder group. The group is
+  # restricted to this exact trusted main-branch workflow in GitHub settings.
+  # Native amd64, no QEMU and no external Actions runner minutes.
   # ═══════════════════════════════════════════════════════════════════════
 
   # ── Dom0 orchestrator: Linux x86_64 ────────────────────────────────────
   build-dom0-amd64:
-    runs-on: ubuntu-24.04
+    runs-on:
+      group: devshot-agent-builders
+      labels: [self-hosted, Linux, X64, devshot-runner]
     timeout-minutes: 270
+    env:
+      CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-dom0
+      BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-dom0
     steps:
-      - name: Free runner disk
+      - name: Reclaim self-hosted runner workspace
+        shell: bash
         run: |
-          set -euo pipefail
-          echo "── disk before cleanup ──────────────────────────────"
-          df -h /
-          # This workflow runs only on disposable GitHub-hosted runners.
-          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                   /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/Python \
-                   /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk \
-                   /usr/share/swift /usr/local/share/powershell \
-                   /usr/local/share/chromium /usr/local/share/boost; do
-            if [ -d "$d" ]; then
-              sudo rm -rf -- "$d"
-            fi
-          done
-          sudo docker system prune --all --force --volumes
-          sudo apt-get clean
-          echo "── disk after cleanup ───────────────────────────────"
-          df -h /
-          available_gib="$(df --output=avail -BG / | tail -n 1 | tr -dc '0-9')"
-          if [ -z "$available_gib" ] || [ "$available_gib" -lt 40 ]; then
-            echo "ERROR: image build requires at least 40 GiB free; found ${available_gib:-unknown} GiB" >&2
-            exit 1
+          if [ -x /usr/local/sbin/reclaim-runner-workspace ]; then
+            sudo -n /usr/local/sbin/reclaim-runner-workspace 2>/dev/null || true
+          fi
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null \
+              || sudo -n find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
           fi
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ${{ env.CHECKOUT_DIR }}
+          persist-credentials: false
 
-      - name: Report disk space
-        run: |
-          echo "── disk available for build ──────────────────────────"
-          df -h /
+      - name: Initialize isolated self-hosted state
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh initialize dom0
+
+      - name: Verify persistent builder prerequisites and workspace capacity
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh prepare 40
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+          logout: false
+
+      - name: Verify Docker data capacity
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh verify-docker-storage 40
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
+          name: ${{ env.BUILDER_NAME }}
+          driver: docker-container
+          cleanup: false
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 1
@@ -113,8 +120,9 @@ jobs:
         id: build_dom0
         continue-on-error: true
         with:
-          context: .
-          file: docker/Dockerfile.dom0-x86
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-x86
+          builder: ${{ env.BUILDER_NAME }}
           platforms: linux/amd64
           provenance: false
           push: true
@@ -136,8 +144,9 @@ jobs:
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         if: steps.build_dom0.outcome == 'failure'
         with:
-          context: .
-          file: docker/Dockerfile.dom0-x86
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-x86
+          builder: ${{ env.BUILDER_NAME }}
           platforms: linux/amd64
           provenance: false
           push: true
@@ -147,59 +156,72 @@ jobs:
             anticipatercom/devshot:amd64
             anticipatercom/devshot:amd64-${{ github.sha }}
 
+      - name: Remove exact self-hosted builder state
+        if: always()
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh cleanup
+
   # ── Direct QEMU backend: Linux x86_64 ──────────────────────────────────
   build-vmm-qemu-amd64:
     needs: build-dom0-amd64
-    runs-on: ubuntu-24.04
+    runs-on:
+      group: devshot-agent-builders
+      labels: [self-hosted, Linux, X64, devshot-runner]
     timeout-minutes: 330
+    env:
+      CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-kvm
+      BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-kvm
     steps:
-      - name: Free runner disk
+      - name: Reclaim self-hosted runner workspace
+        shell: bash
         run: |
-          set -euo pipefail
-          echo "── disk before cleanup ──────────────────────────────"
-          df -h /
-          # This workflow runs only on disposable GitHub-hosted runners.
-          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                   /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/Python \
-                   /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk \
-                   /usr/share/swift /usr/local/share/powershell \
-                   /usr/local/share/chromium /usr/local/share/boost; do
-            if [ -d "$d" ]; then
-              sudo rm -rf -- "$d"
-            fi
-          done
-          sudo docker system prune --all --force --volumes
-          sudo apt-get clean
-          echo "── disk after cleanup ───────────────────────────────"
-          df -h /
-          available_gib="$(df --output=avail -BG / | tail -n 1 | tr -dc '0-9')"
-          if [ -z "$available_gib" ] || [ "$available_gib" -lt 40 ]; then
-            echo "ERROR: image build requires at least 40 GiB free; found ${available_gib:-unknown} GiB" >&2
-            exit 1
+          if [ -x /usr/local/sbin/reclaim-runner-workspace ]; then
+            sudo -n /usr/local/sbin/reclaim-runner-workspace 2>/dev/null || true
+          fi
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null \
+              || sudo -n find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
           fi
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ${{ env.CHECKOUT_DIR }}
+          persist-credentials: false
 
-      - name: Report disk space
-        run: |
-          echo "── disk available for build ──────────────────────────"
-          df -h /
+      - name: Initialize isolated self-hosted state
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh initialize kvm
+
+      - name: Verify persistent builder prerequisites and workspace capacity
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh prepare 40
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+          logout: false
+
+      - name: Verify Docker data capacity
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh verify-docker-storage 40
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
+          name: ${{ env.BUILDER_NAME }}
+          driver: docker-container
+          cleanup: false
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 1
 
       - name: Bake public LAMP Studio templates
+        working-directory: ${{ env.CHECKOUT_DIR }}
         run: |
           set -euo pipefail
 
+          rm -rf .build/lamp templates/lamp
           mkdir -p .build/lamp templates/lamp
 
           source roles/dom0/files/bounded-docker-run.sh
@@ -229,8 +251,9 @@ jobs:
         id: build_vmm
         continue-on-error: true
         with:
-          context: .
-          file: docker/Dockerfile.vmm-qemu-x86
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.vmm-qemu-x86
+          builder: ${{ env.BUILDER_NAME }}
           platforms: linux/amd64
           provenance: false
           push: true
@@ -246,8 +269,9 @@ jobs:
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         if: steps.build_vmm.outcome == 'failure'
         with:
-          context: .
-          file: docker/Dockerfile.vmm-qemu-x86
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.vmm-qemu-x86
+          builder: ${{ env.BUILDER_NAME }}
           platforms: linux/amd64
           provenance: false
           push: true
@@ -259,6 +283,11 @@ jobs:
             anticipatercom/devshot:amd64-kvm
             anticipatercom/devshot:amd64-kvm-${{ github.sha }}
 
+      - name: Remove exact self-hosted builder state
+        if: always()
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh cleanup anticipatercom/devshot:amd64-${{ github.sha }}
+
   # ═══════════════════════════════════════════════════════════════════════
   # Group 2 — arm64 (disabled)
   # Re-enable by removing the leading `# ` from each line below.
@@ -267,7 +296,9 @@ jobs:
   #
   # # ── Dom0 orchestrator: Linux ARM64 (+ arm64-mac alias) ─────────────────
   # build-dom0-arm64:
-  #   runs-on: ubuntu-24.04
+  #   runs-on:
+  #     group: devshot-agent-builders
+  #     labels: [self-hosted, Linux, X64, devshot-runner]
   #   steps:
   #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #
@@ -301,7 +332,9 @@ jobs:
   # # ── Direct QEMU backend: Linux ARM64 ───────────────────────────────────
   # build-vmm-qemu-arm64:
   #   needs: build-dom0-arm64
-  #   runs-on: ubuntu-24.04
+  #   runs-on:
+  #     group: devshot-agent-builders
+  #     labels: [self-hosted, Linux, X64, devshot-runner]
   #   steps:
   #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #
@@ -336,7 +369,9 @@ jobs:
   # # homebrew-tap.
   # extract-boot-artifacts:
   #   needs: build-dom0-arm64
-  #   runs-on: ubuntu-24.04
+  #   runs-on:
+  #     group: devshot-agent-builders
+  #     labels: [self-hosted, Linux, X64, devshot-runner]
   #   steps:
   #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #       with:
@@ -378,7 +413,9 @@ jobs:
   #
   # # ── DomU standalone: multi-arch manifest (amd64 + arm64) ──────────────
   # build-domu:
-  #   runs-on: ubuntu-24.04
+  #   runs-on:
+  #     group: devshot-agent-builders
+  #     labels: [self-hosted, Linux, X64, devshot-runner]
   #   steps:
   #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #
@@ -409,7 +446,9 @@ jobs:
   #
   # # ── DomU desktop (VNC + noVNC): multi-arch manifest (amd64 + arm64) ───
   # build-domu-desktop:
-  #   runs-on: ubuntu-24.04
+  #   runs-on:
+  #     group: devshot-agent-builders
+  #     labels: [self-hosted, Linux, X64, devshot-runner]
   #   steps:
   #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #
