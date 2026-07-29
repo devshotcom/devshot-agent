@@ -42,6 +42,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_VERIFY_SCRIPT="$SCRIPT_DIR/verify-studio-runtime-prerequisites.sh"
 # shellcheck source=bounded-docker-run.sh
 source "$SCRIPT_DIR/bounded-docker-run.sh"
 
@@ -65,6 +66,7 @@ DISCOVERY="$SCRIPT_DIR/discover-lamp-variants.py"
 [ -f "$CORE_RECIPE" ] || { echo "ERROR: missing $CORE_RECIPE" >&2; exit 1; }
 [ -f "$APP_LIB" ]     || { echo "ERROR: missing $APP_LIB" >&2; exit 1; }
 [ -f "$DISCOVERY" ]   || { echo "ERROR: missing $DISCOVERY" >&2; exit 1; }
+[ -f "$RUNTIME_VERIFY_SCRIPT" ] || { echo "ERROR: missing $RUNTIME_VERIFY_SCRIPT" >&2; exit 1; }
 
 RECIPES_ROOT="$(cd "$LAMP_DIR/.." && pwd)"
 DESKTOP_RECIPE="$RECIPES_ROOT/desktop.sh"
@@ -171,6 +173,13 @@ fi
 
 chroot /mnt /bin/sh /tmp/recipe.sh
 
+# Validate every exact LAMP artifact while its final guest filesystem is still
+# mounted. This catches a stale/reused shared layer as well as a future variant
+# recipe that accidentally removes a supervisor prerequisite.
+cp /verify-studio-runtime-prerequisites.sh /mnt/tmp/verify-studio-runtime-prerequisites.sh
+chroot /mnt /bin/sh /tmp/verify-studio-runtime-prerequisites.sh
+rm -f /mnt/tmp/verify-studio-runtime-prerequisites.sh
+
 rm -rf /mnt/tmp/recipe.sh /mnt/tmp/recipe.d
 if [ -n "$ORIG_RESOLV" ]; then
   printf '%s' "$ORIG_RESOLV" > /mnt/etc/resolv.conf
@@ -182,10 +191,14 @@ sync
 umount /mnt/dev/pts /mnt/proc /mnt/dev /mnt/sys
 umount /mnt
 
-OUT="/output/devshot-guest-${OUTPUT_NAME}.qcow2"
+FINAL_QCOW="/output/devshot-guest-${OUTPUT_NAME}.qcow2"
+FINAL_MANIFEST="/output/devshot-guest-${OUTPUT_NAME}.json"
+STAGED_QCOW="/output/.devshot-guest-${OUTPUT_NAME}.qcow2.tmp"
+STAGED_MANIFEST="/output/.devshot-guest-${OUTPUT_NAME}.json.tmp"
+rm -f "$STAGED_QCOW" "$STAGED_MANIFEST"
 
 if [ "$STAGE" = "core" ] || [ -z "$BASE_TEMPLATE" ]; then
-  qemu-img convert -f raw -O qcow2 -c /tmp/disk.raw "$OUT"
+  qemu-img convert -f raw -O qcow2 -c /tmp/disk.raw "$STAGED_QCOW"
 else
   # Compressed qcow2 with destination backing — see build-lamp-matrix.sh
   # for the full rationale. cd /output so the relative -B path resolves
@@ -196,10 +209,10 @@ else
     qemu-img convert -f raw -O qcow2 -c \
       -B "devshot-guest-${BASE_TEMPLATE}.qcow2" \
       -F qcow2 \
-      /tmp/disk.raw "./devshot-guest-${OUTPUT_NAME}.qcow2"
+      /tmp/disk.raw "./.devshot-guest-${OUTPUT_NAME}.qcow2.tmp"
   )
 fi
-ls -lh "$OUT"
+ls -lh "$STAGED_QCOW"
 
 # ── Manifest sidecar ────────────────────────────────────────────────────
 INTERMEDIATE="false"
@@ -222,9 +235,9 @@ BASE_PATH_FOR_MANIFEST="devshot-guest-base.qcow2"
 
 BASE_SHA=$(sha256sum /input/in.qcow2 | awk '{print $1}')
 RECIPE_SHA=$(sha256sum /recipe.sh | awk '{print $1}')
-SIZE=$(stat -c%s "$OUT")
+SIZE=$(stat -c%s "$STAGED_QCOW")
 BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-cat > "/output/devshot-guest-${OUTPUT_NAME}.json" <<MANIFEST
+cat > "$STAGED_MANIFEST" <<MANIFEST
 {
   "name": "${OUTPUT_NAME}",
   "image": "devshot-guest-${OUTPUT_NAME}.qcow2",
@@ -243,8 +256,19 @@ cat > "/output/devshot-guest-${OUTPUT_NAME}.json" <<MANIFEST
   "upstream_version": "${UPSTREAM_VERSION}"
 }
 MANIFEST
-ls -lh "/output/devshot-guest-${OUTPUT_NAME}.json"
+mv -f "$STAGED_MANIFEST" "$FINAL_MANIFEST"
+mv -f "$STAGED_QCOW" "$FINAL_QCOW"
+ls -lh "$FINAL_MANIFEST" "$FINAL_QCOW"
 INNEREOF
+
+discard_lamp_artifacts() {
+  local name="$1"
+  rm -f -- \
+    "$BUILD_DIR/devshot-guest-${name}.qcow2" \
+    "$BUILD_DIR/devshot-guest-${name}.json" \
+    "$BUILD_DIR/.devshot-guest-${name}.qcow2.tmp" \
+    "$BUILD_DIR/.devshot-guest-${name}.json.tmp"
+}
 
 # ── Pass 1: bake the shared intermediate (or skip if SKIP_SHARED=1) ──────
 if [ -n "${SKIP_SHARED:-}" ] && [ -f "$SHARED_QCOW" ]; then
@@ -253,17 +277,22 @@ if [ -n "${SKIP_SHARED:-}" ] && [ -f "$SHARED_QCOW" ]; then
 else
   echo ""
   echo "=== Pass 1: lamp-shared (intermediate) ==="
-  bounded_docker_run lamp-shared --privileged \
+  discard_lamp_artifacts lamp-shared
+  if ! bounded_docker_run lamp-shared --privileged \
     -e STAGE=core \
     -e OUTPUT_NAME=lamp-shared \
     -e BASE_TEMPLATE="" \
     -v "$INNER_SCRIPT:/build.sh:ro" \
+    -v "$RUNTIME_VERIFY_SCRIPT:/verify-studio-runtime-prerequisites.sh:ro" \
     -v "$BASE_QCOW:/input/in.qcow2:ro" \
     -v "$CORE_RECIPE:/recipe.sh:ro" \
     -v "$LAMP_DIR:/recipe.d:ro" \
     -v "$DESKTOP_RECIPE:/desktop-recipe.sh:ro" \
     -v "$BUILD_DIR:/output" \
-    debian:bookworm-slim bash /build.sh
+    debian:bookworm-slim bash /build.sh; then
+    discard_lamp_artifacts lamp-shared
+    exit 1
+  fi
 fi
 [ -f "$SHARED_QCOW" ] || { echo "ERROR: pass 1 produced no $SHARED_QCOW" >&2; exit 1; }
 
@@ -322,11 +351,13 @@ RECIPE
 
   echo ""
   echo "=== Pass 2: $out_name ($app $version) ==="
+  discard_lamp_artifacts "$out_name"
   if bounded_docker_run "$out_name" --privileged \
     -e STAGE=variant \
     -e OUTPUT_NAME="$out_name" \
     -e BASE_TEMPLATE=lamp-shared \
     -v "$INNER_SCRIPT:/build.sh:ro" \
+    -v "$RUNTIME_VERIFY_SCRIPT:/verify-studio-runtime-prerequisites.sh:ro" \
     -v "$SHARED_QCOW:/input/in.qcow2:ro" \
     -v "$variant_recipe:/recipe.sh:ro" \
     -v "$LAMP_DIR:/recipe.d:ro" \
@@ -335,6 +366,7 @@ RECIPE
     debian:bookworm-slim bash /build.sh; then
     SUCCEEDED+=("$out_name")
   else
+    discard_lamp_artifacts "$out_name"
     FAILED+=("$out_name")
     echo "WARN: variant '$out_name' failed — continuing with the rest" >&2
   fi
