@@ -113,7 +113,11 @@ if [ -f /tmp/ddev-extract/ddev-hostname ]; then
     install -m 0755 /tmp/ddev-extract/ddev-hostname /usr/local/bin/ddev-hostname
 fi
 rm -rf /tmp/ddev.tar.gz /tmp/ddev-extract
-ddev --version   # fail-fast gate: proves the static binary execs without Docker
+validate_ddev() {
+    su devshot -c 'HOME=/home/devshot /usr/local/bin/ddev --version'
+}
+# Fail-fast gate: prove the static binary execs without Docker as its runtime user.
+validate_ddev
 
 # mkcert local CA (best-effort, headless-safe; non-fatal — preview is plain HTTP)
 mkcert -install 2>/dev/null || true
@@ -296,7 +300,7 @@ rm -rf /root/.npm /home/devshot/.npm /home/devshot/.cache /tmp/* /var/cache/apk/
 echo "=== Blank recipe complete ==="
 docker --version
 docker compose version || true
-ddev --version
+validate_ddev
 mkcert -version 2>/dev/null || true
 node --version
 sync
