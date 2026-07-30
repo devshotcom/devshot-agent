@@ -1,0 +1,287 @@
+# DevShot Mac Orchestrator VM Image
+# Alpine-based QEMU/HVF orchestrator that hosts pool VMs inside it.
+# Same architecture as Xen Dom0 but using QEMU instead of Xen.
+#
+# Pool VMs run as nested QEMU processes (TCG on M1/M2, KVM on M3+ if available).
+# ClamAV + YARA scan guest disks from inside the orchestrator VM.
+#
+# Build: docker buildx build --platform linux/arm64 \
+#          -f apps/agent/docker/Dockerfile.orchestrator-mac \
+#          -o type=local,dest=.build/orchestrator apps/agent
+
+# ─── Stage 1: Alpine rootfs with orchestrator packages ─────────────────────
+FROM --platform=linux/arm64 alpine:3.23 AS orchestrator-rootfs
+
+# Base packages (same as pool VM)
+RUN apk add --no-cache \
+    alpine-base openssh openrc e2fsprogs \
+    qemu-guest-agent \
+    iputils sudo tmux curl bash openssl
+
+# Orchestrator packages: QEMU for spawning pool VMs + security scanning
+RUN apk add --no-cache \
+    qemu-system-aarch64 qemu-img \
+    clamav clamav-daemon freshclam \
+    yara \
+    bridge-utils iproute2 nftables iptables conntrack-tools \
+    nbd nbd-client \
+    socat procps
+
+# SSH config + host keys
+RUN mkdir -p /etc/ssh && \
+    printf 'Port 22\nPermitRootLogin yes\nPasswordAuthentication yes\nPubkeyAuthentication yes\nAuthorizedKeysFile .ssh/authorized_keys\nSubsystem sftp /usr/lib/ssh/sftp-server\n' > /etc/ssh/sshd_config && \
+    ssh-keygen -A 2>/dev/null || true
+
+# Root: password LOCKED in the image. All runtime access to the orchestrator
+# VM goes through the qemu-guest-agent channel (virtio-serial socket exposed
+# to the Mac host at /opt/homebrew/var/devshot/mac-run-qemu/orch-qga.sock).
+# Host-side tooling uses the QGA `guest-exec` RPC to run diagnostic commands
+# without ever needing a password or sshd — zero baked-in secrets.
+# This is deliberate: the image is distributed via Homebrew, so any baked
+# password would be known to every user.
+RUN sed -i "s|^root:.*|root:!:18000:0:99999:7:::|" /etc/shadow && \
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
+    touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && \
+    sed -i 's/^#PermitEmptyPasswords.*/PermitEmptyPasswords no/' /etc/ssh/sshd_config && \
+    sed -i 's/^PermitEmptyPasswords.*/PermitEmptyPasswords no/' /etc/ssh/sshd_config
+
+# Devshot unprivileged user (for pool VM command execution)
+RUN adduser -D -s /bin/sh -h /home/devshot devshot && \
+    mkdir -p /home/devshot/workspace && \
+    chown -R devshot:devshot /home/devshot && \
+    mkdir -p /etc/sudoers.d && \
+    echo "devshot ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/devshot && \
+    chmod 440 /etc/sudoers.d/devshot && \
+    grep -q "^#includedir /etc/sudoers.d" /etc/sudoers 2>/dev/null || echo "#includedir /etc/sudoers.d" >> /etc/sudoers && \
+    RANDPW=$(head -c 32 /dev/urandom | base64 | tr -d '/+= \n') && \
+    echo "devshot:${RANDPW}" | chpasswd && \
+    unset RANDPW
+
+# OpenRC services
+RUN mkdir -p /etc/runlevels/sysinit /etc/runlevels/boot /etc/runlevels/default && \
+    for svc in devfs dmesg mdev hwdrivers; do ln -sf /etc/init.d/$svc /etc/runlevels/sysinit/$svc 2>/dev/null || true; done && \
+    for svc in hostname networking bootmisc syslog; do ln -sf /etc/init.d/$svc /etc/runlevels/boot/$svc 2>/dev/null || true; done && \
+    ln -sf /etc/init.d/sshd /etc/runlevels/default/sshd
+
+# Write a minimal OpenRC init script for qemu-guest-agent so the host can
+# reach the VM via QGA (Alpine's qemu-guest-agent package ships the
+# binary but no service file on aarch64). The guest agent is the only
+# supported host-to-VM control plane — no baked passwords, no open sshd.
+RUN printf '#!/sbin/openrc-run\n\
+name="qemu-guest-agent"\n\
+description="QEMU Guest Agent"\n\
+command="/usr/bin/qemu-ga"\n\
+command_args="--daemonize --pidfile=/run/qemu-ga.pid --logfile=/var/log/qemu-ga.log"\n\
+pidfile="/run/qemu-ga.pid"\n\
+depend() {\n\
+  need localmount\n\
+  after bootmisc\n\
+}\n\
+' > /etc/init.d/qemu-guest-agent && \
+    chmod 755 /etc/init.d/qemu-guest-agent && \
+    ln -sf /etc/init.d/qemu-guest-agent /etc/runlevels/default/qemu-guest-agent
+
+# ClamAV configuration
+RUN mkdir -p /var/lib/clamav /var/log/clamav /run/clamav && \
+    chown clamav:clamav /var/lib/clamav /var/log/clamav /run/clamav && \
+    sed -i 's/^Example/#Example/' /etc/clamav/clamd.conf 2>/dev/null || true && \
+    sed -i 's/^Example/#Example/' /etc/clamav/freshclam.conf 2>/dev/null || true && \
+    freshclam --stdout 2>/dev/null || true
+
+# Load NBD module at boot (for guest disk scanning via qemu-nbd)
+RUN echo "nbd" >> /etc/modules
+
+# Network config: eth0 via DHCP (QEMU user-mode networking provides it)
+RUN mkdir -p /etc/network && \
+    printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n' > /etc/network/interfaces
+
+# Inittab with serial consoles
+RUN printf '::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\ntty0::respawn:/sbin/getty 38400 tty0\n::respawn:/bin/sh -c "[ -e /dev/hvc0 ] && exec /sbin/getty -n -l /bin/sh 38400 hvc0 || sleep 5"\nttyAMA0::respawn:/sbin/getty 115200 ttyAMA0\nttyS0::respawn:/sbin/getty 115200 ttyS0\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n' > /etc/inittab
+
+# Fstab
+RUN echo '/dev/vda / ext4 rw,relatime 0 1' > /etc/fstab
+
+# ─── Agent + boot artifacts ───────────────────────────────────────────────
+RUN mkdir -p /opt/devshot /xen/boot /xen/guests /xen/qemu
+
+# Agent binary (dom0 role — orchestrates pool VMs)
+COPY bin/devshot-agent-linux-arm64 /opt/devshot/agent
+RUN chmod 755 /opt/devshot/agent
+
+# YARA rules
+COPY yara_rules /opt/devshot/yara_rules
+
+# Pool VM boot artifacts (kernel + base image passed via 9p from Mac host)
+# These get mounted at /xen/boot from the host via virtio-9p at boot time.
+
+# Orchestrator start script — detects environment, configures agent as dom0
+RUN printf '#!/bin/sh\n\
+# DevShot Orchestrator VM init script\n\
+# Runs the agent in dom0 mode with QEMU backend for pool VMs.\n\
+\n\
+# Start qemu-guest-agent so the Mac host can run commands in this VM via\n\
+# QGA without any baked secret. Launched inline here (Alpine ships\n\
+# qemu-ga on aarch64 without an OpenRC init script).\n\
+[ -x /usr/bin/qemu-ga ] && /usr/bin/qemu-ga --daemonize --pidfile=/run/qemu-ga.pid >/dev/null 2>&1\n\
+\n\
+# Mount 9p shares from Mac host\n\
+mount -t 9p -o trans=virtio devshot_boot /xen/boot 2>/dev/null || true\n\
+# Templates dir mounts at /xen/guests/templates so the agent's bakery\n\
+# discovers .qcow2 + .json sidecar pairs produced by `make build-templates`\n\
+# on the Mac host. Falls through silently if the launcher didn't add the\n\
+# tmpl_fs fsdev (older Homebrew bottles) so the orchestrator still boots.\n\
+mkdir -p /xen/guests/templates\n\
+mount -t 9p -o trans=virtio devshot_templates /xen/guests/templates 2>/dev/null || true\n\
+\n\
+# QEMU user networking exposes the Mac host as 10.0.2.2. Match Docker\n\
+# dev naming so the orchestrator and Docker agents can share the same\n\
+# ws://host.docker.internal:3041 tunnel URL.\n\
+grep -q "^10.0.2.2[[:space:]]\\+host.docker.internal" /etc/hosts 2>/dev/null || echo "10.0.2.2 host.docker.internal" >> /etc/hosts\n\
+\n\
+# Port-forward for nested pool VMs: pool VMs see their QEMU user-net\n\
+# gateway at 10.0.2.2 = orchestrator itself. Without this forward they\n\
+# cannot reach the Mac-host tunnel or local TURN/STUN endpoints.\n\
+# socat bridges pool-VM:3041 -> orchestrator:3041 -> Mac-host:3041 and\n\
+# likewise forwards the relay port so nested pool VMs can gather TURN\n\
+# candidates instead of falling back to host-only ICE.\n\
+# Parse the URLs from agent.env so this also works if the ports or hosts\n\
+# are customized.\n\
+parse_host_port() {\n\
+  local url="$1"\n\
+  local default_port="$2"\n\
+  local hp host port\n\
+  hp=$(echo "$url" | sed -E "s|^[a-z]+:(//)?||; s|/.*$||; s|\\?.*$||")\n\
+  host=$(echo "$hp" | cut -d: -f1)\n\
+  port=$(echo "$hp" | cut -sd: -f2)\n\
+  [ -z "$port" ] && port="$default_port"\n\
+  echo "$host $port"\n\
+}\n\
+start_tcp_forward() {\n\
+  local host="$1"\n\
+  local port="$2"\n\
+  local log="$3"\n\
+  [ -n "$host" ] || return 0\n\
+  [ -n "$port" ] || return 0\n\
+  (nohup socat "TCP-LISTEN:${port},bind=0.0.0.0,reuseaddr,fork" "TCP:${host}:${port}" >>"$log" 2>&1 &) 2>/dev/null\n\
+}\n\
+start_udp_forward() {\n\
+  local host="$1"\n\
+  local port="$2"\n\
+  local log="$3"\n\
+  [ -n "$host" ] || return 0\n\
+  [ -n "$port" ] || return 0\n\
+  (nohup socat "UDP4-LISTEN:${port},reuseaddr,fork" "UDP4-SENDTO:${host}:${port}" >>"$log" 2>&1 &) 2>/dev/null\n\
+}\n\
+if [ -f /xen/boot/agent.env ]; then\n\
+  TUNNEL_URL=$(grep -E "^DEVSHOT_TUNNEL_URL=" /xen/boot/agent.env | cut -d= -f2-)\n\
+  WEBRTC_TURN_URL=$(grep -E "^WEBRTC_TURN_URL=" /xen/boot/agent.env | cut -d= -f2-)\n\
+  WEBRTC_STUN_URL=$(grep -E "^WEBRTC_STUN_URL=" /xen/boot/agent.env | cut -d= -f2-)\n\
+  set -- $(parse_host_port "$TUNNEL_URL" 3041)\n\
+  TUNNEL_HOST="$1"\n\
+  TUNNEL_PORT="$2"\n\
+  start_tcp_forward "$TUNNEL_HOST" "$TUNNEL_PORT" /var/log/fwd-tunnel.log\n\
+  TURN_HOST=""\n\
+  TURN_PORT=""\n\
+  if [ -n "$WEBRTC_TURN_URL" ]; then\n\
+    set -- $(parse_host_port "$WEBRTC_TURN_URL" 3478)\n\
+    TURN_HOST="$1"\n\
+    TURN_PORT="$2"\n\
+    start_tcp_forward "$TURN_HOST" "$TURN_PORT" /var/log/fwd-turn.log\n\
+    start_udp_forward "$TURN_HOST" "$TURN_PORT" /var/log/fwd-turn.log\n\
+  fi\n\
+  if [ -n "$WEBRTC_STUN_URL" ]; then\n\
+    set -- $(parse_host_port "$WEBRTC_STUN_URL" 3478)\n\
+    STUN_HOST="$1"\n\
+    STUN_PORT="$2"\n\
+    if [ "$STUN_HOST $STUN_PORT" != "$TURN_HOST $TURN_PORT" ]; then\n\
+      start_udp_forward "$STUN_HOST" "$STUN_PORT" /var/log/fwd-turn.log\n\
+    fi\n\
+  fi\n\
+fi\n\
+\n\
+# If the Mac host shipped a newer agent binary via 9p (apps/agent/.build\n\
+# layout), prefer it over the one baked into the image at build time. Lets\n\
+# us iterate on the agent without rebuilding the orchestrator qcow2.\n\
+if [ -x /xen/boot/agent ] && [ /xen/boot/agent -nt /opt/devshot/agent ]; then\n\
+  cp /xen/boot/agent /opt/devshot/agent\n\
+fi\n\
+\n\
+# Set up orchestrator environment\n\
+export ROLE=dom0\n\
+export LAMP_RELEASE_INDEX_URL="${LAMP_RELEASE_INDEX_URL:-https://github.com/devshotcom/devshot-agent/releases/download/lamp-matrix-latest/lamp-matrix-index-v2.json}"\n\
+export LAMP_SYNC_INTERVAL="${LAMP_SYNC_INTERVAL:-5m}"\n\
+export LAMP_SYNC_DOWNLOAD_TIMEOUT="${LAMP_SYNC_DOWNLOAD_TIMEOUT:-30m}"\n\
+export DEVSHOT_HYPERVISOR=qemu\n\
+export XS_REAL=0\n\
+export XS_ROOT=/tmp/xenstore-dom0\n\
+mkdir -p /tmp/xenstore-dom0\n\
+\n\
+# Pool VM paths (kernel + base from 9p mount)\n\
+export KERNEL=/xen/boot/Image-domu\n\
+export BASE_IMAGE=/xen/boot/devshot-guest-base.qcow2\n\
+export GUESTS_DIR=/xen/guests\n\
+export DEVSHOT_QEMU_RUNTIME=/xen/qemu\n\
+export BRIDGE=""\n\
+\n\
+# Read agent config from 9p-shared env file\n\
+if [ -f /xen/boot/agent.env ]; then\n\
+  set -a\n\
+  . /xen/boot/agent.env\n\
+  set +a\n\
+fi\n\
+\n\
+exec /opt/devshot/agent\n\
+' > /opt/devshot/start-orchestrator.sh && \
+    chmod 755 /opt/devshot/start-orchestrator.sh
+
+# OpenRC service for orchestrator agent
+RUN printf '#!/sbin/openrc-run\n\
+\n\
+name="devshot-orchestrator"\n\
+description="DevShot Orchestrator Agent (dom0)"\n\
+command="/opt/devshot/start-orchestrator.sh"\n\
+pidfile="/run/${RC_SVCNAME}.pid"\n\
+command_background="yes"\n\
+output_log="/xen/orchestrator.log"\n\
+error_log="/xen/orchestrator.log"\n\
+command_user="root"\n\
+\n\
+depend() {\n\
+    need net\n\
+    after networking\n\
+}\n\
+' > /etc/init.d/devshot-orchestrator && \
+    chmod 755 /etc/init.d/devshot-orchestrator && \
+    ln -sf /etc/init.d/devshot-orchestrator /etc/runlevels/default/devshot-orchestrator
+
+# Hostname (hosts/resolv.conf are Docker bind-mounts, patched in converter stage)
+RUN echo 'devshot-orchestrator' > /etc/hostname
+
+# Export rootfs
+RUN tar czf /tmp/orchestrator-rootfs.tar.gz \
+    --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
+    -C / .
+
+# ─── Stage 2: Convert to qcow2 ────────────────────────────────────────────
+FROM debian:bookworm AS orchestrator-converter
+
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=orchestrator-rootfs /tmp/orchestrator-rootfs.tar.gz /tmp/orchestrator-rootfs.tar.gz
+
+# Create ext4 filesystem and convert to qcow2
+# 8GB to hold QEMU, ClamAV signatures, agent, and pool VM overlays
+RUN mkdir -p /orch/rootfs && \
+    tar xzf /tmp/orchestrator-rootfs.tar.gz -C /orch/rootfs && \
+    rm /tmp/orchestrator-rootfs.tar.gz && \
+    echo '127.0.0.1 localhost devshot-orchestrator' > /orch/rootfs/etc/hosts && \
+    echo 'nameserver 10.0.2.3' > /orch/rootfs/etc/resolv.conf && \
+    mkdir -p /orch/rootfs/tmp /orch/rootfs/proc /orch/rootfs/sys /orch/rootfs/dev && \
+    mke2fs -t ext4 -d /orch/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/orch-disk.raw 8G && \
+    qemu-img convert -f raw -O qcow2 -c /tmp/orch-disk.raw /tmp/orchestrator-mac.qcow2 && \
+    rm -rf /tmp/orch-disk.raw /orch/rootfs
+
+# ─── Stage 3: Export just the qcow2 file ───────────────────────────────────
+FROM scratch AS output
+COPY --from=orchestrator-converter /tmp/orchestrator-mac.qcow2 /orchestrator-mac.qcow2

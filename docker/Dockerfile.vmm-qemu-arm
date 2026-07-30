@@ -40,6 +40,13 @@ FROM ${BASE_IMAGE} AS artifacts
 # ── Stage 2: final image ───────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
+# Make the final manifest source-unique even when the runtime payload did not
+# otherwise change. The rolling KVM digest is the family commit marker, so two
+# source revisions must never produce the same marker digest.
+ARG SOURCE_SHA
+RUN printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+LABEL org.opencontainers.image.revision="$SOURCE_SHA"
+
 # Install runtime deps (minimal).
 RUN apt-get update && apt-get install -y --no-install-recommends \
   qemu-system-arm \

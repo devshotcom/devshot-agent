@@ -10,23 +10,26 @@ name: Build & Push Orchestrator Images
 #
 # Active groups:
 #   Group 1 (x86)            — dom0-amd64 followed by vmm-qemu-amd64 on
-#                              the isolated devshot-agent builder group.
+#                              the isolated X64 builder.
+#   Group 2 (arm64)          — dom0-arm64 followed by vmm-qemu-arm64 on
+#                              the isolated architecture-matched ARM64 builder.
 #
 # Disabled groups (commented out below — uncomment to re-enable):
-#   Group 2 (arm64)          — dom0-arm64 + vmm-qemu-arm64 + extract-boot-artifacts
-#                              built on Docker Build Cloud
 #   Group 3 (multi-arch domu) — domu + domu-desktop
 #                              multi-arch manifests via Docker Build Cloud
 #
-# Tags produced by Group 1 (active):
+# Tags produced by active groups:
 #   anticipatercom/devshot:amd64           — Dom0 orchestrator, Linux x86_64 (KVM)
 #   anticipatercom/devshot:amd64-kvm       — Direct QEMU backend, Linux x86_64
+#   anticipatercom/devshot:arm64           — Dom0 orchestrator, Linux ARM64
+#   anticipatercom/devshot:arm64-mac       — Apple Silicon Docker Desktop alias
+#   anticipatercom/devshot:arm64-kvm       — Direct QEMU backend, Linux ARM64
 #
 # Required repo secrets (configure in devshot-agent repo Settings → Secrets):
 #   DOCKERHUB_USERNAME — Docker Hub user with push access to anticipatercom
 #   DOCKERHUB_TOKEN    — Docker Hub access token
 #
-# Required Docker Build Cloud setup — only used by Groups 2 & 3 when enabled:
+# Required Docker Build Cloud setup — only used by Group 3 when enabled:
 #   1. Subscribe to Docker Build Cloud on the anticipatercom org
 #   2. Create a builder named "devshot": `docker buildx create --driver cloud anticipatercom/devshot`
 #   3. If you rename the builder, update BUILDX_CLOUD_ENDPOINT below.
@@ -49,12 +52,50 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
 
 env:
   BUILDX_CLOUD_ENDPOINT: anticipatercom/devshot
 
 jobs:
+  # An interrupted promotion can leave Dom0 on a newer digest while KVM still
+  # names the previously committed family. Repair that registry state before
+  # either architecture starts another build. The helper never moves KVM.
+  recover-published-families:
+    runs-on:
+      group: devshot-agent-builders
+      labels: [self-hosted, Linux, X64, devshot-runner]
+    timeout-minutes: 45
+    env:
+      CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-family-recovery
+    steps:
+      - name: Reclaim self-hosted runner workspace
+        shell: bash
+        run: |
+          if [ -x /usr/local/sbin/reclaim-runner-workspace ]; then
+            sudo -n /usr/local/sbin/reclaim-runner-workspace 2>/dev/null || true
+          fi
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null \
+              || sudo -n find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ${{ env.CHECKOUT_DIR }}
+          persist-credentials: false
+
+      - name: Recover committed rolling image families
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          bash docker/recover-published-family.sh amd64
+          bash docker/recover-published-family.sh arm64
+
   # ═══════════════════════════════════════════════════════════════════════
   # Group 1 — x86 (active)
   # Runs on the isolated self-hosted devshot-agent builder group. The group is
@@ -64,6 +105,7 @@ jobs:
 
   # ── Dom0 orchestrator: Linux x86_64 ────────────────────────────────────
   build-dom0-amd64:
+    needs: recover-published-families
     runs-on:
       group: devshot-agent-builders
       labels: [self-hosted, Linux, X64, devshot-runner]
@@ -71,6 +113,7 @@ jobs:
     env:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-dom0
       BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-dom0
+      CANDIDATE_IMAGE: devshot-amd64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-dom0
     steps:
       - name: Reclaim self-hosted runner workspace
         shell: bash
@@ -95,6 +138,8 @@ jobs:
 
       - name: Verify persistent builder prerequisites and workspace capacity
         working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          GITHUB_API_TOKEN: ${{ github.token }}
         run: bash docker/self-hosted-builder.sh prepare 40
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -116,8 +161,25 @@ jobs:
             [worker.oci]
               max-parallelism = 1
 
+      - name: Reuse exact immutable AMD64 Dom0 image on retry
+        id: reuse_dom0_amd64
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          if bash docker/publish-validated-image.sh reuse-immutable \
+              amd64-dom0 "$CANDIDATE_IMAGE" "${{ github.sha }}"; then
+            echo 'reused=true' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 3 ]; then
+              exit "$status"
+            fi
+            echo 'reused=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         id: build_dom0
+        if: steps.reuse_dom0_amd64.outputs.reused != 'true'
         continue-on-error: true
         with:
           context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
@@ -125,7 +187,8 @@ jobs:
           builder: ${{ env.BUILDER_NAME }}
           platforms: linux/amd64
           provenance: false
-          push: true
+          push: false
+          load: true
           # mode=min (was mode=max): only push the final image's layers
           # to the registry cache, not every intermediate stage. Saves
           # ~10 GB of buildkit disk pressure during the push phase of
@@ -133,33 +196,44 @@ jobs:
           # the most expensive layers (kernel, xen, android rootfs) on
           # the next run because they all land in the final image too.
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
-          # Cache export is best-effort; the image push above is the deploy artifact.
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min,ignore-error=true
-          tags: |
-            anticipatercom/devshot:amd64
-            anticipatercom/devshot:amd64-${{ github.sha }}
+          tags: ${{ env.CANDIDATE_IMAGE }}
       # Retry once on a transient BuildKit / Docker Hub flake (builder
       # graceful_stop, registry 400 on layer PUT). If this second attempt
       # also fails the job fails (no continue-on-error here).
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        if: steps.build_dom0.outcome == 'failure'
+        if: steps.reuse_dom0_amd64.outputs.reused != 'true' && steps.build_dom0.outcome == 'failure'
         with:
           context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
           file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-x86
           builder: ${{ env.BUILDER_NAME }}
           platforms: linux/amd64
           provenance: false
-          push: true
+          push: false
+          load: true
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min,ignore-error=true
-          tags: |
-            anticipatercom/devshot:amd64
-            anticipatercom/devshot:amd64-${{ github.sha }}
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      - name: Verify local AMD64 Studio runtime candidate
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          [ "$(docker image inspect --format '{{.Architecture}}' "$CANDIDATE_IMAGE")" = amd64 ]
+          bash scripts/verify-studio-runtime-image.sh \
+            "$CANDIDATE_IMAGE" linux/amd64 roles/dom0/files/verify-studio-runtime-prerequisites.sh
+
+      - name: Publish validated immutable AMD64 Dom0 tag
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/publish-validated-image.sh push-immutable amd64-dom0 "$CANDIDATE_IMAGE" "${{ github.sha }}"
 
       - name: Remove exact self-hosted builder state
         if: always()
         working-directory: ${{ env.CHECKOUT_DIR }}
-        run: bash docker/self-hosted-builder.sh cleanup
+        run: |
+          bash docker/self-hosted-builder.sh cleanup \
+            "$CANDIDATE_IMAGE" \
+            anticipatercom/devshot:amd64-${{ github.sha }}
 
   # ── Direct QEMU backend: Linux x86_64 ──────────────────────────────────
   build-vmm-qemu-amd64:
@@ -171,6 +245,7 @@ jobs:
     env:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-kvm
       BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-kvm
+      CANDIDATE_IMAGE: devshot-amd64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-kvm
     steps:
       - name: Reclaim self-hosted runner workspace
         shell: bash
@@ -195,6 +270,8 @@ jobs:
 
       - name: Verify persistent builder prerequisites and workspace capacity
         working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          GITHUB_API_TOKEN: ${{ github.token }}
         run: bash docker/self-hosted-builder.sh prepare 40
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -216,7 +293,24 @@ jobs:
             [worker.oci]
               max-parallelism = 1
 
+      - name: Reuse exact immutable AMD64 KVM image on retry
+        id: reuse_kvm_amd64
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          if bash docker/publish-validated-image.sh reuse-immutable \
+              amd64-kvm "$CANDIDATE_IMAGE" "${{ github.sha }}"; then
+            echo 'reused=true' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 3 ]; then
+              exit "$status"
+            fi
+            echo 'reused=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Bake public LAMP Studio templates
+        if: steps.reuse_kvm_amd64.outputs.reused != 'true'
         working-directory: ${{ env.CHECKOUT_DIR }}
         run: |
           set -euo pipefail
@@ -249,6 +343,7 @@ jobs:
 
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         id: build_vmm
+        if: steps.reuse_kvm_amd64.outputs.reused != 'true'
         continue-on-error: true
         with:
           context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
@@ -256,154 +351,560 @@ jobs:
           builder: ${{ env.BUILDER_NAME }}
           platforms: linux/amd64
           provenance: false
-          push: true
+          push: false
+          load: true
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
+            SOURCE_SHA=${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
-          tags: |
-            anticipatercom/devshot:amd64-kvm
-            anticipatercom/devshot:amd64-kvm-${{ github.sha }}
+          tags: ${{ env.CANDIDATE_IMAGE }}
       # Retry once on a transient BuildKit / Docker Hub flake. The bake step
       # above already produced its artifacts, so only the push is re-attempted.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        if: steps.build_vmm.outcome == 'failure'
+        if: steps.reuse_kvm_amd64.outputs.reused != 'true' && steps.build_vmm.outcome == 'failure'
         with:
           context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
           file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.vmm-qemu-x86
           builder: ${{ env.BUILDER_NAME }}
           platforms: linux/amd64
           provenance: false
-          push: true
+          push: false
+          load: true
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
+            SOURCE_SHA=${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
-          tags: |
-            anticipatercom/devshot:amd64-kvm
-            anticipatercom/devshot:amd64-kvm-${{ github.sha }}
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      - name: Verify local AMD64 KVM Studio runtime candidate
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          [ "$(docker image inspect --format '{{.Architecture}}' "$CANDIDATE_IMAGE")" = amd64 ]
+          [ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$CANDIDATE_IMAGE")" = "${{ github.sha }}" ]
+          bash scripts/verify-studio-runtime-image.sh \
+            "$CANDIDATE_IMAGE" linux/amd64 roles/dom0/files/verify-studio-runtime-prerequisites.sh
+
+      - name: Publish validated immutable AMD64 KVM tag
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/publish-validated-image.sh push-immutable amd64-kvm "$CANDIDATE_IMAGE" "${{ github.sha }}"
 
       - name: Remove exact self-hosted builder state
         if: always()
         working-directory: ${{ env.CHECKOUT_DIR }}
-        run: bash docker/self-hosted-builder.sh cleanup anticipatercom/devshot:amd64-${{ github.sha }}
+        run: |
+          bash docker/self-hosted-builder.sh cleanup \
+            "$CANDIDATE_IMAGE" \
+            anticipatercom/devshot:amd64-${{ github.sha }} \
+            anticipatercom/devshot:amd64-kvm-${{ github.sha }}
+
+      - name: Promote validated AMD64 family to rolling tags
+        if: success()
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: bash docker/publish-validated-image.sh promote-amd64-family "${{ github.sha }}"
 
   # ═══════════════════════════════════════════════════════════════════════
-  # Group 2 — arm64 (disabled)
-  # Re-enable by removing the leading `# ` from each line below.
-  # Builds on Docker Build Cloud (native arm64 builder).
+  # Group 2 — arm64 (active)
+  # Runs only on the isolated architecture-matched ARM64 QEMU/TCG runner. The
+  # group is restricted to this exact trusted main-branch workflow and the
+  # custom label prevents the runner from accepting X64 or deployment jobs.
   # ═══════════════════════════════════════════════════════════════════════
-  #
-  # # ── Dom0 orchestrator: Linux ARM64 (+ arm64-mac alias) ─────────────────
-  # build-dom0-arm64:
-  #   runs-on:
-  #     group: devshot-agent-builders
-  #     labels: [self-hosted, Linux, X64, devshot-runner]
-  #   steps:
-  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-  #
-  #     - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-  #       with:
-  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
-  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
-  #
-  #     - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-  #       with:
-  #         version: "lab:latest"
-  #         driver: cloud
-  #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
-  #         install: true
-  #
-  #     - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-  #       with:
-  #         context: .
-  #         file: docker/Dockerfile.dom0-arm
-  #         platforms: linux/arm64
-  #         provenance: false
-  #         push: true
-  #         cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
-  #         cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=max
-  #         tags: |
-  #           anticipatercom/devshot:arm64
-  #           anticipatercom/devshot:arm64-${{ github.sha }}
-  #           anticipatercom/devshot:arm64-mac
-  #           anticipatercom/devshot:arm64-mac-${{ github.sha }}
-  #
-  # # ── Direct QEMU backend: Linux ARM64 ───────────────────────────────────
-  # build-vmm-qemu-arm64:
-  #   needs: build-dom0-arm64
-  #   runs-on:
-  #     group: devshot-agent-builders
-  #     labels: [self-hosted, Linux, X64, devshot-runner]
-  #   steps:
-  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-  #
-  #     - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-  #       with:
-  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
-  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
-  #
-  #     - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-  #       with:
-  #         version: "lab:latest"
-  #         driver: cloud
-  #         endpoint: ${{ env.BUILDX_CLOUD_ENDPOINT }}
-  #         install: true
-  #
-  #     - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-  #       with:
-  #         context: .
-  #         file: docker/Dockerfile.vmm-qemu-arm
-  #         platforms: linux/arm64
-  #         provenance: false
-  #         push: true
-  #         cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64
-  #         cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64,mode=max
-  #         tags: |
-  #           anticipatercom/devshot:arm64-kvm
-  #           anticipatercom/devshot:arm64-kvm-${{ github.sha }}
-  #
-  # # ── Extract + commit boot artifacts for Homebrew tap ──────────────────
-  # # After the arm64 image is built, extract the kernel + guest base and
-  # # commit them to boot/ so the monorepo deploy job can sync them to the
-  # # homebrew-tap.
-  # extract-boot-artifacts:
-  #   needs: build-dom0-arm64
-  #   runs-on:
-  #     group: devshot-agent-builders
-  #     labels: [self-hosted, Linux, X64, devshot-runner]
-  #   steps:
-  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-  #       with:
-  #         token: ${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}
-  #
-  #     - name: Verify boot artifact push token
-  #       run: |
-  #         if [ -z "${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}" ]; then
-  #           echo "BOOT_ARTIFACTS_PUSH_TOKEN is required to push boot/ updates back to the repo."
-  #           exit 1
-  #         fi
-  #
-  #     - name: Pull arm64 image and extract boot files
-  #       run: |
-  #         docker pull anticipatercom/devshot:arm64
-  #         CID=$(docker create anticipatercom/devshot:arm64)
-  #         mkdir -p boot
-  #         docker cp "$CID:/xen/boot/Image-domu" boot/Image-domu 2>/dev/null \
-  #           || docker cp "$CID:/xen/Image" boot/Image-domu
-  #         docker cp "$CID:/xen/devshot-guest-base.qcow2" boot/devshot-guest-base.qcow2
-  #         docker rm "$CID"
-  #         ls -lh boot/
-  #
-  #     - name: Commit boot artifacts
-  #       run: |
-  #         git config user.name "github-actions[bot]"
-  #         git config user.email "github-actions[bot]@users.noreply.github.com"
-  #         git remote set-url origin "https://x-access-token:${{ secrets.BOOT_ARTIFACTS_PUSH_TOKEN }}@github.com/${{ github.repository }}.git"
-  #         git add boot/
-  #         git diff --cached --quiet && echo "Boot artifacts unchanged" && exit 0
-  #         git commit -m "Update boot artifacts (Image-domu + guest base)"
-  #         git push
+
+  # ── Dom0 orchestrator: Linux ARM64 (+ arm64-mac alias) ────────────────
+  build-dom0-arm64:
+    needs: recover-published-families
+    runs-on:
+      group: devshot-agent-builders
+      labels: [self-hosted, Linux, ARM64, devshot-arm64]
+    timeout-minutes: 720
+    env:
+      CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-arm64-dom0
+      BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-dom0
+      CANDIDATE_IMAGE: devshot-arm64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-dom0
+      HOMEBREW_ARTIFACT_DIR: ${{ runner.temp }}/devshot-homebrew-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Reclaim self-hosted runner workspace
+        shell: bash
+        run: |
+          if [ -x /usr/local/sbin/reclaim-runner-workspace ]; then
+            sudo -n /usr/local/sbin/reclaim-runner-workspace 2>/dev/null || true
+          fi
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null \
+              || sudo -n find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ${{ env.CHECKOUT_DIR }}
+          persist-credentials: false
+
+      - name: Initialize isolated self-hosted state
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh initialize dom0
+
+      - name: Verify ARM64 architecture and workspace capacity
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          host_arch="$(uname -m)"
+          docker_arch="$(timeout --foreground --signal=TERM --kill-after=10s 60s docker info --format '{{.Architecture}}')"
+          case "$host_arch:$docker_arch" in
+            aarch64:aarch64|aarch64:arm64|arm64:aarch64|arm64:arm64) ;;
+            *)
+              echo "ERROR: ARM64 image job reached a non-ARM64 host or Docker daemon: host=$host_arch docker=$docker_arch" >&2
+              exit 1
+              ;;
+          esac
+          bash docker/self-hosted-builder.sh verify-memory 8
+          bash docker/self-hosted-builder.sh prepare 40
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          logout: false
+
+      - name: Verify Docker data capacity
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh verify-docker-storage 40
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          name: ${{ env.BUILDER_NAME }}
+          driver: docker-container
+          cleanup: false
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
+
+      - name: Reuse exact immutable ARM64 Dom0 image on retry
+        id: reuse_dom0_arm64
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          if bash docker/publish-validated-image.sh reuse-immutable \
+              arm64-dom0 "$CANDIDATE_IMAGE" "${{ github.sha }}"; then
+            echo 'reused=true' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 3 ]; then
+              exit "$status"
+            fi
+            echo 'reused=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: build_dom0_arm64
+        if: steps.reuse_dom0_arm64.outputs.reused != 'true'
+        continue-on-error: true
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-arm
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/arm64
+          provenance: false
+          push: false
+          load: true
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=min,ignore-error=true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: steps.reuse_dom0_arm64.outputs.reused != 'true' && steps.build_dom0_arm64.outcome == 'failure'
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-arm
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/arm64
+          provenance: false
+          push: false
+          load: true
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=min,ignore-error=true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      - name: Verify local ARM64 Studio runtime candidate
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          image="$CANDIDATE_IMAGE"
+          [ "$(docker image inspect --format '{{.Architecture}}' "$image")" = arm64 ]
+          bash scripts/verify-studio-runtime-image.sh \
+            "$image" linux/arm64 roles/dom0/files/verify-studio-runtime-prerequisites.sh
+
+      - name: Prepare exact Homebrew artifact staging
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          case "$HOMEBREW_ARTIFACT_DIR" in
+            "${RUNNER_TEMP%/}"/devshot-homebrew-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT") ;;
+            *) echo "ERROR: unsafe Homebrew artifact staging path" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$HOMEBREW_ARTIFACT_DIR"
+          install -d -m 0700 \
+            "$HOMEBREW_ARTIFACT_DIR/orchestrator-output" \
+            "$HOMEBREW_ARTIFACT_DIR/payload/boot"
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: build_macos_orchestrator_arm64
+        continue-on-error: true
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.orchestrator-mac
+          target: output
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/arm64
+          provenance: false
+          outputs: type=local,dest=${{ env.HOMEBREW_ARTIFACT_DIR }}/orchestrator-output
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-orchestrator-mac-arm64
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-orchestrator-mac-arm64,mode=min,ignore-error=true
+
+      - name: Reset failed Mac orchestrator output
+        if: steps.build_macos_orchestrator_arm64.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          case "$HOMEBREW_ARTIFACT_DIR" in
+            "${RUNNER_TEMP%/}"/devshot-homebrew-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT") ;;
+            *) echo "ERROR: unsafe Homebrew artifact staging path" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$HOMEBREW_ARTIFACT_DIR/orchestrator-output"
+          install -d -m 0700 "$HOMEBREW_ARTIFACT_DIR/orchestrator-output"
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: steps.build_macos_orchestrator_arm64.outcome == 'failure'
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.orchestrator-mac
+          target: output
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/arm64
+          provenance: false
+          outputs: type=local,dest=${{ env.HOMEBREW_ARTIFACT_DIR }}/orchestrator-output
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-orchestrator-mac-arm64
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-orchestrator-mac-arm64,mode=min,ignore-error=true
+
+      - name: Extract and validate exact ARM64 Homebrew payload
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          payload="$HOMEBREW_ARTIFACT_DIR/payload"
+          source roles/dom0/files/bounded-docker-run.sh
+          cleanup_bounded() { bounded_docker_cleanup; }
+          trap cleanup_bounded EXIT
+
+          test -s "$HOMEBREW_ARTIFACT_DIR/orchestrator-output/orchestrator-mac.qcow2"
+          mv "$HOMEBREW_ARTIFACT_DIR/orchestrator-output/orchestrator-mac.qcow2" \
+            "$payload/orchestrator-mac.qcow2"
+          bounded_docker_extract_local_file \
+            "$CANDIDATE_IMAGE" \
+            /xen/boot/Image-domu \
+            "$payload/boot/Image-domu"
+          bounded_docker_extract_local_file \
+            "$CANDIDATE_IMAGE" \
+            /xen/devshot-guest-base.qcow2 \
+            "$payload/boot/devshot-guest-base.qcow2"
+          install -m 0755 bin/devshot-agent-linux-arm64 "$payload/devshot-agent"
+
+          file "$payload/boot/Image-domu" | grep -Eq 'Linux kernel ARM64|ARM aarch64'
+          for disk in orchestrator-mac.qcow2 boot/devshot-guest-base.qcow2; do
+            bounded_docker_run "homebrew-qcow-check-${disk##*/}" \
+              --entrypoint /usr/bin/qemu-img \
+              --volume "$payload:/artifact:ro" \
+              "$CANDIDATE_IMAGE" \
+              check "/artifact/$disk"
+          done
+          [ "$(file -b "$payload/devshot-agent")" != "" ]
+          file "$payload/devshot-agent" | grep -Eq 'ELF 64-bit.*ARM aarch64|ELF 64-bit.*ARM64'
+
+      - name: Boot exact Mac orchestrator payload and verify QGA plus agent
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          MAC_BOOT_SMOKE_TIMEOUT_SECONDS: '1200'
+        run: bash docker/verify-mac-orchestrator-boot.sh "$CANDIDATE_IMAGE" "$HOMEBREW_ARTIFACT_DIR/payload"
+
+      - name: Publish validated immutable ARM64 Dom0 tags
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/publish-validated-image.sh push-immutable arm64-dom0 "$CANDIDATE_IMAGE" "${{ github.sha }}"
+
+      - name: Finalize exact Homebrew provenance
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          payload="$HOMEBREW_ARTIFACT_DIR/payload"
+          manifest="$(timeout --foreground --signal=TERM --kill-after=30s 180s \
+            docker buildx imagetools inspect \
+              "anticipatercom/devshot:arm64-${GITHUB_SHA}" \
+              --format '{{json .Manifest}}')"
+          image_digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")"
+          (
+            cd "$payload"
+            sha256sum \
+              devshot-agent \
+              orchestrator-mac.qcow2 \
+              boot/Image-domu \
+              boot/devshot-guest-base.qcow2 > SHA256SUMS
+          )
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg agent_sha "$GITHUB_SHA" \
+            --arg image_digest "$image_digest" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{schema: 1, repository: $repository, agent_sha: $agent_sha, image_digest: $image_digest, run_id: $run_id, run_attempt: $run_attempt}' \
+            > "$payload/provenance.json.tmp"
+          mv "$payload/provenance.json.tmp" "$payload/provenance.json"
+          (cd "$payload" && sha256sum -c SHA256SUMS)
+
+      - name: Upload exact validated Homebrew ARM64 payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: homebrew-arm64-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ env.HOMEBREW_ARTIFACT_DIR }}/payload
+          if-no-files-found: error
+          # A rerun must still be able to complete an immutable Homebrew release
+          # after the GitHub release record has been created but before its asset
+          # was uploaded. Keep the exact, digest-bound payload for the maximum
+          # standard Actions retention window.
+          retention-days: 90
+
+      - name: Remove exact Homebrew artifact staging
+        if: always()
+        run: |
+          set -euo pipefail
+          case "$HOMEBREW_ARTIFACT_DIR" in
+            "${RUNNER_TEMP%/}"/devshot-homebrew-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT") ;;
+            *) echo "ERROR: unsafe Homebrew artifact staging path" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$HOMEBREW_ARTIFACT_DIR" 2>/dev/null || {
+            sudo -n chown -R "$(id -u):$(id -g)" "$HOMEBREW_ARTIFACT_DIR"
+            rm -rf -- "$HOMEBREW_ARTIFACT_DIR"
+          }
+          [ ! -e "$HOMEBREW_ARTIFACT_DIR" ]
+
+      - name: Remove exact self-hosted builder state
+        id: cleanup_arm64_dom0
+        if: always()
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          bash docker/self-hosted-builder.sh cleanup \
+            "$CANDIDATE_IMAGE" \
+            anticipatercom/devshot:arm64-${{ github.sha }} \
+            anticipatercom/devshot:arm64-mac-${{ github.sha }}
+
+  # ── Direct QEMU backend: Linux ARM64 ──────────────────────────────────
+  build-vmm-qemu-arm64:
+    needs: build-dom0-arm64
+    runs-on:
+      group: devshot-agent-builders
+      labels: [self-hosted, Linux, ARM64, devshot-arm64]
+    timeout-minutes: 480
+    env:
+      CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-arm64-kvm
+      BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-kvm
+      CANDIDATE_IMAGE: devshot-arm64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-kvm
+    steps:
+      - name: Reclaim self-hosted runner workspace
+        shell: bash
+        run: |
+          if [ -x /usr/local/sbin/reclaim-runner-workspace ]; then
+            sudo -n /usr/local/sbin/reclaim-runner-workspace 2>/dev/null || true
+          fi
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null \
+              || sudo -n find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ${{ env.CHECKOUT_DIR }}
+          persist-credentials: false
+
+      - name: Initialize isolated self-hosted state
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh initialize kvm
+
+      - name: Verify ARM64 architecture and workspace capacity
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          host_arch="$(uname -m)"
+          docker_arch="$(timeout --foreground --signal=TERM --kill-after=10s 60s docker info --format '{{.Architecture}}')"
+          case "$host_arch:$docker_arch" in
+            aarch64:aarch64|aarch64:arm64|arm64:aarch64|arm64:arm64) ;;
+            *)
+              echo "ERROR: ARM64 image job reached a non-ARM64 host or Docker daemon: host=$host_arch docker=$docker_arch" >&2
+              exit 1
+              ;;
+          esac
+          bash docker/self-hosted-builder.sh verify-memory 8
+          bash docker/self-hosted-builder.sh prepare 40
+          runner_home="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+          promotion_state_dir="${runner_home%/}/.devshot-actions"
+          case "$promotion_state_dir" in
+            /*/.devshot-actions) ;;
+            *) echo "ERROR: unsafe persistent promotion state path" >&2; exit 1 ;;
+          esac
+          [ ! -L "$promotion_state_dir" ] || {
+            echo "ERROR: persistent promotion state path must not be a symlink" >&2
+            exit 1
+          }
+          install -d -m 0700 "$promotion_state_dir"
+          printf 'PROMOTION_STATE_DIR=%s\n' "$promotion_state_dir" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          logout: false
+
+      - name: Verify Docker data capacity
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/self-hosted-builder.sh verify-docker-storage 40
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          name: ${{ env.BUILDER_NAME }}
+          driver: docker-container
+          cleanup: false
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
+
+      - name: Reuse exact immutable ARM64 KVM image on retry
+        id: reuse_kvm_arm64
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          if bash docker/publish-validated-image.sh reuse-immutable \
+              arm64-kvm "$CANDIDATE_IMAGE" "${{ github.sha }}"; then
+            echo 'reused=true' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 3 ]; then
+              exit "$status"
+            fi
+            echo 'reused=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: build_vmm_arm64
+        if: steps.reuse_kvm_arm64.outputs.reused != 'true'
+        continue-on-error: true
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.vmm-qemu-arm
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/arm64
+          provenance: false
+          push: false
+          load: true
+          build-args: |
+            BASE_IMAGE=anticipatercom/devshot:arm64-${{ github.sha }}
+            SOURCE_SHA=${{ github.sha }}
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64,mode=min,ignore-error=true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: steps.reuse_kvm_arm64.outputs.reused != 'true' && steps.build_vmm_arm64.outcome == 'failure'
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.vmm-qemu-arm
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/arm64
+          provenance: false
+          push: false
+          load: true
+          build-args: |
+            BASE_IMAGE=anticipatercom/devshot:arm64-${{ github.sha }}
+            SOURCE_SHA=${{ github.sha }}
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64,mode=min,ignore-error=true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      - name: Verify local ARM64 KVM Studio runtime candidate
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          image="$CANDIDATE_IMAGE"
+          [ "$(docker image inspect --format '{{.Architecture}}' "$image")" = arm64 ]
+          [ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "${{ github.sha }}" ]
+          bash scripts/verify-studio-runtime-image.sh \
+            "$image" linux/arm64 roles/dom0/files/verify-studio-runtime-prerequisites.sh
+
+      - name: Publish validated immutable ARM64 KVM tag
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/publish-validated-image.sh push-immutable arm64-kvm "$CANDIDATE_IMAGE" "${{ github.sha }}"
+
+      - name: Remove exact self-hosted builder state
+        id: cleanup_arm64_kvm
+        if: always()
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          bash docker/self-hosted-builder.sh cleanup \
+            "$CANDIDATE_IMAGE" \
+            anticipatercom/devshot:arm64-kvm-${{ github.sha }}
+
+      - name: Promote validated ARM64 family to rolling tags
+        if: success() && steps.cleanup_arm64_kvm.outcome == 'success'
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: bash docker/publish-validated-image.sh promote-arm64-family "${{ github.sha }}"
+
+  # Re-run the same registry-derived repair after both promotion branches have
+  # reached a terminal state. This catches SIGKILL/runner loss that bypassed a
+  # host-local trap or journal. It intentionally runs even when a build failed.
+  reconcile-published-families:
+    needs:
+      - build-vmm-qemu-amd64
+      - build-vmm-qemu-arm64
+    if: always()
+    runs-on:
+      group: devshot-agent-builders
+      labels: [self-hosted, Linux, X64, devshot-runner]
+    timeout-minutes: 45
+    env:
+      CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-family-reconcile
+    steps:
+      - name: Reclaim self-hosted runner workspace
+        shell: bash
+        run: |
+          if [ -x /usr/local/sbin/reclaim-runner-workspace ]; then
+            sudo -n /usr/local/sbin/reclaim-runner-workspace 2>/dev/null || true
+          fi
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null \
+              || sudo -n find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: ${{ env.CHECKOUT_DIR }}
+          persist-credentials: false
+
+      - name: Reconcile committed rolling image families
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          bash docker/recover-published-family.sh amd64
+          bash docker/recover-published-family.sh arm64
 
   # ═══════════════════════════════════════════════════════════════════════
   # Group 3 — multi-arch domu (disabled)

@@ -112,7 +112,7 @@ bounded_docker_run() {
   return "$rc"
 }
 
-bounded_docker_extract_file() {
+bounded_docker_extract_present_file() {
   local image="${1:?bounded_docker_extract_file requires an image}"
   local container_path="${2:?bounded_docker_extract_file requires a container path}"
   local destination="${3:?bounded_docker_extract_file requires a destination}"
@@ -121,14 +121,6 @@ bounded_docker_extract_file() {
   bounded_docker_init
   destination_dir="$(cd "$(dirname "$destination")" && pwd)"
   destination_name="$(basename "$destination")"
-
-  if "$BOUNDED_DOCKER_TIMEOUT_BIN" \
-      --foreground --signal=TERM --kill-after=30s 3600s \
-      docker pull "$image"; then
-    :
-  else
-    return $?
-  fi
 
   BOUNDED_DOCKER_SEQUENCE=$((BOUNDED_DOCKER_SEQUENCE + 1))
   cid_file="$BOUNDED_DOCKER_CID_DIR/${BOUNDED_DOCKER_SEQUENCE}-extract.cid"
@@ -171,4 +163,35 @@ bounded_docker_extract_file() {
 
   bounded_docker_cleanup_active
   return "$rc"
+}
+
+bounded_docker_extract_file() {
+  local image="${1:?bounded_docker_extract_file requires an image}"
+  local container_path="${2:?bounded_docker_extract_file requires a container path}"
+  local destination="${3:?bounded_docker_extract_file requires a destination}"
+
+  bounded_docker_init
+  if "$BOUNDED_DOCKER_TIMEOUT_BIN" \
+      --foreground --signal=TERM --kill-after=30s 3600s \
+      docker pull "$image"; then
+    :
+  else
+    return $?
+  fi
+  bounded_docker_extract_present_file "$image" "$container_path" "$destination"
+}
+
+bounded_docker_extract_local_file() {
+  local image="${1:?bounded_docker_extract_local_file requires an image}"
+  local container_path="${2:?bounded_docker_extract_local_file requires a container path}"
+  local destination="${3:?bounded_docker_extract_local_file requires a destination}"
+
+  bounded_docker_init
+  if ! "$BOUNDED_DOCKER_TIMEOUT_BIN" \
+      --foreground --signal=TERM --kill-after=30s 60s \
+      docker image inspect "$image" >/dev/null; then
+    echo "ERROR: required local Docker image is unavailable: $image" >&2
+    return 1
+  fi
+  bounded_docker_extract_present_file "$image" "$container_path" "$destination"
 }

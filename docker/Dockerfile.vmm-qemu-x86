@@ -8,6 +8,12 @@ FROM ${BASE_IMAGE} AS artifacts
 
 FROM debian:bookworm-slim
 
+# The KVM rolling digest is the family commit marker. Keep it cryptographically
+# source-unique even when all copied runtime payloads happen to be identical.
+ARG SOURCE_SHA
+RUN printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+LABEL org.opencontainers.image.revision="$SOURCE_SHA"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
   qemu-system-x86 \
   qemu-utils \

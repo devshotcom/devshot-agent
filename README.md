@@ -9,8 +9,8 @@ The Docker images published to Docker Hub (`anticipatercom/devshot:*`)
 are built from this repo by `.github/workflows/build-images.yml`
 on the isolated `devshot-agent-builders` self-hosted runner group.
 
-Release policy: create `v*` and `backend-v*` tags from `main` only. CI rejects
-release tags whose commit is not reachable from `origin/main`.
+Release policy: create semantic `vX.Y.Z` and `backend-vX.Y.Z` tags on the
+current `main` commit only. The patch counter is shared across every full and scoped release.
 
 ## Quick Install
 
@@ -221,6 +221,6 @@ Stripped (`-ldflags="-s -w"`), statically linked (`CGO_ENABLED=0`).
 
 ## Build Info
 
-Auto-deployed by CI from [devshotcom/devshot@5e506a4bfa91245957cbcad083e1881a93a08c42](https://github.com/devshotcom/devshot/commit/5e506a4bfa91245957cbcad083e1881a93a08c42).
+Auto-deployed by CI from [devshotcom/devshot@925bd1f21ac8e1bf8d6e57d96d5ffa908070601f](https://github.com/devshotcom/devshot/commit/925bd1f21ac8e1bf8d6e57d96d5ffa908070601f).
 
-Last built: 2026-07-29T22:28:01Z
+Last built: 2026-07-30T23:22:49Z
