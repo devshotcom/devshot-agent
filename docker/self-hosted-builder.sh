@@ -173,6 +173,37 @@ bounded_docker() {
     env -u GITHUB_API_TOKEN docker "$@"
 }
 
+remove_exact_buildx_volume() {
+  local volume="$1" observation volumes operation_failed=0
+  [[ "$volume" =~ ^buildx_buildkit_devshot-build-[0-9]+-[0-9]+-(dom0|kvm|runtime)[0-9]+_state$ ]] || {
+    echo "ERROR: refusing unsafe Buildx volume cleanup target: $volume" >&2
+    return 64
+  }
+
+  # Docker can continue deleting a large local volume in the daemon after the
+  # bounded CLI request times out. Treat the exact postcondition as
+  # authoritative and allow a bounded propagation window before failing.
+  if ! bounded_docker 300 volume rm -f "$volume" >/dev/null; then
+    operation_failed=1
+  fi
+  for observation in {1..12}; do
+    if ! volumes="$(bounded_docker 60 volume ls --format '{{.Name}}')"; then
+      if [ "$observation" -eq 12 ]; then
+        return 1
+      fi
+    elif ! grep -Fxq -- "$volume" <<< "$volumes"; then
+      if [ "$operation_failed" -ne 0 ]; then
+        echo "Verified exact Buildx volume absent after a transient cleanup error: $volume"
+      fi
+      return 0
+    fi
+    if [ "$observation" -lt 12 ]; then
+      sleep 5
+    fi
+  done
+  return 1
+}
+
 remove_buildx_builder() {
   local builder="$1" attempt builders containers container volumes volume operation_failed verification_failed
   [[ "$builder" =~ ^devshot-build-[0-9]+-[0-9]+-(dom0|kvm|runtime)$ ]] || {
@@ -204,7 +235,7 @@ remove_buildx_builder() {
     fi
     while IFS= read -r volume; do
       [[ "$volume" =~ ^buildx_buildkit_${builder}[0-9]+_state$ ]] || continue
-      bounded_docker 120 volume rm -f "$volume" >/dev/null || operation_failed=1
+      remove_exact_buildx_volume "$volume" || operation_failed=1
     done <<< "$volumes"
 
     verification_failed=0
@@ -481,7 +512,7 @@ except (TypeError, ValueError):
     fi
     [ "$owner_status" -eq 0 ] || continue
     echo "Removing completed orphaned Buildx state volume: $volume (${age}s old)"
-    if ! bounded_docker 120 volume rm -f "$volume" >/dev/null; then
+    if ! remove_exact_buildx_volume "$volume"; then
       echo "ERROR: failed to remove completed orphaned Buildx state volume: $volume" >&2
       failed=1
     fi
