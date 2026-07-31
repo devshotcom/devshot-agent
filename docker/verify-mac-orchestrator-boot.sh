@@ -7,7 +7,7 @@ set -euo pipefail
 
 readonly CANDIDATE_IMAGE="${1:-}"
 readonly PAYLOAD_INPUT="${2:-}"
-readonly BOOT_TIMEOUT_SECONDS="${MAC_BOOT_SMOKE_TIMEOUT_SECONDS:-1200}"
+readonly BOOT_TIMEOUT_SECONDS="${MAC_BOOT_SMOKE_TIMEOUT_SECONDS:-1800}"
 readonly LINUX_AF_UNIX_PATH_MAX_BYTES=108
 
 fail() {
@@ -194,7 +194,13 @@ import sys
 import time
 
 sock_path, container_name = sys.argv[1:]
-deadline = time.monotonic() + max(1, int(os.environ.get("MAC_BOOT_SMOKE_TIMEOUT_SECONDS", "1200")) - 5)
+total_window = max(1, int(os.environ.get("MAC_BOOT_SMOKE_TIMEOUT_SECONDS", "1800")) - 5)
+deadline = time.monotonic() + total_window
+# QGA may become reachable only near the end of a nested-TCG boot. Reserve a
+# bounded slice of the total timeout for OpenRC and the agent to settle after
+# the protocol handshake instead of racing a one-shot service assertion.
+readiness_reserve = min(120, max(2, total_window // 5))
+qga_deadline = deadline - readiness_reserve
 last_error = "QGA socket has not appeared"
 
 def recv_until(stream, delimiter):
@@ -215,9 +221,9 @@ def roundtrip(stream, command):
         raise RuntimeError(f"QGA error: {response['error']}")
     return response.get("return")
 
-def connect_qga():
+def connect_qga(timeout_seconds):
     stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    stream.settimeout(10)
+    stream.settimeout(max(0.1, min(10, timeout_seconds)))
     stream.connect(sock_path)
     sync_id = int(time.time_ns() & 0x7FFFFFFFFFFFFFFF)
     request = json.dumps({"execute": "guest-sync-delimited", "arguments": {"id": sync_id}}, separators=(",", ":")).encode()
@@ -230,61 +236,128 @@ def connect_qga():
     return stream
 
 stream = None
-while time.monotonic() < deadline:
+while time.monotonic() < qga_deadline:
+    remaining = qga_deadline - time.monotonic()
     state = subprocess.run(
         ["docker", "inspect", "--format", "{{.State.Running}}", container_name],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=max(0.1, min(15, remaining)),
     )
     if state.returncode != 0 or state.stdout.strip() != "true":
         raise SystemExit("QEMU boot-smoke container exited before QGA became ready")
     try:
-        stream = connect_qga()
+        stream = connect_qga(max(0.1, qga_deadline - time.monotonic()))
         roundtrip(stream, {"execute": "guest-ping"})
+        stream.settimeout(max(0.1, min(10, deadline - time.monotonic())))
         break
     except (OSError, ValueError, RuntimeError) as exc:
         last_error = str(exc)
         if stream is not None:
             stream.close()
             stream = None
-        time.sleep(2)
+        remaining = qga_deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(2, remaining))
 else:
-    raise SystemExit(f"QGA did not become ready before the deadline: {last_error}")
+    raise SystemExit(
+        f"QGA did not become ready before its bounded boot deadline: {last_error}"
+    )
 
-command = (
+def decode_exec_result(result):
+    if not isinstance(result, dict):
+        raise RuntimeError(f"QGA guest-exec-status returned an invalid result: {result!r}")
+    stdout = base64.b64decode(result.get("out-data", "")).decode(errors="replace")
+    stderr = base64.b64decode(result.get("err-data", "")).decode(errors="replace")
+    return result.get("exitcode"), stdout, stderr
+
+def run_guest_command(command):
+    started = roundtrip(stream, {
+        "execute": "guest-exec",
+        "arguments": {
+            "path": "/bin/sh",
+            "arg": ["-c", command],
+            "capture-output": True,
+        },
+    })
+    pid = started.get("pid") if isinstance(started, dict) else None
+    if not isinstance(pid, int):
+        raise RuntimeError(f"QGA guest-exec returned no PID: {started!r}")
+
+    command_deadline = min(deadline, time.monotonic() + 30)
+    while time.monotonic() < command_deadline:
+        result = roundtrip(stream, {"execute": "guest-exec-status", "arguments": {"pid": pid}})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"QGA guest-exec-status returned an invalid result for PID {pid}: {result!r}"
+            )
+        if result.get("exited"):
+            return result
+        remaining = command_deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(1, remaining))
+    raise RuntimeError(f"QGA guest-exec PID {pid} did not finish within 30 seconds")
+
+static_command = (
     "set -eu; "
     "[ \"$(uname -m)\" = aarch64 ]; "
     "test -x /opt/devshot/agent; "
-    "rc-service qemu-guest-agent status >/dev/null; "
-    "rc-service devshot-orchestrator status >/dev/null; "
-    "pgrep -f '^/opt/devshot/agent($| )' >/dev/null; "
-    "printf 'MAC_BOOT_SMOKE_OK\\n'"
+    "printf 'MAC_BOOT_STATIC_OK\\n'"
 )
-started = roundtrip(stream, {
-    "execute": "guest-exec",
-    "arguments": {
-        "path": "/bin/sh",
-        "arg": ["-c", command],
-        "capture-output": True,
-    },
-})
-pid = started.get("pid") if isinstance(started, dict) else None
-if not isinstance(pid, int):
-    raise SystemExit(f"QGA guest-exec returned no PID: {started!r}")
+try:
+    static_result = run_guest_command(static_command)
+except (OSError, ValueError, RuntimeError) as exc:
+    stream.close()
+    raise SystemExit(f"in-guest static assertion could not complete: {exc}")
+static_exit, static_stdout, static_stderr = decode_exec_result(static_result)
+if static_exit != 0 or static_stdout.strip() != "MAC_BOOT_STATIC_OK":
+    stream.close()
+    raise SystemExit(
+        "in-guest static assertion failed: "
+        f"exit={static_exit} stdout={static_stdout!r} stderr={static_stderr!r}"
+    )
 
+readiness_command = (
+    "set -u; "
+    "qga_status=0; rc-service qemu-guest-agent status >/dev/null 2>&1 || qga_status=$?; "
+    "if [ \"$qga_status\" -ne 0 ]; then "
+    "rc-service qemu-guest-agent status >&2 || true; "
+    "[ \"$qga_status\" -eq 8 ] && exit 75; exit \"$qga_status\"; fi; "
+    "orchestrator_status=0; rc-service devshot-orchestrator status >/dev/null 2>&1 || orchestrator_status=$?; "
+    "if [ \"$orchestrator_status\" -ne 0 ]; then "
+    "rc-service devshot-orchestrator status >&2 || true; "
+    "[ \"$orchestrator_status\" -eq 8 ] && exit 75; exit \"$orchestrator_status\"; fi; "
+    "pgrep -f '^/opt/devshot/agent($| )' >/dev/null || "
+    "{ printf 'DevShot agent process is not visible yet\\n' >&2; exit 76; }; "
+    "printf 'MAC_BOOT_READY_OK\\n'"
+)
+last_readiness = "readiness probe has not completed"
 while time.monotonic() < deadline:
-    result = roundtrip(stream, {"execute": "guest-exec-status", "arguments": {"pid": pid}})
-    if result.get("exited"):
-        stdout = base64.b64decode(result.get("out-data", "")).decode(errors="replace")
-        stderr = base64.b64decode(result.get("err-data", "")).decode(errors="replace")
-        if result.get("exitcode") != 0 or stdout.strip() != "MAC_BOOT_SMOKE_OK":
-            raise SystemExit(f"in-guest boot assertion failed: exit={result.get('exitcode')} stdout={stdout!r} stderr={stderr!r}")
+    try:
+        result = run_guest_command(readiness_command)
+    except (OSError, ValueError, RuntimeError) as exc:
+        stream.close()
+        raise SystemExit(f"in-guest readiness probe could not complete: {exc}")
+    exitcode, stdout, stderr = decode_exec_result(result)
+    if exitcode == 0 and stdout.strip() == "MAC_BOOT_READY_OK":
         print("Verified real ARM64 Mac orchestrator boot: QGA and DevShot agent are running")
         stream.close()
         raise SystemExit(0)
-    time.sleep(1)
-raise SystemExit("QGA guest-exec did not finish before the deadline")
+    if exitcode not in (75, 76):
+        stream.close()
+        raise SystemExit(
+            "in-guest readiness assertion failed permanently: "
+            f"exit={exitcode} stdout={stdout!r} stderr={stderr!r}"
+        )
+    last_readiness = f"exit={exitcode} stdout={stdout!r} stderr={stderr!r}"
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        time.sleep(min(2, remaining))
+
+stream.close()
+raise SystemExit(
+    f"in-guest services did not become ready before the bounded deadline: {last_readiness}"
+)
 PY
 
 # Re-check that the VM remained alive through the complete in-guest probe.

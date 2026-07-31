@@ -173,6 +173,67 @@ bounded_docker() {
     env -u GITHUB_API_TOKEN docker "$@"
 }
 
+remove_buildx_builder() {
+  local builder="$1" attempt builders containers container volumes volume operation_failed verification_failed
+  [[ "$builder" =~ ^devshot-build-[0-9]+-[0-9]+-(dom0|kvm|runtime)$ ]] || {
+    echo "ERROR: refusing unsafe Buildx builder cleanup target: $builder" >&2
+    return 64
+  }
+
+  for attempt in 1 2; do
+    operation_failed=0
+    if ! bounded_docker 120 buildx rm --force "$builder" >/dev/null; then
+      operation_failed=1
+    fi
+
+    # buildx can remove its metadata and driver container, then time out while
+    # deleting the state volume. Clean only resources whose exact generated
+    # names belong to this run-scoped builder and verify every postcondition.
+    if ! containers="$(bounded_docker 60 ps -a --format '{{.Names}}')"; then
+      operation_failed=1
+      containers=""
+    fi
+    while IFS= read -r container; do
+      [[ "$container" =~ ^buildx_buildkit_${builder}[0-9]+$ ]] || continue
+      bounded_docker 120 rm -f "$container" >/dev/null || operation_failed=1
+    done <<< "$containers"
+
+    if ! volumes="$(bounded_docker 60 volume ls --format '{{.Name}}')"; then
+      operation_failed=1
+      volumes=""
+    fi
+    while IFS= read -r volume; do
+      [[ "$volume" =~ ^buildx_buildkit_${builder}[0-9]+_state$ ]] || continue
+      bounded_docker 120 volume rm -f "$volume" >/dev/null || operation_failed=1
+    done <<< "$volumes"
+
+    verification_failed=0
+    if ! builders="$(bounded_docker 60 buildx ls --format '{{.Name}}')" \
+      || grep -Fxq -- "$builder" <<< "$builders"; then
+      verification_failed=1
+    fi
+    if ! containers="$(bounded_docker 60 ps -a --format '{{.Names}}')" \
+      || grep -Eq -- "^buildx_buildkit_${builder}[0-9]+$" <<< "$containers"; then
+      verification_failed=1
+    fi
+    if ! volumes="$(bounded_docker 60 volume ls --format '{{.Name}}')" \
+      || grep -Eq -- "^buildx_buildkit_${builder}[0-9]+_state$" <<< "$volumes"; then
+      verification_failed=1
+    fi
+    if [ "$verification_failed" -eq 0 ]; then
+      if [ "$operation_failed" -ne 0 ]; then
+        echo "Verified exact Buildx resources absent after a transient cleanup error: $builder"
+      fi
+      return 0
+    fi
+    if [ "$attempt" -lt 2 ]; then
+      echo "WARNING: retrying verified removal of exact Buildx builder resources: $builder" >&2
+      sleep 5
+    fi
+  done
+  return 1
+}
+
 path_age_seconds() {
   python3 -c 'import os,sys,time; print(max(0, int(time.time() - os.stat(sys.argv[1]).st_mtime)))' "$1"
 }
@@ -228,7 +289,7 @@ old_enough() {
 
 reap_stale_buildx_resources() {
   local runner_temp config basename run_id attempt suffix age owner_status state_dir
-  local builders builder containers container metadata owner images image failed=0 config_failed
+  local builders builder containers container volumes volume metadata owner images image failed=0 config_failed
   local resource_kind expected_scope labels label_status
   runner_temp="${RUNNER_TEMP%/}"
 
@@ -265,7 +326,7 @@ reap_stale_buildx_resources() {
       [ -n "$builder" ] || continue
       if [ "$builder" = "devshot-build-$run_id-$attempt-$suffix" ]; then
         echo "Removing completed stale Buildx builder: $builder (${age}s old)"
-        if ! DOCKER_CONFIG="$config" bounded_docker 120 buildx rm --force "$builder" >/dev/null; then
+        if ! DOCKER_CONFIG="$config" remove_buildx_builder "$builder"; then
           echo "ERROR: failed to remove completed stale Buildx builder: $builder" >&2
           failed=1
           config_failed=1
@@ -395,6 +456,37 @@ except (TypeError, ValueError):
     fi
   done <<< "$containers"
 
+  # buildx can leave only its state volume after metadata and the driver
+  # container have already disappeared. Reap that exact volume only after the
+  # same age floor and completed-owner proof used for other scoped resources.
+  if ! volumes="$(bounded_docker 60 volume ls --format '{{.Name}}')"; then
+    echo "ERROR: could not list Docker volumes for scoped stale cleanup" >&2
+    return 1
+  fi
+  while IFS= read -r volume; do
+    [ -n "$volume" ] || continue
+    if [[ "$volume" =~ ^buildx_buildkit_devshot-build-([0-9]+)-([0-9]+)-(dom0|kvm|runtime)[0-9]+_state$ ]]; then
+      run_id="${BASH_REMATCH[1]}"
+    else
+      continue
+    fi
+    if ! metadata="$(bounded_docker 60 volume inspect --format '{{.CreatedAt}}' "$volume")" \
+      || ! age="$(created_age_seconds "$metadata")" || ! old_enough "$age"; then
+      continue
+    fi
+    if owner_run_is_completed "$run_id"; then
+      owner_status=0
+    else
+      owner_status=$?
+    fi
+    [ "$owner_status" -eq 0 ] || continue
+    echo "Removing completed orphaned Buildx state volume: $volume (${age}s old)"
+    if ! bounded_docker 120 volume rm -f "$volume" >/dev/null; then
+      echo "ERROR: failed to remove completed orphaned Buildx state volume: $volume" >&2
+      failed=1
+    fi
+  done <<< "$volumes"
+
   # Local validation candidates are intentionally never public. The publisher
   # also creates a run-scoped local alias while pushing its already-validated
   # registry candidate. A hard kill can bypass either exact cleanup, so reap
@@ -519,21 +611,13 @@ verify_docker_storage() {
 }
 
 cleanup() {
-  local exact_image name builders builder containers container owner images image failed=0
+  local exact_image name containers container owner images image failed=0
   require_run_identity
   name="$(probe_name)"
 
-  if ! builders="$(bounded_docker 60 buildx ls --format '{{.Name}}')"; then
-    echo "ERROR: could not list Buildx builders during cleanup" >&2
+  if ! remove_buildx_builder "$BUILDER_NAME"; then
+    echo "ERROR: failed to remove current Buildx builder: $BUILDER_NAME" >&2
     failed=1
-  else
-    while IFS= read -r builder; do
-      [ "$builder" = "$BUILDER_NAME" ] || continue
-      if ! bounded_docker 120 buildx rm --force "$BUILDER_NAME" >/dev/null; then
-        echo "ERROR: failed to remove current Buildx builder: $BUILDER_NAME" >&2
-        failed=1
-      fi
-    done <<< "$builders"
   fi
 
   if ! containers="$(bounded_docker 60 ps -a --format '{{.Names}}')"; then
@@ -584,9 +668,13 @@ cleanup() {
     fi
   done
 
-  if ! rm -rf -- "$DOCKER_CONFIG"; then
-    echo "ERROR: failed to remove isolated Docker configuration: $DOCKER_CONFIG" >&2
-    failed=1
+  if [ "$failed" -eq 0 ]; then
+    if ! rm -rf -- "$DOCKER_CONFIG"; then
+      echo "ERROR: failed to remove isolated Docker configuration: $DOCKER_CONFIG" >&2
+      failed=1
+    fi
+  else
+    echo "WARNING: leaving exact isolated Docker configuration for verified stale recovery: $DOCKER_CONFIG" >&2
   fi
 
   return "$failed"

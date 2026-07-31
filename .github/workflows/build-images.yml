@@ -636,7 +636,7 @@ jobs:
       - name: Boot exact Mac orchestrator payload and verify QGA plus agent
         working-directory: ${{ env.CHECKOUT_DIR }}
         env:
-          MAC_BOOT_SMOKE_TIMEOUT_SECONDS: '1200'
+          MAC_BOOT_SMOKE_TIMEOUT_SECONDS: '1800'
         run: bash docker/verify-mac-orchestrator-boot.sh "$CANDIDATE_IMAGE" "$HOMEBREW_ARTIFACT_DIR/payload"
 
       - name: Publish validated immutable ARM64 Dom0 tags
