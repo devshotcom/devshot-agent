@@ -8,6 +8,7 @@ set -euo pipefail
 readonly CANDIDATE_IMAGE="${1:-}"
 readonly PAYLOAD_INPUT="${2:-}"
 readonly BOOT_TIMEOUT_SECONDS="${MAC_BOOT_SMOKE_TIMEOUT_SECONDS:-1200}"
+readonly LINUX_AF_UNIX_PATH_MAX_BYTES=108
 
 fail() {
   echo "ERROR: $*" >&2
@@ -37,9 +38,15 @@ for path in \
   "$PAYLOAD_DIR/orchestrator-mac.qcow2"; do
   [ -s "$path" ] || fail "missing boot payload file: $path"
 done
-for command in docker python3 timeout; do
+for command in docker id python3 timeout; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is missing: $command"
 done
+
+RUNNER_UID="$(id -u)"
+RUNNER_GID="$(id -g)"
+readonly RUNNER_UID RUNNER_GID
+[[ "$RUNNER_UID:$RUNNER_GID" =~ ^[0-9]+:[0-9]+$ ]] \
+  || fail 'could not resolve the numeric runner uid:gid'
 
 image_arch="$(timeout --foreground --signal=TERM --kill-after=10s 60s \
   docker image inspect --format '{{.Architecture}}' "$CANDIDATE_IMAGE")"
@@ -48,11 +55,36 @@ image_arch="$(timeout --foreground --signal=TERM --kill-after=10s 60s \
 readonly CONTAINER_NAME="devshot-mac-boot-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 WORK_DIR="$(mktemp -d "${RUNNER_TEMP%/}/devshot-mac-boot-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
 readonly WORK_DIR
-readonly QGA_SOCKET="$WORK_DIR/orch-qga.sock"
+if ! QGA_SOCKET_DIR="$(mktemp -d "/tmp/devshot-qga.XXXXXX")"; then
+  rm -rf -- "$WORK_DIR"
+  fail 'could not create short QGA socket directory'
+fi
+readonly QGA_SOCKET_DIR
+readonly QGA_SOCKET="$QGA_SOCKET_DIR/qga.sock"
 readonly CONSOLE_LOG="$WORK_DIR/orch-console.log"
+
+remove_qga_socket_dir() {
+  case "$QGA_SOCKET_DIR" in
+    /tmp/devshot-qga.??????)
+      rm -f -- "$QGA_SOCKET" || {
+        echo "ERROR: could not remove QGA socket: $QGA_SOCKET" >&2
+        return 1
+      }
+      rmdir -- "$QGA_SOCKET_DIR" || {
+        echo "ERROR: refusing to recursively remove non-empty QGA socket directory: $QGA_SOCKET_DIR" >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "ERROR: refusing to remove unsafe QGA socket directory: $QGA_SOCKET_DIR" >&2
+      return 1
+      ;;
+  esac
+}
 
 cleanup() {
   local status=$?
+  local cleanup_failed=false
   trap - EXIT INT TERM HUP
   if [ "$status" -ne 0 ]; then
     echo '--- Mac orchestrator container log ---' >&2
@@ -63,13 +95,25 @@ cleanup() {
   fi
   timeout --foreground --signal=TERM --kill-after=5s 30s \
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  rm -rf -- "$WORK_DIR"
+  rm -rf -- "$WORK_DIR" || cleanup_failed=true
+  remove_qga_socket_dir || cleanup_failed=true
+  [ "$cleanup_failed" = false ] || status=1
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+# Linux sockaddr_un.sun_path has 108 bytes including the trailing NUL. Keep
+# the host-visible QGA path independent from the often-long RUNNER_TEMP path;
+# the payload and serial logs remain in the run-scoped Actions directory.
+qga_socket_bytes="$(LC_ALL=C printf '%s' "$QGA_SOCKET" | wc -c | tr -d '[:space:]')"
+case "$qga_socket_bytes" in
+  ''|*[!0-9]*) fail 'could not measure QGA socket path length' ;;
+esac
+[ "$qga_socket_bytes" -lt "$LINUX_AF_UNIX_PATH_MAX_BYTES" ] \
+  || fail "QGA AF_UNIX socket path is too long (${qga_socket_bytes} bytes): $QGA_SOCKET"
 
 # Remove only the run-scoped container name. This recovers an interrupted retry
 # without touching another workflow's Docker state.
@@ -98,6 +142,7 @@ ENVEOF
 container_id="$(timeout --foreground --signal=TERM --kill-after=30s 120s \
   docker run --detach \
     --name "$CONTAINER_NAME" \
+    --user "$RUNNER_UID:$RUNNER_GID" \
     --label devshot.cleanup.scope=mac-boot-smoke \
     --label "devshot.github.repository=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}" \
     --label "devshot.github.run-id=$GITHUB_RUN_ID" \
@@ -105,6 +150,7 @@ container_id="$(timeout --foreground --signal=TERM --kill-after=30s 120s \
     --entrypoint /bin/bash \
     --volume "$PAYLOAD_DIR:/artifact:ro" \
     --volume "$WORK_DIR:/smoke" \
+    --volume "$QGA_SOCKET_DIR:/qga" \
     "$CANDIDATE_IMAGE" \
     -ceu '
       qemu-img create -q -f qcow2 -F qcow2 \
@@ -128,7 +174,7 @@ container_id="$(timeout --foreground --signal=TERM --kill-after=30s 120s \
         -device virtio-9p-device,fsdev=tmpl_fs,mount_tag=devshot_templates \
         -serial file:/smoke/orch-console.log \
         -device virtio-serial-device \
-        -chardev socket,id=qga0,path=/smoke/orch-qga.sock,server=on,wait=off \
+        -chardev socket,id=qga0,path=/qga/qga.sock,server=on,wait=off \
         -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0
     ')"
 [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || fail 'Docker returned an invalid boot-smoke container ID'
