@@ -8,6 +8,7 @@ set -euo pipefail
 readonly CANDIDATE_IMAGE="${1:-}"
 readonly PAYLOAD_INPUT="${2:-}"
 readonly BOOT_TIMEOUT_SECONDS="${MAC_BOOT_SMOKE_TIMEOUT_SECONDS:-1800}"
+readonly READINESS_TIMEOUT_SECONDS="${MAC_BOOT_READINESS_TIMEOUT_SECONDS:-180}"
 readonly LINUX_AF_UNIX_PATH_MAX_BYTES=108
 
 fail() {
@@ -20,6 +21,12 @@ case "$BOOT_TIMEOUT_SECONDS" in
 esac
 [ "$BOOT_TIMEOUT_SECONDS" -ge 60 ] && [ "$BOOT_TIMEOUT_SECONDS" -le 1800 ] \
   || fail 'MAC_BOOT_SMOKE_TIMEOUT_SECONDS must be an integer from 60 to 1800'
+case "$READINESS_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) fail 'MAC_BOOT_READINESS_TIMEOUT_SECONDS must be an integer from 30 to 300' ;;
+esac
+[ "$READINESS_TIMEOUT_SECONDS" -ge 30 ] && [ "$READINESS_TIMEOUT_SECONDS" -le 300 ] \
+  || fail 'MAC_BOOT_READINESS_TIMEOUT_SECONDS must be an integer from 30 to 300'
+readonly CLIENT_TIMEOUT_SECONDS=$((BOOT_TIMEOUT_SECONDS + READINESS_TIMEOUT_SECONDS + 15))
 
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
@@ -183,24 +190,20 @@ container_id="$(timeout --foreground --signal=TERM --kill-after=30s 120s \
 # waits boundedly for QGA, then runs an in-guest assertion. Passing means the
 # real disk booted, OpenRC reached the default runlevel, qemu-ga responds, and
 # the production agent binary is executable and running.
-timeout --foreground --signal=TERM --kill-after=30s "${BOOT_TIMEOUT_SECONDS}s" \
-  python3 - "$QGA_SOCKET" "$CONTAINER_NAME" <<'PY'
+timeout --foreground --signal=TERM --kill-after=30s "${CLIENT_TIMEOUT_SECONDS}s" \
+  python3 - "$QGA_SOCKET" "$CONTAINER_NAME" \
+    "$BOOT_TIMEOUT_SECONDS" "$READINESS_TIMEOUT_SECONDS" <<'PY'
 import base64
 import json
-import os
+import secrets
 import socket
 import subprocess
 import sys
 import time
 
-sock_path, container_name = sys.argv[1:]
-total_window = max(1, int(os.environ.get("MAC_BOOT_SMOKE_TIMEOUT_SECONDS", "1800")) - 5)
-deadline = time.monotonic() + total_window
-# QGA may become reachable only near the end of a nested-TCG boot. Reserve a
-# bounded slice of the total timeout for OpenRC and the agent to settle after
-# the protocol handshake instead of racing a one-shot service assertion.
-readiness_reserve = min(120, max(2, total_window // 5))
-qga_deadline = deadline - readiness_reserve
+sock_path, container_name, boot_window_text, readiness_window_text = sys.argv[1:]
+boot_deadline = time.monotonic() + int(boot_window_text)
+readiness_window = int(readiness_window_text)
 last_error = "QGA socket has not appeared"
 
 def recv_until(stream, delimiter):
@@ -222,22 +225,61 @@ def roundtrip(stream, command):
     return response.get("return")
 
 def connect_qga(timeout_seconds):
+    sync_deadline = time.monotonic() + timeout_seconds
     stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    stream.settimeout(max(0.1, min(10, timeout_seconds)))
+    stream.settimeout(max(0.1, min(10, sync_deadline - time.monotonic())))
     stream.connect(sock_path)
-    sync_id = int(time.time_ns() & 0x7FFFFFFFFFFFFFFF)
+    sync_id = secrets.randbits(63)
     request = json.dumps({"execute": "guest-sync-delimited", "arguments": {"id": sync_id}}, separators=(",", ":")).encode()
     stream.sendall(b"\xff" + request + b"\n")
-    recv_until(stream, b"\xff")
-    response = json.loads(recv_until(stream, b"\n"))
-    if response.get("return") != sync_id:
-        stream.close()
-        raise RuntimeError(f"QGA sync mismatch: {response!r}")
-    return stream
+
+    # A virtio-serial QGA channel has no connection semantics: replies queued
+    # for an earlier client can arrive after this socket connects. The
+    # guest-sync-delimited contract therefore requires ignoring every complete
+    # or partial response until the unique ID from this request is observed.
+    # Closing on the first stale ID creates a permanent one-response-behind
+    # reconnect loop, so drain boundedly on the same connection instead.
+    payload = bytearray()
+    saw_delimiter = False
+    last_sync_response = "no delimited response"
+    while time.monotonic() < sync_deadline:
+        remaining = sync_deadline - time.monotonic()
+        stream.settimeout(max(0.1, min(10, remaining)))
+        chunk = stream.recv(1)
+        if not chunk:
+            raise RuntimeError("QGA closed the socket during synchronization")
+        if chunk == b"\xff":
+            payload.clear()
+            saw_delimiter = True
+            continue
+        if not saw_delimiter:
+            continue
+        if chunk != b"\n":
+            payload.extend(chunk)
+            if len(payload) > 16 * 1024 * 1024:
+                raise RuntimeError("QGA sync response exceeded 16 MiB")
+            continue
+
+        raw_response = bytes(payload)
+        payload.clear()
+        saw_delimiter = False
+        try:
+            response = json.loads(raw_response)
+        except (UnicodeDecodeError, ValueError) as exc:
+            last_sync_response = f"invalid JSON: {exc}"
+            continue
+        if isinstance(response, dict) and response.get("return") == sync_id:
+            return stream
+        last_sync_response = repr(response)
+
+    raise RuntimeError(
+        "QGA did not return the current sync ID before the connection deadline; "
+        f"last delimited response: {last_sync_response}"
+    )
 
 stream = None
-while time.monotonic() < qga_deadline:
-    remaining = qga_deadline - time.monotonic()
+while time.monotonic() < boot_deadline:
+    remaining = boot_deadline - time.monotonic()
     state = subprocess.run(
         ["docker", "inspect", "--format", "{{.State.Running}}", container_name],
         capture_output=True,
@@ -247,22 +289,28 @@ while time.monotonic() < qga_deadline:
     if state.returncode != 0 or state.stdout.strip() != "true":
         raise SystemExit("QEMU boot-smoke container exited before QGA became ready")
     try:
-        stream = connect_qga(max(0.1, qga_deadline - time.monotonic()))
+        stream = connect_qga(max(0.1, boot_deadline - time.monotonic()))
         roundtrip(stream, {"execute": "guest-ping"})
-        stream.settimeout(max(0.1, min(10, deadline - time.monotonic())))
         break
     except (OSError, ValueError, RuntimeError) as exc:
         last_error = str(exc)
         if stream is not None:
             stream.close()
             stream = None
-        remaining = qga_deadline - time.monotonic()
+        remaining = boot_deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(2, remaining))
 else:
     raise SystemExit(
         f"QGA did not become ready before its bounded boot deadline: {last_error}"
     )
+
+# Boot/QGA discovery gets the complete boot budget. Once the current sync ID
+# and guest-ping prove the channel, OpenRC and the agent receive their own
+# bounded readiness budget instead of stealing the final minutes from a slow
+# nested-TCG boot.
+readiness_deadline = time.monotonic() + readiness_window
+stream.settimeout(max(0.1, min(10, readiness_window)))
 
 def decode_exec_result(result):
     if not isinstance(result, dict):
@@ -284,7 +332,7 @@ def run_guest_command(command):
     if not isinstance(pid, int):
         raise RuntimeError(f"QGA guest-exec returned no PID: {started!r}")
 
-    command_deadline = min(deadline, time.monotonic() + 30)
+    command_deadline = min(readiness_deadline, time.monotonic() + 30)
     while time.monotonic() < command_deadline:
         result = roundtrip(stream, {"execute": "guest-exec-status", "arguments": {"pid": pid}})
         if not isinstance(result, dict):
@@ -332,7 +380,7 @@ readiness_command = (
     "printf 'MAC_BOOT_READY_OK\\n'"
 )
 last_readiness = "readiness probe has not completed"
-while time.monotonic() < deadline:
+while time.monotonic() < readiness_deadline:
     try:
         result = run_guest_command(readiness_command)
     except (OSError, ValueError, RuntimeError) as exc:
@@ -350,7 +398,7 @@ while time.monotonic() < deadline:
             f"exit={exitcode} stdout={stdout!r} stderr={stderr!r}"
         )
     last_readiness = f"exit={exitcode} stdout={stdout!r} stderr={stderr!r}"
-    remaining = deadline - time.monotonic()
+    remaining = readiness_deadline - time.monotonic()
     if remaining > 0:
         time.sleep(min(2, remaining))
 

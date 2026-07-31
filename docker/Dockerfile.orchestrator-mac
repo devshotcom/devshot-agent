@@ -119,11 +119,6 @@ RUN printf '#!/bin/sh\n\
 # DevShot Orchestrator VM init script\n\
 # Runs the agent in dom0 mode with QEMU backend for pool VMs.\n\
 \n\
-# Start qemu-guest-agent so the Mac host can run commands in this VM via\n\
-# QGA without any baked secret. Launched inline here (Alpine ships\n\
-# qemu-ga on aarch64 without an OpenRC init script).\n\
-[ -x /usr/bin/qemu-ga ] && /usr/bin/qemu-ga --daemonize --pidfile=/run/qemu-ga.pid >/dev/null 2>&1\n\
-\n\
 # Mount 9p shares from Mac host\n\
 mount -t 9p -o trans=virtio devshot_boot /xen/boot 2>/dev/null || true\n\
 # Templates dir mounts at /xen/guests/templates so the agent's bakery\n\
@@ -248,6 +243,7 @@ command_user="root"\n\
 \n\
 depend() {\n\
     need net\n\
+    need qemu-guest-agent\n\
     after networking\n\
 }\n\
 ' > /etc/init.d/devshot-orchestrator && \
