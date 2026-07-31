@@ -426,11 +426,19 @@ jobs:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-arm64-dom0
       BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-dom0
       CANDIDATE_IMAGE: devshot-arm64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-dom0
-      HOMEBREW_ARTIFACT_DIR: ${{ runner.temp }}/devshot-homebrew-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Reclaim self-hosted runner workspace
         shell: bash
         run: |
+          set -euo pipefail
+          : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+          homebrew_artifact_dir="${RUNNER_TEMP%/}/devshot-homebrew-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          case "$homebrew_artifact_dir" in
+            "${RUNNER_TEMP%/}"/devshot-homebrew-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT") ;;
+            *) echo "ERROR: unsafe Homebrew artifact staging path" >&2; exit 1 ;;
+          esac
+          printf 'HOMEBREW_ARTIFACT_DIR=%s\n' "$homebrew_artifact_dir" >> "$GITHUB_ENV"
+
           if [ -x /usr/local/sbin/reclaim-runner-workspace ]; then
             sudo -n /usr/local/sbin/reclaim-runner-workspace 2>/dev/null || true
           fi
