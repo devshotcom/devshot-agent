@@ -8,6 +8,7 @@ set -euo pipefail
 readonly CANDIDATE_IMAGE="${1:-}"
 readonly PAYLOAD_INPUT="${2:-}"
 readonly BOOT_TIMEOUT_SECONDS="${MAC_BOOT_SMOKE_TIMEOUT_SECONDS:-1800}"
+readonly STATIC_ASSERTION_TIMEOUT_SECONDS=30
 readonly READINESS_TIMEOUT_SECONDS="${MAC_BOOT_READINESS_TIMEOUT_SECONDS:-180}"
 readonly LINUX_AF_UNIX_PATH_MAX_BYTES=108
 
@@ -26,7 +27,7 @@ case "$READINESS_TIMEOUT_SECONDS" in
 esac
 [ "$READINESS_TIMEOUT_SECONDS" -ge 30 ] && [ "$READINESS_TIMEOUT_SECONDS" -le 300 ] \
   || fail 'MAC_BOOT_READINESS_TIMEOUT_SECONDS must be an integer from 30 to 300'
-readonly CLIENT_TIMEOUT_SECONDS=$((BOOT_TIMEOUT_SECONDS + READINESS_TIMEOUT_SECONDS + 15))
+readonly CLIENT_TIMEOUT_SECONDS=$((BOOT_TIMEOUT_SECONDS + STATIC_ASSERTION_TIMEOUT_SECONDS + READINESS_TIMEOUT_SECONDS + 15))
 
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
@@ -192,7 +193,8 @@ container_id="$(timeout --foreground --signal=TERM --kill-after=30s 120s \
 # the production agent binary is executable and running.
 timeout --foreground --signal=TERM --kill-after=30s "${CLIENT_TIMEOUT_SECONDS}s" \
   python3 - "$QGA_SOCKET" "$CONTAINER_NAME" \
-    "$BOOT_TIMEOUT_SECONDS" "$READINESS_TIMEOUT_SECONDS" <<'PY'
+    "$BOOT_TIMEOUT_SECONDS" "$STATIC_ASSERTION_TIMEOUT_SECONDS" \
+    "$READINESS_TIMEOUT_SECONDS" <<'PY'
 import base64
 import json
 import secrets
@@ -201,8 +203,9 @@ import subprocess
 import sys
 import time
 
-sock_path, container_name, boot_window_text, readiness_window_text = sys.argv[1:]
+sock_path, container_name, boot_window_text, static_window_text, readiness_window_text = sys.argv[1:]
 boot_deadline = time.monotonic() + int(boot_window_text)
+static_window = int(static_window_text)
 readiness_window = int(readiness_window_text)
 last_error = "QGA socket has not appeared"
 
@@ -305,13 +308,6 @@ else:
         f"QGA did not become ready before its bounded boot deadline: {last_error}"
     )
 
-# Boot/QGA discovery gets the complete boot budget. Once the current sync ID
-# and guest-ping prove the channel, OpenRC and the agent receive their own
-# bounded readiness budget instead of stealing the final minutes from a slow
-# nested-TCG boot.
-readiness_deadline = time.monotonic() + readiness_window
-stream.settimeout(max(0.1, min(10, readiness_window)))
-
 def decode_exec_result(result):
     if not isinstance(result, dict):
         raise RuntimeError(f"QGA guest-exec-status returned an invalid result: {result!r}")
@@ -319,22 +315,32 @@ def decode_exec_result(result):
     stderr = base64.b64decode(result.get("err-data", "")).decode(errors="replace")
     return result.get("exitcode"), stdout, stderr
 
-def run_guest_command(command):
-    started = roundtrip(stream, {
+def roundtrip_before_deadline(command, deadline, phase_name):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError(f"{phase_name} deadline expired before the QGA round trip")
+    stream.settimeout(remaining)
+    return roundtrip(stream, command)
+
+def run_guest_command(command, command_deadline, phase_name):
+    started = roundtrip_before_deadline({
         "execute": "guest-exec",
         "arguments": {
             "path": "/bin/sh",
             "arg": ["-c", command],
             "capture-output": True,
         },
-    })
+    }, command_deadline, phase_name)
     pid = started.get("pid") if isinstance(started, dict) else None
     if not isinstance(pid, int):
         raise RuntimeError(f"QGA guest-exec returned no PID: {started!r}")
 
-    command_deadline = min(readiness_deadline, time.monotonic() + 30)
     while time.monotonic() < command_deadline:
-        result = roundtrip(stream, {"execute": "guest-exec-status", "arguments": {"pid": pid}})
+        result = roundtrip_before_deadline(
+            {"execute": "guest-exec-status", "arguments": {"pid": pid}},
+            command_deadline,
+            phase_name,
+        )
         if not isinstance(result, dict):
             raise RuntimeError(
                 f"QGA guest-exec-status returned an invalid result for PID {pid}: {result!r}"
@@ -344,7 +350,9 @@ def run_guest_command(command):
         remaining = command_deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(1, remaining))
-    raise RuntimeError(f"QGA guest-exec PID {pid} did not finish within 30 seconds")
+    raise RuntimeError(
+        f"QGA guest-exec PID {pid} did not finish before the {phase_name} deadline"
+    )
 
 static_command = (
     "set -eu; "
@@ -353,7 +361,12 @@ static_command = (
     "printf 'MAC_BOOT_STATIC_OK\\n'"
 )
 try:
-    static_result = run_guest_command(static_command)
+    static_deadline = time.monotonic() + static_window
+    static_result = run_guest_command(
+        static_command,
+        static_deadline,
+        "static assertion",
+    )
 except (OSError, ValueError, RuntimeError) as exc:
     stream.close()
     raise SystemExit(f"in-guest static assertion could not complete: {exc}")
@@ -365,6 +378,11 @@ if static_exit != 0 or static_stdout.strip() != "MAC_BOOT_STATIC_OK":
         f"exit={static_exit} stdout={static_stdout!r} stderr={static_stderr!r}"
     )
 
+# Boot/QGA discovery gets the complete boot budget. The cheap immutable-payload
+# assertion then has its own short cap. Only after it succeeds does OpenRC and
+# the agent receive the complete, separately bounded readiness budget. A slow
+# rc-service call may consume that phase's remaining time, but never more.
+readiness_deadline = time.monotonic() + readiness_window
 readiness_command = (
     "set -u; "
     "qga_status=0; rc-service qemu-guest-agent status >/dev/null 2>&1 || qga_status=$?; "
@@ -382,7 +400,11 @@ readiness_command = (
 last_readiness = "readiness probe has not completed"
 while time.monotonic() < readiness_deadline:
     try:
-        result = run_guest_command(readiness_command)
+        result = run_guest_command(
+            readiness_command,
+            readiness_deadline,
+            "readiness phase",
+        )
     except (OSError, ValueError, RuntimeError) as exc:
         stream.close()
         raise SystemExit(f"in-guest readiness probe could not complete: {exc}")
