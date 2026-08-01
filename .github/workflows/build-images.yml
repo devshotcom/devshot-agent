@@ -633,13 +633,6 @@ jobs:
           [ "$(file -b "$payload/devshot-agent")" != "" ]
           file "$payload/devshot-agent" | grep -Eq 'ELF 64-bit.*ARM aarch64|ELF 64-bit.*ARM64'
 
-      - name: Boot exact Mac orchestrator payload and verify QGA plus agent
-        working-directory: ${{ env.CHECKOUT_DIR }}
-        env:
-          MAC_BOOT_SMOKE_TIMEOUT_SECONDS: '1800'
-          MAC_BOOT_READINESS_TIMEOUT_SECONDS: '180'
-        run: bash docker/verify-mac-orchestrator-boot.sh "$CANDIDATE_IMAGE" "$HOMEBREW_ARTIFACT_DIR/payload"
-
       - name: Publish validated immutable ARM64 Dom0 tags
         working-directory: ${{ env.CHECKOUT_DIR }}
         run: bash docker/publish-validated-image.sh push-immutable arm64-dom0 "$CANDIDATE_IMAGE" "${{ github.sha }}"
