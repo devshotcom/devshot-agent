@@ -322,6 +322,9 @@ def roundtrip_before_deadline(command, deadline, phase_name):
     stream.settimeout(remaining)
     return roundtrip(stream, command)
 
+class GuestCommandTimeout(RuntimeError):
+    """One guest command exceeded its own bounded settlement window."""
+
 def run_guest_command(command, command_deadline, phase_name):
     started = roundtrip_before_deadline({
         "execute": "guest-exec",
@@ -350,7 +353,7 @@ def run_guest_command(command, command_deadline, phase_name):
         remaining = command_deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(1, remaining))
-    raise RuntimeError(
+    raise GuestCommandTimeout(
         f"QGA guest-exec PID {pid} did not finish before the {phase_name} deadline"
     )
 
@@ -379,16 +382,15 @@ if static_exit != 0 or static_stdout.strip() != "MAC_BOOT_STATIC_OK":
     )
 
 # Boot/QGA discovery gets the complete boot budget. The cheap immutable-payload
-# assertion then has its own short cap. Only after it succeeds does OpenRC and
-# the agent receive the complete, separately bounded readiness budget. A slow
-# rc-service call may consume that phase's remaining time, but never more.
+# assertion then has its own short cap. Only after it succeeds do OpenRC and the
+# agent receive the complete, separately bounded readiness budget. Each probe is
+# capped independently so one wedged rc-service/guest-exec PID cannot consume the
+# whole phase. A probe that does not settle is never retried: its process state is
+# unknown, so the validator fails closed and the outer trap destroys the VM.
 readiness_deadline = time.monotonic() + readiness_window
+readiness_probe_window = min(30, readiness_window)
 readiness_command = (
     "set -u; "
-    "qga_status=0; rc-service qemu-guest-agent status >/dev/null 2>&1 || qga_status=$?; "
-    "if [ \"$qga_status\" -ne 0 ]; then "
-    "rc-service qemu-guest-agent status >&2 || true; "
-    "[ \"$qga_status\" -eq 8 ] && exit 75; exit \"$qga_status\"; fi; "
     "orchestrator_status=0; rc-service devshot-orchestrator status >/dev/null 2>&1 || orchestrator_status=$?; "
     "if [ \"$orchestrator_status\" -ne 0 ]; then "
     "rc-service devshot-orchestrator status >&2 || true; "
@@ -399,11 +401,21 @@ readiness_command = (
 )
 last_readiness = "readiness probe has not completed"
 while time.monotonic() < readiness_deadline:
+    probe_deadline = min(
+        readiness_deadline,
+        time.monotonic() + readiness_probe_window,
+    )
     try:
         result = run_guest_command(
             readiness_command,
-            readiness_deadline,
-            "readiness phase",
+            probe_deadline,
+            "readiness probe",
+        )
+    except GuestCommandTimeout as exc:
+        stream.close()
+        raise SystemExit(
+            "in-guest readiness probe did not settle; refusing to start a duplicate probe: "
+            f"{exc}"
         )
     except (OSError, ValueError, RuntimeError) as exc:
         stream.close()
