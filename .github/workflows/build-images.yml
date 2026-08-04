@@ -21,9 +21,11 @@ name: Build & Push Orchestrator Images
 # Tags produced by active groups:
 #   anticipatercom/devshot:amd64           — Dom0 orchestrator, Linux x86_64 (KVM)
 #   anticipatercom/devshot:amd64-kvm       — Direct QEMU backend, Linux x86_64
+#   anticipatercom/devshot:amd64-fc        — Firecracker backend, Linux x86_64
 #   anticipatercom/devshot:arm64           — Dom0 orchestrator, Linux ARM64
 #   anticipatercom/devshot:arm64-mac       — Apple Silicon Docker Desktop alias
 #   anticipatercom/devshot:arm64-kvm       — Direct QEMU backend, Linux ARM64
+#   anticipatercom/devshot:arm64-fc        — Firecracker backend, Linux ARM64
 #
 # Required repo secrets (configure in devshot-agent repo Settings → Secrets):
 #   DOCKERHUB_USERNAME — Docker Hub user with push access to anticipatercom
@@ -246,6 +248,7 @@ jobs:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-kvm
       BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-kvm
       CANDIDATE_IMAGE: devshot-amd64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-kvm
+      FC_CANDIDATE_IMAGE: devshot-amd64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-fc
     steps:
       - name: Reclaim self-hosted runner workspace
         shell: bash
@@ -272,7 +275,18 @@ jobs:
         working-directory: ${{ env.CHECKOUT_DIR }}
         env:
           GITHUB_API_TOKEN: ${{ github.token }}
-        run: bash docker/self-hosted-builder.sh prepare 40
+        run: |
+          set -euo pipefail
+          [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] || {
+            echo "ERROR: AMD64 VMM release gate requires readable/writable /dev/kvm" >&2
+            exit 1
+          }
+          [ -c /dev/net/tun ] || { echo "ERROR: VMM release gate requires /dev/net/tun" >&2; exit 1; }
+          [ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ] || {
+            echo "ERROR: QEMU systemd scopes require cgroup v2" >&2
+            exit 1
+          }
+          bash docker/self-hosted-builder.sh prepare 40
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -300,6 +314,22 @@ jobs:
           set -euo pipefail
           if bash docker/publish-validated-image.sh reuse-immutable \
               amd64-kvm "$CANDIDATE_IMAGE" "${{ github.sha }}"; then
+            echo 'reused=true' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 3 ]; then
+              exit "$status"
+            fi
+            echo 'reused=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reuse exact immutable AMD64 Firecracker image on retry
+        id: reuse_fc_amd64
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          if bash docker/publish-validated-image.sh reuse-immutable \
+              amd64-fc "$FC_CANDIDATE_IMAGE" "${{ github.sha }}"; then
             echo 'reused=true' >> "$GITHUB_OUTPUT"
           else
             status=$?
@@ -387,6 +417,38 @@ jobs:
           bash scripts/verify-studio-runtime-image.sh \
             "$CANDIDATE_IMAGE" linux/amd64 roles/dom0/files/verify-studio-runtime-prerequisites.sh
 
+      - name: Prove real AMD64 QEMU lifecycle and isolation
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          bash docker/run-vmm-integration.sh qemu "$CANDIDATE_IMAGE" TestIntegrationQEMU
+          bash docker/run-vmm-integration.sh qemu "$CANDIDATE_IMAGE" TestIntegrationEscape
+
+      - name: Build exact AMD64 Firecracker validation candidate
+        if: steps.reuse_fc_amd64.outputs.reused != 'true'
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          timeout --foreground --signal=TERM --kill-after=30s 2700s \
+            docker buildx build --builder "$BUILDER_NAME" --load \
+              --platform linux/amd64 --provenance=false \
+              --build-arg BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }} \
+              --build-arg DEVSHOT_FC_PLATFORM=linux/amd64 \
+              --build-arg SOURCE_SHA=${{ github.sha }} \
+              --file docker/Dockerfile.vmm-fc-x86 \
+              --tag "$FC_CANDIDATE_IMAGE" .
+
+      - name: Prove real AMD64 Firecracker lifecycle and isolation
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          [ "$(docker image inspect --format '{{.Architecture}}' "$FC_CANDIDATE_IMAGE")" = amd64 ]
+          [ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$FC_CANDIDATE_IMAGE")" = "${{ github.sha }}" ]
+          bash docker/run-vmm-integration.sh firecracker "$FC_CANDIDATE_IMAGE" TestIntegrationFirecracker
+          bash docker/run-vmm-integration.sh firecracker "$FC_CANDIDATE_IMAGE" TestIntegrationEscape
+
+      - name: Publish validated immutable AMD64 Firecracker tag
+        if: steps.reuse_fc_amd64.outputs.reused != 'true'
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/publish-validated-image.sh push-immutable amd64-fc "$FC_CANDIDATE_IMAGE" "${{ github.sha }}"
+
       - name: Publish validated immutable AMD64 KVM tag
         working-directory: ${{ env.CHECKOUT_DIR }}
         run: bash docker/publish-validated-image.sh push-immutable amd64-kvm "$CANDIDATE_IMAGE" "${{ github.sha }}"
@@ -397,7 +459,9 @@ jobs:
         run: |
           bash docker/self-hosted-builder.sh cleanup \
             "$CANDIDATE_IMAGE" \
+            "$FC_CANDIDATE_IMAGE" \
             anticipatercom/devshot:amd64-${{ github.sha }} \
+            anticipatercom/devshot:amd64-fc-${{ github.sha }} \
             anticipatercom/devshot:amd64-kvm-${{ github.sha }}
 
       - name: Promote validated AMD64 family to rolling tags
@@ -410,7 +474,9 @@ jobs:
 
   # ═══════════════════════════════════════════════════════════════════════
   # Group 2 — arm64 (active)
-  # Runs only on the isolated architecture-matched ARM64 QEMU/TCG runner. The
+  # Runs only on the isolated architecture-matched ARM64 KVM runner. Candidate
+  # publication now requires a real /dev/kvm lifecycle gate; TCG is not an
+  # acceptable release proof. The
   # group is restricted to this exact trusted main-branch workflow and the
   # custom label prevents the runner from accepting X64 or deployment jobs.
   # ═══════════════════════════════════════════════════════════════════════
@@ -713,6 +779,7 @@ jobs:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-arm64-kvm
       BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-kvm
       CANDIDATE_IMAGE: devshot-arm64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-kvm
+      FC_CANDIDATE_IMAGE: devshot-arm64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-fc
     steps:
       - name: Reclaim self-hosted runner workspace
         shell: bash
@@ -750,6 +817,15 @@ jobs:
               exit 1
               ;;
           esac
+          [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] || {
+            echo "ERROR: ARM64 VMM release gate requires readable/writable /dev/kvm; TCG cannot validate KVM" >&2
+            exit 1
+          }
+          [ -c /dev/net/tun ] || { echo "ERROR: VMM release gate requires /dev/net/tun" >&2; exit 1; }
+          [ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ] || {
+            echo "ERROR: QEMU systemd scopes require cgroup v2" >&2
+            exit 1
+          }
           bash docker/self-hosted-builder.sh verify-memory 8
           bash docker/self-hosted-builder.sh prepare 40
           runner_home="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
@@ -791,6 +867,22 @@ jobs:
           set -euo pipefail
           if bash docker/publish-validated-image.sh reuse-immutable \
               arm64-kvm "$CANDIDATE_IMAGE" "${{ github.sha }}"; then
+            echo 'reused=true' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 3 ]; then
+              exit "$status"
+            fi
+            echo 'reused=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reuse exact immutable ARM64 Firecracker image on retry
+        id: reuse_fc_arm64
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          set -euo pipefail
+          if bash docker/publish-validated-image.sh reuse-immutable \
+              arm64-fc "$FC_CANDIDATE_IMAGE" "${{ github.sha }}"; then
             echo 'reused=true' >> "$GITHUB_OUTPUT"
           else
             status=$?
@@ -846,6 +938,38 @@ jobs:
           bash scripts/verify-studio-runtime-image.sh \
             "$image" linux/arm64 roles/dom0/files/verify-studio-runtime-prerequisites.sh
 
+      - name: Prove real ARM64 QEMU lifecycle and isolation
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          bash docker/run-vmm-integration.sh qemu "$CANDIDATE_IMAGE" TestIntegrationQEMU
+          bash docker/run-vmm-integration.sh qemu "$CANDIDATE_IMAGE" TestIntegrationEscape
+
+      - name: Build exact ARM64 Firecracker validation candidate
+        if: steps.reuse_fc_arm64.outputs.reused != 'true'
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          timeout --foreground --signal=TERM --kill-after=30s 2700s \
+            docker buildx build --builder "$BUILDER_NAME" --load \
+              --platform linux/arm64 --provenance=false \
+              --build-arg BASE_IMAGE=anticipatercom/devshot:arm64-${{ github.sha }} \
+              --build-arg DEVSHOT_FC_PLATFORM=linux/arm64 \
+              --build-arg SOURCE_SHA=${{ github.sha }} \
+              --file docker/Dockerfile.vmm-fc-arm \
+              --tag "$FC_CANDIDATE_IMAGE" .
+
+      - name: Prove real ARM64 Firecracker lifecycle and isolation
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: |
+          [ "$(docker image inspect --format '{{.Architecture}}' "$FC_CANDIDATE_IMAGE")" = arm64 ]
+          [ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$FC_CANDIDATE_IMAGE")" = "${{ github.sha }}" ]
+          bash docker/run-vmm-integration.sh firecracker "$FC_CANDIDATE_IMAGE" TestIntegrationFirecracker
+          bash docker/run-vmm-integration.sh firecracker "$FC_CANDIDATE_IMAGE" TestIntegrationEscape
+
+      - name: Publish validated immutable ARM64 Firecracker tag
+        if: steps.reuse_fc_arm64.outputs.reused != 'true'
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/publish-validated-image.sh push-immutable arm64-fc "$FC_CANDIDATE_IMAGE" "${{ github.sha }}"
+
       - name: Publish validated immutable ARM64 KVM tag
         working-directory: ${{ env.CHECKOUT_DIR }}
         run: bash docker/publish-validated-image.sh push-immutable arm64-kvm "$CANDIDATE_IMAGE" "${{ github.sha }}"
@@ -857,6 +981,8 @@ jobs:
         run: |
           bash docker/self-hosted-builder.sh cleanup \
             "$CANDIDATE_IMAGE" \
+            "$FC_CANDIDATE_IMAGE" \
+            anticipatercom/devshot:arm64-fc-${{ github.sha }} \
             anticipatercom/devshot:arm64-kvm-${{ github.sha }}
 
       - name: Promote validated ARM64 family to rolling tags

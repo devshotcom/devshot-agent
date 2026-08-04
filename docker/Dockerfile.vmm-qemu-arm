@@ -13,7 +13,9 @@
 #
 # Run with:
 #   docker run -d --name devshot-<name> \
-#     --cap-add=NET_ADMIN --cap-add=SYS_ADMIN \
+#     --privileged --cgroupns=host \
+#     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+#     --security-opt=seccomp=unconfined --security-opt=apparmor=unconfined \
 #     --device=/dev/net/tun --device=/dev/kvm \
 #     --read-only --tmpfs /tmp --tmpfs /run --tmpfs /var/run \
 #     --network=host --restart=unless-stopped \
@@ -34,23 +36,28 @@
 #   docker build -t devshot-dom0-arm -f Dockerfile.dom0-arm .
 #
 # Then this Dockerfile copies artifacts from that image:
+ARG DEVSHOT_QEMU_PLATFORM=linux/arm64
 ARG BASE_IMAGE=anticipatercom/devshot:arm64
-FROM ${BASE_IMAGE} AS artifacts
+FROM --platform=${DEVSHOT_QEMU_PLATFORM} ${BASE_IMAGE} AS artifacts
 
 # ── Stage 2: final image ───────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM --platform=${DEVSHOT_QEMU_PLATFORM} debian:bookworm-slim
 
 # Make the final manifest source-unique even when the runtime payload did not
 # otherwise change. The rolling KVM digest is the family commit marker, so two
 # source revisions must never produce the same marker digest.
 ARG SOURCE_SHA
 RUN printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
-LABEL org.opencontainers.image.revision="$SOURCE_SHA"
+LABEL org.opencontainers.image.revision="$SOURCE_SHA" \
+      io.devshot.image-family.schema="2"
 
 # Install runtime deps (minimal).
 RUN apt-get update && apt-get install -y --no-install-recommends \
   qemu-system-arm \
   qemu-utils \
+  systemd \
+  systemd-sysv \
+  dbus \
   iproute2 \
   bridge-utils \
   nftables \
@@ -60,7 +67,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libseccomp2 \
   util-linux \
   procps \
-  tini \
   socat \
   ca-certificates \
   dnsmasq \
@@ -87,7 +93,8 @@ COPY --from=artifacts /xen/configs/ /xen/configs/
 
 # Copy the Go agent binary (built by CI in the agent-build job).
 COPY bin/devshot-agent-linux-arm64 /opt/devshot/agent
-RUN chmod +x /opt/devshot/agent
+COPY bin/devshot-sandbox-init-linux-arm64 /usr/local/bin/devshot-sandbox-init
+RUN chmod 0755 /opt/devshot/agent /usr/local/bin/devshot-sandbox-init
 
 COPY yara_rules /opt/devshot/yara_rules
 
@@ -100,7 +107,9 @@ COPY docker/seccomp/devshot-vmm.json /etc/devshot/seccomp/devshot-vmm.json
 COPY docker/load-credentials.sh /opt/devshot/load-credentials.sh
 COPY docker/sync-templates.sh /opt/devshot/sync-templates.sh
 COPY docker/entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
-RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh /opt/devshot/sync-templates.sh
+COPY docker/devshot-vmm-qemu.service /etc/systemd/system/devshot-vmm-qemu.service
+RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh /opt/devshot/sync-templates.sh && \
+  systemctl enable devshot-vmm-qemu.service
 
 # Create runtime dirs and prefetch signatures when possible.
 RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \
@@ -110,5 +119,6 @@ RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/cl
 # The entrypoint needs root for bridge + iptables; dropping after
 # setup is handled by the sandbox layer inside the Go agent.
 USER root
-
-ENTRYPOINT ["tini", "--", "/opt/devshot/entrypoint.sh"]
+ENV container=docker
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/sbin/init"]

@@ -44,7 +44,9 @@ on demand. Use this for `server_type: 'multi'` servers.
 | `anticipatercom/devshot:arm64` | Linux ARM64 Xen orchestrator (legacy) | required (`--device /dev/kvm`) | `docker/Dockerfile.dom0-arm` |
 | `anticipatercom/devshot:arm64-mac` | Apple Silicon via Docker Desktop | not used (TCG software emulation) | `docker/Dockerfile.dom0-arm` |
 | `anticipatercom/devshot:amd64-kvm` | Linux x86_64 direct QEMU backend | optional (`/dev/kvm` enables acceleration) | `docker/Dockerfile.vmm-qemu-x86` |
+| `anticipatercom/devshot:amd64-fc` | Linux x86_64 Firecracker backend | required | `docker/Dockerfile.vmm-fc-x86` |
 | `anticipatercom/devshot:arm64-kvm` | Linux ARM64 direct QEMU backend | optional (`/dev/kvm` enables acceleration) | `docker/Dockerfile.vmm-qemu-arm` |
+| `anticipatercom/devshot:arm64-fc` | Linux ARM64 Firecracker backend | required | `docker/Dockerfile.vmm-fc-arm` |
 
 ### DomU standalone (single-VM, no Xen)
 
@@ -70,7 +72,9 @@ docker pull anticipatercom/devshot:amd64      # Linux x86_64 Xen (legacy)
 docker pull anticipatercom/devshot:arm64      # Linux ARM64 Xen (legacy)
 docker pull anticipatercom/devshot:arm64-mac  # Apple Silicon Docker Desktop
 docker pull anticipatercom/devshot:amd64-kvm  # Linux x86_64 direct QEMU
+docker pull anticipatercom/devshot:amd64-fc   # Linux x86_64 Firecracker
 docker pull anticipatercom/devshot:arm64-kvm  # Linux ARM64 direct QEMU
+docker pull anticipatercom/devshot:arm64-fc   # Linux ARM64 Firecracker
 
 # DomU standalone
 docker pull anticipatercom/devshot_domu:latest     # terminal only
@@ -84,7 +88,9 @@ docker pull anticipatercom/devshot_desktop:latest  # + VNC desktop
 docker build -t anticipatercom/devshot:amd64 -f docker/Dockerfile.dom0-x86 .
 docker build -t anticipatercom/devshot:arm64 -f docker/Dockerfile.dom0-arm .
 docker build -t anticipatercom/devshot:amd64-kvm -f docker/Dockerfile.vmm-qemu-x86 .
+docker build -t anticipatercom/devshot:amd64-fc -f docker/Dockerfile.vmm-fc-x86 .
 docker build -t anticipatercom/devshot:arm64-kvm -f docker/Dockerfile.vmm-qemu-arm .
+docker build -t anticipatercom/devshot:arm64-fc -f docker/Dockerfile.vmm-fc-arm .
 
 # DomU standalone (multi-arch from a single Dockerfile)
 docker buildx build --platform linux/amd64,linux/arm64 \
@@ -221,6 +227,6 @@ Stripped (`-ldflags="-s -w"`), statically linked (`CGO_ENABLED=0`).
 
 ## Build Info
 
-Auto-deployed by CI from [devshotcom/devshot@0a21bb5cc69a0b55686a23383ad473b747d9ff47](https://github.com/devshotcom/devshot/commit/0a21bb5cc69a0b55686a23383ad473b747d9ff47).
+Auto-deployed by CI from [devshotcom/devshot@1d7f7effee6138bfb02fa029bffbe2d89feb4042](https://github.com/devshotcom/devshot/commit/1d7f7effee6138bfb02fa029bffbe2d89feb4042).
 
-Last built: 2026-08-03T20:37:48Z
+Last built: 2026-08-04T15:03:26Z

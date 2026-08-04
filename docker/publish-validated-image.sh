@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Publish architecture-specific images only after local runtime validation.
 # Immutable SHA tags are pushed first. Rolling tags are promoted as the final
-# release transaction after both Dom0 and KVM jobs have validated and cleaned
+# release transaction after Dom0, Firecracker, and KVM have validated and cleaned
 # their persistent builder state.
 set -euo pipefail
 
@@ -9,7 +9,7 @@ readonly REPOSITORY='anticipatercom/devshot'
 PROMOTION_AUTH_DIR=''
 
 usage() {
-  echo "usage: $0 reuse-immutable <arm64-dom0|arm64-kvm|amd64-dom0|amd64-kvm> <local-candidate> <40-char-sha> | push-immutable <arm64-dom0|arm64-kvm|amd64-dom0|amd64-kvm> <local-candidate> <40-char-sha> | promote-arm64-family <40-char-sha> | promote-amd64-family <40-char-sha>" >&2
+  echo "usage: $0 reuse-immutable <arm64-dom0|arm64-fc|arm64-kvm|amd64-dom0|amd64-fc|amd64-kvm> <local-candidate> <40-char-sha> | push-immutable <arm64-dom0|arm64-fc|arm64-kvm|amd64-dom0|amd64-fc|amd64-kvm> <local-candidate> <40-char-sha> | promote-arm64-family <40-char-sha> | promote-amd64-family <40-char-sha>" >&2
   exit 64
 }
 
@@ -27,6 +27,43 @@ require_command() {
   }
 }
 
+write_curl_auth_config() {
+  local path="$1"
+  [ -n "$DOCKERHUB_USERNAME" ] && [ "${#DOCKERHUB_USERNAME}" -le 128 ] \
+    && [[ "$DOCKERHUB_USERNAME" =~ ^[A-Za-z0-9] ]] \
+    && [[ ! "$DOCKERHUB_USERNAME" =~ [^A-Za-z0-9._-] ]] || {
+    echo "ERROR: Docker Hub username contains unsupported characters" >&2
+    return 1
+  }
+  [ -n "$DOCKERHUB_TOKEN" ] && [ "${#DOCKERHUB_TOKEN}" -le 512 ] \
+    && [[ ! "$DOCKERHUB_TOKEN" =~ [^A-Za-z0-9._-] ]] || {
+    echo "ERROR: Docker Hub token contains unsupported characters" >&2
+    return 1
+  }
+  printf 'user = "%s:%s"\n' "$DOCKERHUB_USERNAME" "$DOCKERHUB_TOKEN" > "$path"
+  chmod 0600 "$path"
+}
+
+bounded_delete_dockerhub_tag() {
+  local curl_config="$1" tag="$2" attempt
+  [[ "$tag" =~ ^(amd64|arm64)-fc$ ]] || {
+    echo "ERROR: refusing to delete an unexpected Docker Hub tag: $tag" >&2
+    return 1
+  }
+  for attempt in 1 2; do
+    if timeout --foreground --signal=TERM --kill-after=15s 120s \
+      env -u DOCKERHUB_TOKEN curl --config "$curl_config" \
+        --fail --silent --show-error --proto '=https' \
+        --connect-timeout 15 --max-time 90 --request DELETE \
+        "https://hub.docker.com/v2/repositories/${REPOSITORY}/tags/${tag}/"; then
+      return 0
+    fi
+    [ "$attempt" -eq 2 ] || echo "Retrying bounded Docker Hub tag deletion: $tag" >&2
+  done
+  echo "ERROR: Docker Hub tag deletion failed twice: $tag" >&2
+  return 1
+}
+
 bounded_docker() {
   local seconds="$1"
   shift
@@ -36,16 +73,23 @@ bounded_docker() {
 
 registry_digest() {
   local reference="$1" manifest digest
-  manifest="$(bounded_docker 180 buildx imagetools inspect "$reference" --format '{{json .Manifest}}')"
-  digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")"
+  manifest="$(bounded_docker 180 buildx imagetools inspect "$reference" --format '{{json .Manifest}}')" || return 1
+  digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")" || return 1
   printf '%s\n' "$digest"
 }
 
 registry_revision() {
   local reference="$1" image revision
-  image="$(bounded_docker 180 buildx imagetools inspect "$reference" --format '{{json .Image}}')"
-  revision="$(jq -er '.config.Labels["org.opencontainers.image.revision"] | select(type == "string" and test("^[0-9a-f]{40}$"))' <<< "$image")"
+  image="$(bounded_docker 180 buildx imagetools inspect "$reference" --format '{{json .Image}}')" || return 1
+  revision="$(jq -er '.config.Labels["org.opencontainers.image.revision"] | select(type == "string" and test("^[0-9a-f]{40}$"))' <<< "$image")" || return 1
   printf '%s\n' "$revision"
+}
+
+registry_family_schema() {
+  local reference="$1" image schema
+  image="$(bounded_docker 180 buildx imagetools inspect "$reference" --format '{{json .Image}}')" || return 1
+  schema="$(jq -er '.config.Labels["io.devshot.image-family.schema"] | select(. == "2")' <<< "$image")" || return 1
+  printf '%s\n' "$schema"
 }
 
 registry_digest_or_missing() {
@@ -120,7 +164,7 @@ require_candidate_identity() {
     echo "ERROR: invalid GitHub Actions run identity" >&2
     exit 64
   }
-  if [[ "$candidate" =~ ^devshot-(arm64|amd64)-candidate:([0-9]+)-([0-9]+)-(dom0|kvm)$ ]]; then
+  if [[ "$candidate" =~ ^devshot-(arm64|amd64)-candidate:([0-9]+)-([0-9]+)-(dom0|fc|kvm)$ ]]; then
     candidate_arch="${BASH_REMATCH[1]}"
     run_id="${BASH_REMATCH[2]}"
     run_attempt="${BASH_REMATCH[3]}"
@@ -147,11 +191,17 @@ immutable_references() {
     arm64-kvm)
       printf '%s\n' "$REPOSITORY:arm64-kvm-$source_sha"
       ;;
+    arm64-fc)
+      printf '%s\n' "$REPOSITORY:arm64-fc-$source_sha"
+      ;;
     amd64-dom0)
       printf '%s\n' "$REPOSITORY:amd64-$source_sha"
       ;;
     amd64-kvm)
       printf '%s\n' "$REPOSITORY:amd64-kvm-$source_sha"
+      ;;
+    amd64-fc)
+      printf '%s\n' "$REPOSITORY:amd64-fc-$source_sha"
       ;;
     *)
       echo "ERROR: invalid image publication variant: $variant" >&2
@@ -160,19 +210,29 @@ immutable_references() {
   esac
 }
 
-require_local_kvm_revision() {
+require_local_vmm_identity() {
   local variant="$1" image="$2" source_sha="$3" revision
   case "$variant" in
-    arm64-kvm|amd64-kvm) ;;
+    arm64-kvm|amd64-kvm|arm64-fc|amd64-fc) ;;
     *) return 0 ;;
   esac
   revision="$(bounded_docker 60 image inspect \
     --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
     "$image")"
   [ "$revision" = "$source_sha" ] || {
-    echo "ERROR: KVM image revision label is ${revision:-missing}, expected $source_sha" >&2
+    echo "ERROR: VMM image revision label is ${revision:-missing}, expected $source_sha" >&2
     return 1
   }
+  case "$variant" in
+    arm64-kvm|amd64-kvm)
+      [ "$(bounded_docker 60 image inspect \
+          --format '{{ index .Config.Labels "io.devshot.image-family.schema" }}' \
+          "$image")" = 2 ] || {
+        echo "ERROR: KVM image is missing required image-family schema 2" >&2
+        return 1
+      }
+      ;;
+  esac
 }
 
 # A rerun may start after a previously validated immutable image was published
@@ -216,7 +276,7 @@ reuse_immutable() {
     echo "ERROR: refusing to reuse wrong-architecture immutable image: $selected_reference ($architecture, expected $expected_arch)" >&2
     return 1
   }
-  require_local_kvm_revision "$variant" "$selected_reference" "$source_sha"
+  require_local_vmm_identity "$variant" "$selected_reference" "$source_sha"
   bounded_docker 60 tag "$selected_reference" "$candidate"
   echo "Reused exact immutable $variant image $selected_reference ($selected_digest)"
 }
@@ -239,11 +299,17 @@ push_immutable() {
     arm64-kvm)
       registry_candidate="$REPOSITORY:validated-arm64-kvm-$source_sha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       ;;
+    arm64-fc)
+      registry_candidate="$REPOSITORY:validated-arm64-fc-$source_sha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      ;;
     amd64-dom0)
       registry_candidate="$REPOSITORY:validated-amd64-$source_sha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       ;;
     amd64-kvm)
       registry_candidate="$REPOSITORY:validated-amd64-kvm-$source_sha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      ;;
+    amd64-fc)
+      registry_candidate="$REPOSITORY:validated-amd64-fc-$source_sha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       ;;
     *)
       echo "ERROR: invalid image publication variant: $variant" >&2
@@ -256,7 +322,7 @@ push_immutable() {
     echo "ERROR: refusing to publish wrong-architecture candidate: $candidate ($architecture, expected $expected_arch)" >&2
     exit 1
   }
-  require_local_kvm_revision "$variant" "$candidate" "$source_sha"
+  require_local_vmm_identity "$variant" "$candidate" "$source_sha"
 
   # This run-specific registry candidate is published only after the local
   # runtime validator passed. It lets us resolve the registry manifest digest
@@ -264,9 +330,14 @@ push_immutable() {
   bounded_docker 60 tag "$candidate" "$registry_candidate"
   push_with_retry "$registry_candidate"
   candidate_digest="$(registry_digest "$registry_candidate")"
-  if [[ "$variant" == *-kvm ]] \
+  if [[ "$variant" == *-kvm || "$variant" == *-fc ]] \
     && [ "$(registry_revision "$registry_candidate")" != "$source_sha" ]; then
-    echo "ERROR: published KVM image revision does not match source SHA" >&2
+    echo "ERROR: published VMM image revision does not match source SHA" >&2
+    return 1
+  fi
+  if [[ "$variant" == *-kvm ]] \
+    && [ "$(registry_family_schema "$registry_candidate")" != 2 ]; then
+    echo "ERROR: published KVM image is missing required image-family schema 2" >&2
     return 1
   fi
   bounded_docker 120 image rm "$registry_candidate" >/dev/null
@@ -278,8 +349,8 @@ push_immutable() {
 }
 
 promote_amd64_family() {
-  local source_sha="${1:-}" auth_dir dom0_digest kvm_digest
-  local old_dom0 old_kvm actual promotion_started=0 promotion_failed=0 rollback_failed=0
+  local source_sha="${1:-}" auth_dir curl_config dom0_digest fc_digest kvm_digest
+  local old_dom0 old_fc old_kvm actual promotion_started=0 promotion_failed=0 rollback_failed=0
   require_sha "$source_sha"
   : "${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME is required}"
   : "${DOCKERHUB_TOKEN:?DOCKERHUB_TOKEN is required}"
@@ -300,6 +371,15 @@ promote_amd64_family() {
   esac
   rm -rf -- "$auth_dir"
   install -d -m 0700 "$auth_dir"
+  cleanup_auth() {
+    local status=$?
+    trap - EXIT INT TERM
+    rm -rf -- "$auth_dir" || exit 1
+    exit "$status"
+  }
+  trap cleanup_auth EXIT
+  curl_config="$auth_dir/curl-auth.conf"
+  write_curl_auth_config "$curl_config"
 
   auth_docker() {
     local seconds="$1"
@@ -309,20 +389,41 @@ promote_amd64_family() {
   }
   auth_digest() {
     local manifest digest
-    manifest="$(auth_docker 180 buildx imagetools inspect "$1" --format '{{json .Manifest}}')"
-    digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")"
+    manifest="$(auth_docker 180 buildx imagetools inspect "$1" --format '{{json .Manifest}}')" || return 1
+    digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")" || return 1
     printf '%s\n' "$digest"
   }
-  cleanup_auth() {
-    local status=$?
-    trap - EXIT INT TERM
-    rm -rf -- "$auth_dir" || exit 1
-    exit "$status"
+  auth_digest_or_missing() {
+    local reference="$1" output status=0 digest
+    output="$(auth_docker 180 buildx imagetools inspect "$reference" --format '{{json .Manifest}}' 2>&1)" || status=$?
+    if [ "$status" -eq 0 ]; then
+      digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$output")"
+      printf '%s\n' "$digest"
+      return 0
+    fi
+    if grep -Eqi 'not found|manifest unknown|no such manifest' <<< "$output"; then
+      printf '%s\n' missing
+      return 0
+    fi
+    [ -z "$output" ] || printf '%s\n' "$output" >&2
+    echo "ERROR: could not determine whether rolling tag exists: $reference" >&2
+    return "$status"
+  }
+  restore_fc() {
+    if [ "$old_fc" = missing ]; then
+      bounded_delete_dockerhub_tag "$curl_config" amd64-fc || return 1
+      [ "$(auth_digest_or_missing "$REPOSITORY:amd64-fc")" = missing ] || return 1
+    else
+      auth_docker 600 buildx imagetools create --prefer-index=false \
+        --tag "$REPOSITORY:amd64-fc" "$REPOSITORY@$old_fc" || return 1
+      [ "$(auth_digest "$REPOSITORY:amd64-fc" 2>/dev/null || true)" = "$old_fc" ] || return 1
+    fi
   }
   restore_previous() {
     rollback_failed=0
     auth_docker 600 buildx imagetools create --prefer-index=false \
       --tag "$REPOSITORY:amd64" "$REPOSITORY@$old_dom0" || rollback_failed=1
+    restore_fc || rollback_failed=1
     auth_docker 600 buildx imagetools create --prefer-index=false \
       --tag "$REPOSITORY:amd64-kvm" "$REPOSITORY@$old_kvm" || rollback_failed=1
     actual="$(auth_digest "$REPOSITORY:amd64" 2>/dev/null || true)"
@@ -343,20 +444,28 @@ promote_amd64_family() {
     fi
     exit "$code"
   }
-  trap cleanup_auth EXIT
-
   printf '%s' "$DOCKERHUB_TOKEN" \
     | timeout --foreground --signal=TERM --kill-after=15s 120s \
         env -u DOCKERHUB_TOKEN docker --config "$auth_dir" login \
           --username "$DOCKERHUB_USERNAME" --password-stdin
 
   dom0_digest="$(auth_digest "$REPOSITORY:amd64-$source_sha")"
+  fc_digest="$(auth_digest "$REPOSITORY:amd64-fc-$source_sha")"
   kvm_digest="$(auth_digest "$REPOSITORY:amd64-kvm-$source_sha")"
+  [ "$(registry_revision "$REPOSITORY:amd64-fc-$source_sha")" = "$source_sha" ] || {
+    echo "ERROR: AMD64 Firecracker immutable revision does not match promotion source" >&2
+    exit 1
+  }
   [ "$(registry_revision "$REPOSITORY:amd64-kvm-$source_sha")" = "$source_sha" ] || {
     echo "ERROR: AMD64 KVM immutable revision does not match promotion source" >&2
     exit 1
   }
+  [ "$(registry_family_schema "$REPOSITORY:amd64-kvm-$source_sha")" = 2 ] || {
+    echo "ERROR: AMD64 KVM immutable does not require the complete Firecracker family" >&2
+    exit 1
+  }
   old_dom0="$(auth_digest "$REPOSITORY:amd64")"
+  old_fc="$(auth_digest_or_missing "$REPOSITORY:amd64-fc")"
   old_kvm="$(auth_digest "$REPOSITORY:amd64-kvm")"
   trap 'handle_signal 130' INT
   trap 'handle_signal 143' TERM
@@ -366,13 +475,18 @@ promote_amd64_family() {
       --tag "$REPOSITORY:amd64" "$REPOSITORY@$dom0_digest"; then
     promotion_failed=1
   elif ! auth_docker 600 buildx imagetools create --prefer-index=false \
+      --tag "$REPOSITORY:amd64-fc" "$REPOSITORY@$fc_digest"; then
+    promotion_failed=1
+  elif ! auth_docker 600 buildx imagetools create --prefer-index=false \
       --tag "$REPOSITORY:amd64-kvm" "$REPOSITORY@$kvm_digest"; then
     promotion_failed=1
   fi
   actual="$(auth_digest "$REPOSITORY:amd64" 2>/dev/null || true)"
-  [ "$actual" = "$dom0_digest" ] || promotion_failed=1
+  [ "$actual" = "$dom0_digest" ] || { echo "ERROR: promoted AMD64 Dom0 digest did not verify" >&2; promotion_failed=1; }
+  actual="$(auth_digest "$REPOSITORY:amd64-fc" 2>/dev/null || true)"
+  [ "$actual" = "$fc_digest" ] || { echo "ERROR: promoted AMD64 Firecracker digest did not verify" >&2; promotion_failed=1; }
   actual="$(auth_digest "$REPOSITORY:amd64-kvm" 2>/dev/null || true)"
-  [ "$actual" = "$kvm_digest" ] || promotion_failed=1
+  [ "$actual" = "$kvm_digest" ] || { echo "ERROR: promoted AMD64 KVM commit marker did not verify" >&2; promotion_failed=1; }
   if [ "$promotion_failed" -ne 0 ]; then
     restore_previous || true
     exit 1
@@ -380,14 +494,14 @@ promote_amd64_family() {
   promotion_started=0
   rm -rf -- "$auth_dir"
   trap - EXIT INT TERM
-  echo "Promoted validated AMD64 family: dom0=$dom0_digest kvm=$kvm_digest"
+  echo "Promoted validated AMD64 family: dom0=$dom0_digest fc=$fc_digest kvm=$kvm_digest"
 }
 
 promote_arm64_family() {
-  local source_sha="${1:-}" auth_dir journal_path journal_lock_path journal_tmp=''
+  local source_sha="${1:-}" auth_dir curl_config journal_path journal_lock_path journal_tmp=''
   local promotion_failed=0 rollback_failed=0 promotion_started=0 promotion_superseded=0
-  local dom0_digest kvm_digest tag actual
-  local -a rolling_tags=(arm64 arm64-mac arm64-kvm)
+  local dom0_digest fc_digest kvm_digest tag actual
+  local -a rolling_tags=(arm64 arm64-mac arm64-fc arm64-kvm)
   local -a previous_digests=()
 
   require_sha "$source_sha"
@@ -457,9 +571,8 @@ PY
   esac
   rm -rf -- "$auth_dir"
   install -d -m 0700 "$auth_dir"
-
   remove_promotion_auth() {
-    [ -z "$PROMOTION_AUTH_DIR" ] && return 0
+    [ -z "${PROMOTION_AUTH_DIR:-}" ] && return 0
     rm -rf -- "$PROMOTION_AUTH_DIR" || return 1
     [ ! -e "$PROMOTION_AUTH_DIR" ] || return 1
     PROMOTION_AUTH_DIR=''
@@ -467,8 +580,14 @@ PY
   cleanup_auth() {
     local status=$? cleanup_status=0
     trap - EXIT INT TERM
-    if [ -n "$journal_tmp" ]; then
-      rm -f -- "$journal_tmp" || cleanup_status=1
+    # `journal_tmp` is a `local` of the promoting function. When the EXIT
+    # trap fires after that function has already returned — every early
+    # validation failure does exactly that — the name is gone, and under
+    # `set -u` the bare expansion aborted cleanup_auth right here, BEFORE
+    # the credentials were removed. Default the expansions so the isolated
+    # auth directory is always torn down.
+    if [ -n "${journal_tmp:-}" ]; then
+      rm -f -- "${journal_tmp:-}" || cleanup_status=1
       journal_tmp=''
     fi
     remove_promotion_auth || cleanup_status=1
@@ -478,6 +597,8 @@ PY
     exit "$cleanup_status"
   }
   trap cleanup_auth EXIT
+  curl_config="$auth_dir/curl-auth.conf"
+  write_curl_auth_config "$curl_config"
 
   printf '%s' "$DOCKERHUB_TOKEN" \
     | timeout --foreground --signal=TERM --kill-after=15s 120s \
@@ -492,9 +613,25 @@ PY
   }
   auth_digest() {
     local manifest digest
-    manifest="$(auth_docker 180 buildx imagetools inspect "$1" --format '{{json .Manifest}}')"
-    digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")"
+    manifest="$(auth_docker 180 buildx imagetools inspect "$1" --format '{{json .Manifest}}')" || return 1
+    digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")" || return 1
     printf '%s\n' "$digest"
+  }
+  auth_digest_or_missing() {
+    local reference="$1" output status=0 digest
+    output="$(auth_docker 180 buildx imagetools inspect "$reference" --format '{{json .Manifest}}' 2>&1)" || status=$?
+    if [ "$status" -eq 0 ]; then
+      digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$output")"
+      printf '%s\n' "$digest"
+      return 0
+    fi
+    if grep -Eqi 'not found|manifest unknown|no such manifest' <<< "$output"; then
+      printf '%s\n' missing
+      return 0
+    fi
+    [ -z "$output" ] || printf '%s\n' "$output" >&2
+    echo "ERROR: could not determine whether rolling tag exists: $reference" >&2
+    return "$status"
   }
 
   restore_previous_tags() {
@@ -504,15 +641,20 @@ PY
     for index in "${!rolling_tags[@]}"; do
       rolling="${rolling_tags[$index]}"
       old_digest="${previous_digests[$index]}"
-      if ! auth_docker 600 buildx imagetools create --prefer-index=false \
-        --tag "$REPOSITORY:$rolling" "$REPOSITORY@$old_digest"; then
-        rollback_failed=1
+      if [ "$old_digest" = missing ]; then
+        if [ "$rolling" != arm64-fc ] \
+          || ! bounded_delete_dockerhub_tag "$curl_config" "$rolling"; then
+          rollback_failed=1
+        fi
+      elif ! auth_docker 600 buildx imagetools create --prefer-index=false \
+          --tag "$REPOSITORY:$rolling" "$REPOSITORY@$old_digest"; then
+          rollback_failed=1
       fi
     done
     for index in "${!rolling_tags[@]}"; do
       rolling="${rolling_tags[$index]}"
       old_digest="${previous_digests[$index]}"
-      rollback_actual="$(auth_digest "$REPOSITORY:$rolling" 2>/dev/null || true)"
+      rollback_actual="$(auth_digest_or_missing "$REPOSITORY:$rolling" 2>/dev/null || true)"
       [ "$rollback_actual" = "$old_digest" ] || rollback_failed=1
     done
     if [ "$rollback_failed" -ne 0 ]; then
@@ -546,8 +688,8 @@ PY
   }
 
   verify_superseding_family() {
-    local expected_dom0="$1" expected_mac="$2" expected_kvm="$3"
-    local helper helper_output verified_dom0 verified_mac verified_kvm
+    local expected_dom0="$1" expected_mac="$2" expected_fc="$3" expected_kvm="$4"
+    local helper helper_output verified_dom0 verified_mac verified_fc verified_kvm
     helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/recover-published-family.sh" || {
       echo "ERROR: could not resolve trusted family verification helper" >&2
       return 1
@@ -562,13 +704,15 @@ PY
     fi
 
     # The helper brackets all rolling reads with the KVM commit marker. Re-read
-    # the exact observed triplet before retiring the journal so a tag change
+    # the exact observed family before retiring the journal so a tag change
     # between helper completion and this process remains fail-closed.
     verified_dom0="$(auth_digest "$REPOSITORY:arm64")" || return 1
     verified_mac="$(auth_digest "$REPOSITORY:arm64-mac")" || return 1
+    verified_fc="$(auth_digest "$REPOSITORY:arm64-fc")" || return 1
     verified_kvm="$(auth_digest "$REPOSITORY:arm64-kvm")" || return 1
     if [ "$verified_dom0" != "$expected_dom0" ] \
       || [ "$verified_mac" != "$expected_mac" ] \
+      || [ "$verified_fc" != "$expected_fc" ] \
       || [ "$verified_kvm" != "$expected_kvm" ]; then
       echo "ERROR: superseding ARM64 rolling family changed before journal retirement" >&2
       return 1
@@ -576,10 +720,35 @@ PY
     printf '%s\n' "$helper_output"
   }
 
+  restore_legacy_v1_tags() {
+    local old_dom0="$1" old_mac="$2" old_kvm="$3" restored
+    rollback_failed=0
+    echo "Restoring the previous ARM64 rolling-tag set from legacy journal" >&2
+    auth_docker 600 buildx imagetools create --prefer-index=false \
+      --tag "$REPOSITORY:arm64" "$REPOSITORY@$old_dom0" || rollback_failed=1
+    auth_docker 600 buildx imagetools create --prefer-index=false \
+      --tag "$REPOSITORY:arm64-mac" "$REPOSITORY@$old_mac" || rollback_failed=1
+    auth_docker 600 buildx imagetools create --prefer-index=false \
+      --tag "$REPOSITORY:arm64-kvm" "$REPOSITORY@$old_kvm" || rollback_failed=1
+    for tag in arm64 arm64-mac arm64-kvm; do
+      case "$tag" in
+        arm64) restored="$old_dom0" ;;
+        arm64-mac) restored="$old_mac" ;;
+        arm64-kvm) restored="$old_kvm" ;;
+      esac
+      [ "$(auth_digest "$REPOSITORY:$tag" 2>/dev/null || true)" = "$restored" ] \
+        || rollback_failed=1
+    done
+    [ "$rollback_failed" -eq 0 ] || {
+      echo "ERROR: legacy ARM64 rolling-tag rollback did not restore every previous digest" >&2
+      return 1
+    }
+  }
+
   recover_pending_promotion() {
-    local journal_content version journal_repo journal_sha target_dom0 target_kvm
-    local old_dom0 old_mac old_kvm old_run old_attempt extra
-    local current_dom0 current_mac current_kvm
+    local journal_content version journal_repo journal_sha target_dom0 target_fc target_kvm
+    local old_dom0 old_mac old_fc old_kvm old_run old_attempt extra
+    local current_dom0 current_mac current_fc current_kvm
     local unrelated_digest=0
     local -a target_digests=() current_digests=()
     [ -e "$journal_path" ] || return 0
@@ -592,40 +761,92 @@ PY
       echo "ERROR: persistent ARM64 promotion journal is malformed" >&2
       return 1
     fi
-    IFS=$'\t' read -r version journal_repo journal_sha target_dom0 target_kvm \
-      old_dom0 old_mac old_kvm old_run old_attempt extra <<< "$journal_content" || {
-        echo "ERROR: could not read persistent ARM64 promotion journal" >&2
+    version="${journal_content%%$'\t'*}"
+    if [ "$version" = v1 ]; then
+      IFS=$'\t' read -r version journal_repo journal_sha target_dom0 target_kvm \
+        old_dom0 old_mac old_kvm old_run old_attempt extra <<< "$journal_content" || return 1
+      if [ "$journal_repo" != "$REPOSITORY" ] \
+        || ! [[ "$journal_sha" =~ ^[0-9a-f]{40}$ ]] \
+        || ! [[ "$target_dom0" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || ! [[ "$target_kvm" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || ! [[ "$old_dom0" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || ! [[ "$old_mac" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || ! [[ "$old_kvm" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || ! [[ "$old_run:$old_attempt" =~ ^[0-9]+:[0-9]+$ ]] \
+        || [ -n "${extra:-}" ]; then
+        echo "ERROR: persistent ARM64 promotion journal is malformed" >&2
+        return 1
+      fi
+      echo "Recovering interrupted legacy ARM64 promotion from run $old_run attempt $old_attempt" >&2
+      current_dom0="$(auth_digest "$REPOSITORY:arm64")"
+      current_mac="$(auth_digest "$REPOSITORY:arm64-mac")"
+      current_kvm="$(auth_digest "$REPOSITORY:arm64-kvm")"
+      if [ "$current_dom0" = "$target_dom0" ] \
+        && [ "$current_mac" = "$target_dom0" ] \
+        && [ "$current_kvm" = "$target_kvm" ]; then
+        echo "Interrupted legacy promotion already reached its complete target tag set"
+      elif [ "$current_dom0" = "$old_dom0" ] \
+        && [ "$current_mac" = "$old_mac" ] \
+        && [ "$current_kvm" = "$old_kvm" ]; then
+        echo "Interrupted legacy promotion left its complete previous tag set unchanged"
+      elif { [ "$current_dom0" != "$old_dom0" ] && [ "$current_dom0" != "$target_dom0" ]; } \
+        || { [ "$current_mac" != "$old_mac" ] && [ "$current_mac" != "$target_dom0" ]; } \
+        || { [ "$current_kvm" != "$old_kvm" ] && [ "$current_kvm" != "$target_kvm" ]; }; then
+        current_fc="$(auth_digest_or_missing "$REPOSITORY:arm64-fc")"
+        if [ "$current_dom0" = "$current_mac" ] && [ "$current_fc" != missing ] \
+          && verify_superseding_family "$current_dom0" "$current_mac" "$current_fc" "$current_kvm"; then
+          promotion_superseded=1
+          echo "A coherent validated ARM64 family superseded the stale legacy promotion journal"
+          return 0
+        fi
+        echo "ERROR: rolling ARM64 tags contain an unrelated digest; refusing journal recovery because the family is incoherent" >&2
+        return 1
+      else
+        restore_legacy_v1_tags "$old_dom0" "$old_mac" "$old_kvm" || return 1
+      fi
+      clear_journal || {
+        echo "ERROR: restored legacy tags but could not clear persistent promotion journal" >&2
         return 1
       }
-    if [ "$version" != v1 ] \
+      return 0
+    fi
+
+    IFS=$'\t' read -r version journal_repo journal_sha target_dom0 target_fc target_kvm \
+      old_dom0 old_mac old_fc old_kvm old_run old_attempt extra <<< "$journal_content" || return 1
+    if [ "$version" != v2 ] \
       || [ "$journal_repo" != "$REPOSITORY" ] \
       || ! [[ "$journal_sha" =~ ^[0-9a-f]{40}$ ]] \
       || ! [[ "$target_dom0" =~ ^sha256:[0-9a-f]{64}$ ]] \
+      || ! [[ "$target_fc" =~ ^sha256:[0-9a-f]{64}$ ]] \
       || ! [[ "$target_kvm" =~ ^sha256:[0-9a-f]{64}$ ]] \
       || ! [[ "$old_dom0" =~ ^sha256:[0-9a-f]{64}$ ]] \
       || ! [[ "$old_mac" =~ ^sha256:[0-9a-f]{64}$ ]] \
+      || ! [[ "$old_fc" = missing || "$old_fc" =~ ^sha256:[0-9a-f]{64}$ ]] \
       || ! [[ "$old_kvm" =~ ^sha256:[0-9a-f]{64}$ ]] \
       || ! [[ "$old_run:$old_attempt" =~ ^[0-9]+:[0-9]+$ ]] \
       || [ -n "${extra:-}" ]; then
       echo "ERROR: persistent ARM64 promotion journal is malformed" >&2
       return 1
     fi
-    previous_digests=("$old_dom0" "$old_mac" "$old_kvm")
-    target_digests=("$target_dom0" "$target_dom0" "$target_kvm")
+    previous_digests=("$old_dom0" "$old_mac" "$old_fc" "$old_kvm")
+    target_digests=("$target_dom0" "$target_dom0" "$target_fc" "$target_kvm")
     echo "Recovering interrupted ARM64 promotion from run $old_run attempt $old_attempt" >&2
     current_dom0="$(auth_digest "$REPOSITORY:arm64")"
     current_mac="$(auth_digest "$REPOSITORY:arm64-mac")"
+    current_fc="$(auth_digest_or_missing "$REPOSITORY:arm64-fc")"
     current_kvm="$(auth_digest "$REPOSITORY:arm64-kvm")"
     if [ "$current_dom0" = "$target_dom0" ] \
       && [ "$current_mac" = "$target_dom0" ] \
+      && [ "$current_fc" = "$target_fc" ] \
       && [ "$current_kvm" = "$target_kvm" ]; then
       echo "Interrupted promotion already reached the complete target tag set"
     elif [ "$current_dom0" = "$old_dom0" ] \
       && [ "$current_mac" = "$old_mac" ] \
+      && [ "$current_fc" = "$old_fc" ] \
       && [ "$current_kvm" = "$old_kvm" ]; then
       echo "Interrupted promotion left the complete previous tag set unchanged"
     else
-      current_digests=("$current_dom0" "$current_mac" "$current_kvm")
+      current_digests=("$current_dom0" "$current_mac" "$current_fc" "$current_kvm")
       for index in "${!rolling_tags[@]}"; do
         if [ "${current_digests[$index]}" != "${previous_digests[$index]}" ] \
           && [ "${current_digests[$index]}" != "${target_digests[$index]}" ]; then
@@ -634,7 +855,8 @@ PY
       done
       if [ "$unrelated_digest" -eq 1 ]; then
         if [ "$current_dom0" = "$current_mac" ] \
-          && verify_superseding_family "$current_dom0" "$current_mac" "$current_kvm"; then
+          && [ "$current_fc" != missing ] \
+          && verify_superseding_family "$current_dom0" "$current_mac" "$current_fc" "$current_kvm"; then
           promotion_superseded=1
           previous_digests=()
           echo "A coherent validated ARM64 family superseded the stale promotion journal"
@@ -655,14 +877,16 @@ PY
   write_journal() {
     journal_tmp="$(mktemp "${PROMOTION_STATE_DIR%/}/.arm64-promotion.journal.XXXXXX")"
     chmod 0600 "$journal_tmp"
-    printf 'v1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$REPOSITORY" \
       "$source_sha" \
       "$dom0_digest" \
+      "$fc_digest" \
       "$kvm_digest" \
       "${previous_digests[0]}" \
       "${previous_digests[1]}" \
       "${previous_digests[2]}" \
+      "${previous_digests[3]}" \
       "$GITHUB_RUN_ID" \
       "$GITHUB_RUN_ATTEMPT" > "$journal_tmp"
     fsync_path "$journal_tmp"
@@ -692,16 +916,30 @@ PY
     echo "ERROR: validated immutable Dom0 aliases do not match" >&2
     exit 1
   }
+  fc_digest="$(auth_digest "$REPOSITORY:arm64-fc-$source_sha")"
+  [ "$(registry_revision "$REPOSITORY:arm64-fc-$source_sha")" = "$source_sha" ] || {
+    echo "ERROR: ARM64 Firecracker immutable revision does not match promotion source" >&2
+    exit 1
+  }
   kvm_digest="$(auth_digest "$REPOSITORY:arm64-kvm-$source_sha")"
   [ "$(registry_revision "$REPOSITORY:arm64-kvm-$source_sha")" = "$source_sha" ] || {
     echo "ERROR: ARM64 KVM immutable revision does not match promotion source" >&2
+    exit 1
+  }
+  [ "$(registry_family_schema "$REPOSITORY:arm64-kvm-$source_sha")" = 2 ] || {
+    echo "ERROR: ARM64 KVM immutable does not require the complete Firecracker family" >&2
     exit 1
   }
 
   # Snapshot every previous rolling target before the first mutation. A normal
   # registry error or failed post-promotion verification restores this set.
   for tag in "${rolling_tags[@]}"; do
-    previous_digests+=("$(auth_digest "$REPOSITORY:$tag")")
+    actual="$(auth_digest_or_missing "$REPOSITORY:$tag")"
+    if [ "$actual" = missing ] && [ "$tag" != arm64-fc ]; then
+      echo "ERROR: required previous ARM64 rolling tag is missing: $tag" >&2
+      exit 1
+    fi
+    previous_digests+=("$actual")
   done
 
   handle_signal() {
@@ -726,6 +964,10 @@ PY
       "$REPOSITORY@$dom0_digest"; then
     promotion_failed=1
   elif ! auth_docker 600 buildx imagetools create --prefer-index=false \
+      --tag "$REPOSITORY:arm64-fc" \
+      "$REPOSITORY@$fc_digest"; then
+    promotion_failed=1
+  elif ! auth_docker 600 buildx imagetools create --prefer-index=false \
       --tag "$REPOSITORY:arm64-kvm" \
       "$REPOSITORY@$kvm_digest"; then
     promotion_failed=1
@@ -734,10 +976,12 @@ PY
   if [ "$promotion_failed" -eq 0 ]; then
     for tag in arm64 arm64-mac; do
       actual="$(auth_digest "$REPOSITORY:$tag" 2>/dev/null || true)"
-      [ "$actual" = "$dom0_digest" ] || promotion_failed=1
+      [ "$actual" = "$dom0_digest" ] || { echo "ERROR: promoted $tag digest did not verify" >&2; promotion_failed=1; }
     done
+    actual="$(auth_digest "$REPOSITORY:arm64-fc" 2>/dev/null || true)"
+    [ "$actual" = "$fc_digest" ] || { echo "ERROR: promoted ARM64 Firecracker digest did not verify: actual=${actual:-missing} expected=$fc_digest" >&2; promotion_failed=1; }
     actual="$(auth_digest "$REPOSITORY:arm64-kvm" 2>/dev/null || true)"
-    [ "$actual" = "$kvm_digest" ] || promotion_failed=1
+    [ "$actual" = "$kvm_digest" ] || { echo "ERROR: promoted ARM64 KVM commit marker did not verify" >&2; promotion_failed=1; }
   fi
 
   if [ "$promotion_failed" -ne 0 ]; then
@@ -764,10 +1008,10 @@ PY
   fi
   trap - EXIT INT TERM
 
-  echo "Promoted validated ARM64 family: dom0=$dom0_digest kvm=$kvm_digest"
+  echo "Promoted validated ARM64 family: dom0=$dom0_digest fc=$fc_digest kvm=$kvm_digest"
 }
 
-for command in docker install jq timeout; do
+for command in curl docker install jq timeout; do
   require_command "$command"
 done
 

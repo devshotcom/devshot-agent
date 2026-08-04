@@ -55,7 +55,7 @@ else
     elif [ -b /dev/vdb ]; then
         # Firecracker: config disk at /dev/vdb
         mkdir -p /mnt/devshot-config
-        mount -o ro /dev/vdb /mnt/devshot-config 2>/dev/null
+        mount -o rw /dev/vdb /mnt/devshot-config 2>/dev/null
         export XS_REAL=0
         export XS_ROOT=/mnt/devshot-config/xenstore
         export DOMID=1

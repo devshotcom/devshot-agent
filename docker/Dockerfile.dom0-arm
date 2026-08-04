@@ -159,6 +159,9 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src \
         --enable CONFIG_VIRTIO_NET \
         --enable CONFIG_VIRTIO_PCI \
         --enable CONFIG_VIRTIO_MMIO \
+        --enable CONFIG_EFI \
+        --enable CONFIG_SERIAL_AMBA_PL011 \
+        --enable CONFIG_SERIAL_AMBA_PL011_CONSOLE \
         --enable CONFIG_EXT4_FS \
         --enable CONFIG_TMPFS \
         --enable CONFIG_DEVTMPFS \
@@ -194,6 +197,7 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src \
     sed -i 's/CONFIG_BRIDGE=m/CONFIG_BRIDGE=y/; s/CONFIG_BRIDGE_NETFILTER=m/CONFIG_BRIDGE_NETFILTER=y/; s/CONFIG_VETH=m/CONFIG_VETH=y/; s/CONFIG_TUN=m/CONFIG_TUN=y/; s/CONFIG_BLK_DEV_NBD=m/CONFIG_BLK_DEV_NBD=y/; s/CONFIG_NETFILTER_XT_MATCH_STATE=m/CONFIG_NETFILTER_XT_MATCH_STATE=y/; s/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=m/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y/' .config && \
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image modules && \
     cp arch/arm64/boot/Image /tmp/Image-dom0 && \
+    cp arch/arm64/boot/Image /tmp/vmlinux-domu-fc && \
     mkdir -p /tmp/modules && \
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=/tmp/modules modules_install
 
@@ -569,6 +573,7 @@ RUN mkdir -p /xen/boot /xen/configs /xen/work /xen/guests /etc/xen/guests /var/l
 COPY --from=xen-builder      /tmp/xen-arm64                   /xen/xen
 COPY --from=kernel-builder   /tmp/Image-dom0                   /xen/Image
 COPY --from=kernel-builder   /tmp/Image-dom0                   /xen/boot/Image-domu
+COPY --from=kernel-builder   /tmp/vmlinux-domu-fc              /xen/boot/vmlinux-domu-fc
 COPY --from=rootfs-builder   /tmp/dom0-rootfs.qcow2            /xen/dom0-rootfs.qcow2
 COPY --from=domu-converter   /tmp/devshot-guest-base.qcow2     /xen/devshot-guest-base.qcow2
 # Pre-baked flavor templates — see Dockerfile.dom0-x86 for design notes.

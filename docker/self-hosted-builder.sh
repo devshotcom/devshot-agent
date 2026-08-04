@@ -528,7 +528,7 @@ except (TypeError, ValueError):
   fi
   while IFS= read -r image; do
     [ -n "$image" ] || continue
-    if [[ "$image" =~ ^devshot-(amd64|arm64)-candidate:([0-9]+)-([0-9]+)-(dom0|kvm)$ ]]; then
+    if [[ "$image" =~ ^devshot-(amd64|arm64)-candidate:([0-9]+)-([0-9]+)-(dom0|kvm|fc)$ ]]; then
       run_id="${BASH_REMATCH[2]}"
     elif [[ "$image" =~ ^devshot-studio-runtime-test:([0-9]+)-([0-9]+)$ ]]; then
       run_id="${BASH_REMATCH[1]}"
@@ -681,7 +681,7 @@ cleanup() {
     if ! [[ "$exact_image" =~ ^anticipatercom/devshot:(amd64|arm64)(-kvm)?-[0-9a-f]{40}$ ]] \
       && ! [[ "$exact_image" =~ ^anticipatercom/devshot:arm64-mac-[0-9a-f]{40}$ ]] \
       && ! [[ "$exact_image" =~ ^devshot-studio-runtime-test:[0-9]+-[0-9]+$ ]] \
-      && ! [[ "$exact_image" =~ ^devshot-(amd64|arm64)-candidate:[0-9]+-[0-9]+-(dom0|kvm)$ ]]; then
+      && ! [[ "$exact_image" =~ ^devshot-(amd64|arm64)-candidate:[0-9]+-[0-9]+-(dom0|kvm|fc)$ ]]; then
       echo "ERROR: refusing unsafe image cleanup target: $exact_image" >&2
       exit 64
     fi

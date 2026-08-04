@@ -27,6 +27,33 @@ export GUESTS_DIR="${GUESTS_DIR:-/xen/guests}"
 export CONFIGS_DIR="${CONFIGS_DIR:-/xen/configs}"
 export DEVSHOT_DATA_DIR="${DEVSHOT_DATA_DIR:-/var/lib/devshot}"
 
+# The QEMU sandbox uses systemd transient scopes for cgroup-v2 limits. This
+# image intentionally boots systemd as PID 1; a direct/tini launch would make
+# the Go-side health probe and every VM create fail closed.
+if [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d '[:space:]')" != "systemd" ]; then
+  echo "ERROR: QEMU image must run with its systemd ENTRYPOINT (PID 1)"
+  exit 1
+fi
+if [ ! -x /usr/local/bin/devshot-sandbox-init ]; then
+  echo "ERROR: required sandbox helper /usr/local/bin/devshot-sandbox-init is missing"
+  exit 1
+fi
+if [ ! -d /run/systemd/system ] || ! systemctl show --property=SystemState --value >/dev/null 2>&1; then
+  echo "ERROR: systemd system manager is not operational"
+  exit 1
+fi
+SYSTEMD_PROBE_UNIT="devshot-qemu-entrypoint-probe-${PPID}-$$.scope"
+if ! systemd-run --scope --quiet --collect \
+  --unit="$SYSTEMD_PROBE_UNIT" \
+  --property=CPUQuota=1% \
+  --property=MemoryMax=16M \
+  --property=MemorySwapMax=0 \
+  --property=TasksMax=8 \
+  -- /bin/true; then
+  echo "ERROR: systemd cannot create a limited transient scope; provide a writable delegated cgroup-v2 hierarchy"
+  exit 1
+fi
+
 # Runtime installs bind-mount GUESTS_DIR over /xen/guests, hiding templates
 # that were copied there during image build. Re-materialize them before the
 # agent validates pool-set-base-image requests.
@@ -157,7 +184,8 @@ if [ "$DNS_DISABLE" != "1" ]; then
     DNSMASQ_ARGS+=(--log-queries --log-facility=-)
   fi
 
-  # Run dnsmasq under tini supervision (PID 1 = tini, reaps zombies).
+  # dnsmasq remains in the orchestrator systemd service cgroup; systemd
+  # supervises and reaps the service process tree.
   # `sed -u` line-buffers so query logs flush in real time. Logs go to
   # stderr → docker logs → operator's collection pipeline.
   dnsmasq "${DNSMASQ_ARGS[@]}" 2>&1 | sed -u 's/^/[dnsmasq] /' &

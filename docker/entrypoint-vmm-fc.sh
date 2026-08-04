@@ -23,6 +23,10 @@ export LAMP_SYNC_DOWNLOAD_TIMEOUT="${LAMP_SYNC_DOWNLOAD_TIMEOUT:-30m}"
 export XS_REAL=0
 export XS_ROOT=/tmp/xenstore-dom0
 export GUESTS_DIR="${GUESTS_DIR:-/xen/guests}"
+export CONFIGS_DIR="${CONFIGS_DIR:-/xen/configs}"
+export DEVSHOT_FC_RUNTIME="${DEVSHOT_FC_RUNTIME:-/xen/fc}"
+export DEVSHOT_DATA_DIR="${DEVSHOT_DATA_DIR:-/var/lib/devshot}"
+export KERNEL="${KERNEL:-/xen/boot/vmlinux-domu-fc}"
 
 # Keep prebaked templates available even when /xen/guests is bind-mounted.
 /opt/devshot/sync-templates.sh
@@ -41,6 +45,36 @@ if ! command -v jailer >/dev/null 2>&1; then
   echo "ERROR: jailer binary not found in PATH (required for sandbox enforcement)"
   exit 1
 fi
+if [ ! -s "$KERNEL" ]; then
+  echo "ERROR: Firecracker guest kernel is missing or empty: $KERNEL"
+  exit 1
+fi
+KERNEL_FORMAT=$(file -b "$KERNEL" 2>/dev/null || true)
+case "$(uname -m)" in
+  x86_64)
+    if ! printf '%s\n' "$KERNEL_FORMAT" | grep -Eq 'ELF 64-bit.*x86-64'; then
+      echo "ERROR: Firecracker x86_64 requires an uncompressed ELF vmlinux: $KERNEL_FORMAT"
+      exit 1
+    fi
+    ;;
+  aarch64|arm64)
+    if ! printf '%s\n' "$KERNEL_FORMAT" | grep -Eq 'Linux kernel ARM64|ARM aarch64|PE32\+.*Aarch64'; then
+      echo "ERROR: Firecracker aarch64 requires a PE-formatted arm64 Image: $KERNEL_FORMAT"
+      exit 1
+    fi
+    ;;
+  *)
+    echo "ERROR: unsupported Firecracker host architecture: $(uname -m)"
+    exit 1
+    ;;
+esac
+
+for writable_dir in "$GUESTS_DIR" "$CONFIGS_DIR" "$DEVSHOT_FC_RUNTIME" "$DEVSHOT_DATA_DIR"; do
+  if [ ! -d "$writable_dir" ] || [ ! -w "$writable_dir" ]; then
+    echo "ERROR: required persistent Firecracker directory is not writable: $writable_dir"
+    exit 1
+  fi
+done
 
 # ── Load required kernel modules ────────────────────────────────────────────
 modprobe nbd max_part=8 nbds_max=1024 2>/dev/null || true

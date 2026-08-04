@@ -3,10 +3,11 @@
 # See Dockerfile.vmm-fc-arm for detailed comments; this is the x86 variant.
 # Spec 038 FR-004, FR-015, FR-020.
 
+ARG DEVSHOT_FC_PLATFORM=linux/amd64
 ARG BASE_IMAGE=anticipatercom/devshot:amd64
-FROM ${BASE_IMAGE} AS artifacts
+FROM --platform=${DEVSHOT_FC_PLATFORM} ${BASE_IMAGE} AS artifacts
 
-FROM debian:bookworm-slim AS fc-download
+FROM --platform=${DEVSHOT_FC_PLATFORM} debian:bookworm-slim AS fc-download
 ARG FC_VERSION=1.10.1
 ARG FC_ARCH=x86_64
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
@@ -18,7 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
   && chmod +x /usr/bin/firecracker /usr/bin/jailer \
   && rm -rf /tmp/*
 
-FROM debian:bookworm-slim
+FROM --platform=${DEVSHOT_FC_PLATFORM} debian:bookworm-slim
+
+ARG SOURCE_SHA
+RUN printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+LABEL org.opencontainers.image.revision="$SOURCE_SHA"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   qemu-utils \
@@ -29,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   e2fsprogs \
   util-linux \
   procps \
+  file \
   tini \
   socat \
   ca-certificates \
@@ -39,7 +45,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=fc-download /usr/bin/firecracker /usr/bin/firecracker
 COPY --from=fc-download /usr/bin/jailer /usr/bin/jailer
-COPY --from=artifacts /xen/boot/Image-domu /xen/boot/vmlinux-domu-fc
+# Firecracker x86_64 requires the uncompressed ELF vmlinux. The shared x86
+# kernel builder exports it separately from the Xen/QEMU bzImage.
+COPY --from=artifacts /xen/boot/vmlinux-domu-fc /xen/boot/vmlinux-domu-fc
+RUN test -s /xen/boot/vmlinux-domu-fc && \
+  file /xen/boot/vmlinux-domu-fc | grep -Eq 'ELF 64-bit.*x86-64'
 COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
 RUN mkdir -p /xen/guests/templates /opt/devshot/templates
 COPY --from=artifacts /xen/guests/templates/ /opt/devshot/templates/
@@ -55,7 +65,7 @@ COPY docker/sync-templates.sh /opt/devshot/sync-templates.sh
 COPY docker/entrypoint-vmm-fc.sh /opt/devshot/entrypoint.sh
 RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh /opt/devshot/sync-templates.sh
 
-RUN mkdir -p /xen/fc /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \
+RUN mkdir -p /xen/fc /xen/guests /xen/configs /tmp/xenstore-dom0 /var/run/netns /var/lib/devshot /var/lib/clamav && \
   freshclam --stdout || echo "freshclam failed during image build (non-fatal)"
 
 USER root

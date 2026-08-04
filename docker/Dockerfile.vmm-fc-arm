@@ -5,11 +5,12 @@
 # Smallest image (~150 MB): firecracker + jailer + Go agent + base guest.
 # No Xen, no QEMU.
 
+ARG DEVSHOT_FC_PLATFORM=linux/arm64
 ARG BASE_IMAGE=anticipatercom/devshot:arm64
-FROM ${BASE_IMAGE} AS artifacts
+FROM --platform=${DEVSHOT_FC_PLATFORM} ${BASE_IMAGE} AS artifacts
 
 # Firecracker release download (pinned version + hash).
-FROM debian:bookworm-slim AS fc-download
+FROM --platform=${DEVSHOT_FC_PLATFORM} debian:bookworm-slim AS fc-download
 ARG FC_VERSION=1.10.1
 ARG FC_ARCH=aarch64
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
@@ -21,7 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
   && chmod +x /usr/bin/firecracker /usr/bin/jailer \
   && rm -rf /tmp/*
 
-FROM debian:bookworm-slim
+FROM --platform=${DEVSHOT_FC_PLATFORM} debian:bookworm-slim
+
+ARG SOURCE_SHA
+RUN printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+LABEL org.opencontainers.image.revision="$SOURCE_SHA"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   qemu-utils \
@@ -32,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   e2fsprogs \
   util-linux \
   procps \
+  file \
   tini \
   socat \
   ca-certificates \
@@ -44,16 +50,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=fc-download /usr/bin/firecracker /usr/bin/firecracker
 COPY --from=fc-download /usr/bin/jailer /usr/bin/jailer
 
-# DomU kernel. Firecracker needs uncompressed vmlinux (ELF), not the
-# compressed Image. If the existing Image-domu is a compressed kernel,
-# the CI build step must produce a vmlinux-domu-fc variant via objcopy.
-# For now, copy the existing Image and note the spike requirement.
-COPY --from=artifacts /xen/boot/Image-domu /xen/boot/vmlinux-domu-fc
+# Firecracker aarch64 boots the PE-formatted Linux arm64 Image produced by
+# the shared kernel builder. It is published under a backend-specific name so
+# a compressed/renamed Xen artifact can never silently satisfy this COPY.
+COPY --from=artifacts /xen/boot/vmlinux-domu-fc /xen/boot/vmlinux-domu-fc
+RUN test -s /xen/boot/vmlinux-domu-fc && \
+  file /xen/boot/vmlinux-domu-fc | grep -Eq 'Linux kernel ARM64|ARM aarch64|PE32\+.*Aarch64'
 
-# Base guest root as raw ext4 (converted from qcow2 in CI or at runtime).
-# If the CI doesn't pre-build a .raw, the agent converts at pool-fill
-# time via `qemu-img convert -O raw`. This COPY is a placeholder; the
-# actual .raw will be built by a CI step.
+# The immutable qcow2 is the source artifact. VMManager converts the exact
+# selected image to a per-VM raw rootfs under its durable create intent before
+# Firecracker starts, then validates and cleans that raw lifecycle explicitly.
 COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
 RUN mkdir -p /xen/guests/templates /opt/devshot/templates
 COPY --from=artifacts /xen/guests/templates/ /opt/devshot/templates/
@@ -69,7 +75,7 @@ COPY docker/sync-templates.sh /opt/devshot/sync-templates.sh
 COPY docker/entrypoint-vmm-fc.sh /opt/devshot/entrypoint.sh
 RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh /opt/devshot/sync-templates.sh
 
-RUN mkdir -p /xen/fc /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \
+RUN mkdir -p /xen/fc /xen/guests /xen/configs /tmp/xenstore-dom0 /var/run/netns /var/lib/devshot /var/lib/clamav && \
   freshclam --stdout || echo "freshclam failed during image build (non-fatal)"
 
 USER root

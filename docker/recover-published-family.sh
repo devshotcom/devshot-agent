@@ -5,8 +5,10 @@
 # Dom0 aliases first and KVM last. This script never mutates the KVM marker. It
 # resolves source-bound KVM images from their OCI revision. During migration of
 # legacy unlabeled images, every digest collision is cross-checked against its
-# immutable Dom0 family before a source is selected. Only Dom0 rolling aliases
-# are repaired; the KVM marker is never mutated.
+# immutable Dom0 family before a source is selected. Legacy markers are allowed
+# to bootstrap from an absent Firecracker tag exactly until a schema-2 KVM
+# marker commits the complete family. Dom0 and Firecracker rolling aliases are
+# repaired; the KVM marker is never mutated.
 set -euo pipefail
 
 readonly REPOSITORY='anticipatercom/devshot'
@@ -35,12 +37,16 @@ case "$family" in
   amd64)
     readonly KVM_ROLLING_TAG='amd64-kvm'
     readonly KVM_IMMUTABLE_PREFIX='amd64-kvm-'
+    readonly FC_ROLLING_TAG='amd64-fc'
+    readonly FC_IMMUTABLE_PREFIX='amd64-fc-'
     readonly -a DOM0_IMMUTABLE_PREFIXES=('amd64-')
     readonly -a DOM0_ROLLING_TAGS=('amd64')
     ;;
   arm64)
     readonly KVM_ROLLING_TAG='arm64-kvm'
     readonly KVM_IMMUTABLE_PREFIX='arm64-kvm-'
+    readonly FC_ROLLING_TAG='arm64-fc'
+    readonly FC_IMMUTABLE_PREFIX='arm64-fc-'
     readonly -a DOM0_IMMUTABLE_PREFIXES=('arm64-' 'arm64-mac-')
     readonly -a DOM0_ROLLING_TAGS=('arm64' 'arm64-mac')
     ;;
@@ -85,10 +91,6 @@ case "$auth_dir" in
   *) echo "ERROR: unsafe family-recovery authentication directory" >&2; exit 64 ;;
 esac
 chmod 0700 "$auth_dir"
-matches_path="$auth_dir/kvm-tags.tsv"
-touch "$matches_path"
-chmod 0600 "$matches_path"
-
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
@@ -102,6 +104,24 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+curl_auth_config="$auth_dir/curl-auth.conf"
+[ -n "$DOCKERHUB_USERNAME" ] && [ "${#DOCKERHUB_USERNAME}" -le 128 ] \
+  && [[ "$DOCKERHUB_USERNAME" =~ ^[A-Za-z0-9] ]] \
+  && [[ ! "$DOCKERHUB_USERNAME" =~ [^A-Za-z0-9._-] ]] || {
+  echo "ERROR: Docker Hub username contains unsupported characters" >&2
+  exit 64
+}
+[ -n "$DOCKERHUB_TOKEN" ] && [ "${#DOCKERHUB_TOKEN}" -le 512 ] \
+  && [[ ! "$DOCKERHUB_TOKEN" =~ [^A-Za-z0-9._-] ]] || {
+  echo "ERROR: Docker Hub token contains unsupported characters" >&2
+  exit 64
+}
+printf 'user = "%s:%s"\n' "$DOCKERHUB_USERNAME" "$DOCKERHUB_TOKEN" > "$curl_auth_config"
+chmod 0600 "$curl_auth_config"
+matches_path="$auth_dir/kvm-tags.tsv"
+touch "$matches_path"
+chmod 0600 "$matches_path"
+
 auth_docker() {
   local seconds="$1"
   shift
@@ -112,21 +132,52 @@ auth_docker() {
 
 registry_digest() {
   local reference="$1" manifest digest
-  manifest="$(auth_docker 180 buildx imagetools inspect "$reference" --format '{{json .Manifest}}')"
-  digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")"
+  manifest="$(auth_docker 180 buildx imagetools inspect "$reference" --format '{{json .Manifest}}')" || return 1
+  digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")" || return 1
   printf '%s\n' "$digest"
+}
+
+registry_digest_or_missing() {
+  local reference="$1" output status=0 digest
+  output="$(auth_docker 180 buildx imagetools inspect "$reference" --format '{{json .Manifest}}' 2>&1)" || status=$?
+  if [ "$status" -eq 0 ]; then
+    digest="$(jq -er '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<< "$output")"
+    printf '%s\n' "$digest"
+    return 0
+  fi
+  if grep -Eqi 'not found|manifest unknown|no such manifest' <<< "$output"; then
+    printf '%s\n' missing
+    return 0
+  fi
+  [ -z "$output" ] || printf '%s\n' "$output" >&2
+  echo "ERROR: could not determine whether registry tag exists: $reference" >&2
+  return "$status"
 }
 
 registry_revision_or_legacy() {
   local reference="$1" image revision
-  image="$(auth_docker 180 buildx imagetools inspect "$reference" --format '{{json .Image}}')"
-  revision="$(jq -er '(.config.Labels // {})["org.opencontainers.image.revision"] // ""' <<< "$image")"
+  image="$(auth_docker 180 buildx imagetools inspect "$reference" --format '{{json .Image}}')" || return 1
+  revision="$(jq -er '(.config.Labels // {})["org.opencontainers.image.revision"] // ""' <<< "$image")" || return 1
   if [ -z "$revision" ]; then
     printf '%s\n' legacy
   elif [[ "$revision" =~ ^[0-9a-f]{40}$ ]]; then
     printf '%s\n' "$revision"
   else
-    echo "ERROR: KVM image has an invalid OCI source revision: $reference" >&2
+    echo "ERROR: image has an invalid OCI source revision: $reference" >&2
+    return 1
+  fi
+}
+
+registry_family_schema_or_legacy() {
+  local reference="$1" image schema
+  image="$(auth_docker 180 buildx imagetools inspect "$reference" --format '{{json .Image}}')" || return 1
+  schema="$(jq -er '(.config.Labels // {})["io.devshot.image-family.schema"] // ""' <<< "$image")" || return 1
+  if [ -z "$schema" ]; then
+    printf '%s\n' legacy
+  elif [ "$schema" = 2 ]; then
+    printf '%s\n' 2
+  else
+    echo "ERROR: KVM image has an unsupported image-family schema: $reference" >&2
     return 1
   fi
 }
@@ -149,6 +200,27 @@ bounded_curl() {
       --connect-timeout 15 --max-time 60 --max-filesize 5242880 \
       --retry 3 --retry-all-errors --retry-delay 2 \
       --header 'Accept: application/json' "$url"
+}
+
+delete_rolling_fc_tag() {
+  local attempt
+  [ "$verify_only" -eq 0 ] || {
+    echo "ERROR: legacy ${family} family exposes an uncommitted Firecracker rolling tag" >&2
+    return 1
+  }
+  for attempt in 1 2; do
+    if env -u DOCKERHUB_TOKEN timeout --foreground --signal=TERM --kill-after=15s 120s \
+      curl --config "$curl_auth_config" --fail --silent --show-error \
+        --proto '=https' --connect-timeout 15 --max-time 90 --request DELETE \
+        "https://hub.docker.com/v2/repositories/${REPOSITORY}/tags/${FC_ROLLING_TAG}/"; then
+      if [ "$(registry_digest_or_missing "$REPOSITORY:$FC_ROLLING_TAG")" = missing ]; then
+        return 0
+      fi
+    fi
+    [ "$attempt" -eq 2 ] || echo "Retrying bounded legacy Firecracker tag retirement: $FC_ROLLING_TAG" >&2
+  done
+  echo "ERROR: could not retire uncommitted legacy Firecracker tag: $FC_ROLLING_TAG" >&2
+  return 1
 }
 
 find_legacy_committed_source_sha() {
@@ -284,7 +356,7 @@ find_legacy_committed_source_sha() {
   printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
-create_dom0_tag() {
+create_family_tag() {
   local target="$1" digest="$2" attempt
   for attempt in 1 2; do
     if auth_docker 600 buildx imagetools create --prefer-index=false \
@@ -293,7 +365,7 @@ create_dom0_tag() {
     fi
     [ "$attempt" -eq 2 ] || echo "Retrying bounded rolling-tag repair: $target" >&2
   done
-  echo "ERROR: rolling-tag repair failed twice: $target" >&2
+  echo "ERROR: family rolling-tag repair failed twice: $target" >&2
   return 1
 }
 
@@ -308,18 +380,21 @@ repaired=0
 recovery_complete=0
 source_sha=''
 dom0_digest=''
+fc_digest='missing'
 kvm_commit_digest=''
+family_schema='legacy'
 
 # Registry tags do not offer an atomic multi-tag compare-and-swap. Treat a KVM
 # marker change as an optimistic-transaction conflict: stop using the stale
 # family immediately and resolve every alias again from the new marker. The
-# marker is checked before and after every mutable Dom0 operation, then brackets
+# marker is checked before and after every mutable family-member operation, then brackets
 # a final read of all aliases. This also repairs an ARM64 attempt that updated
 # only the first Dom0 alias before a concurrent publisher committed a new KVM.
 for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_attempt += 1)); do
   marker_changed=0
   kvm_commit_digest="$(registry_digest "$kvm_rolling_ref")"
   kvm_commit_revision="$(registry_revision_or_legacy "$kvm_rolling_ref")"
+  kvm_commit_schema="$(registry_family_schema_or_legacy "$kvm_rolling_ref")"
   if [ "$kvm_commit_revision" = legacy ]; then
     source_sha="$(find_legacy_committed_source_sha "$kvm_commit_digest")"
   else
@@ -332,6 +407,7 @@ for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_
     exit 1
   }
   kvm_immutable_revision="$(registry_revision_or_legacy "$kvm_immutable_ref")"
+  kvm_immutable_schema="$(registry_family_schema_or_legacy "$kvm_immutable_ref")"
   if [ "$kvm_commit_revision" = legacy ]; then
     [ "$kvm_immutable_revision" = legacy ] || {
       echo "ERROR: legacy rolling KVM marker selected a labeled immutable source" >&2
@@ -341,6 +417,11 @@ for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_
     echo "ERROR: immutable KVM revision does not match its source tag suffix" >&2
     exit 1
   fi
+  [ "$kvm_immutable_schema" = "$kvm_commit_schema" ] || {
+    echo "ERROR: immutable KVM image-family schema does not match the rolling commit marker" >&2
+    exit 1
+  }
+  family_schema="$kvm_commit_schema"
 
   dom0_digest=''
   for prefix in "${DOM0_IMMUTABLE_PREFIXES[@]}"; do
@@ -353,6 +434,23 @@ for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_
       exit 1
     fi
   done
+
+  fc_digest='missing'
+  if [ "$family_schema" = 2 ]; then
+    fc_immutable_ref="$REPOSITORY:${FC_IMMUTABLE_PREFIX}${source_sha}"
+    if ! fc_digest="$(registry_digest "$fc_immutable_ref")"; then
+      echo "ERROR: schema-2 ${family} family is missing its exact Firecracker immutable: $fc_immutable_ref" >&2
+      exit 1
+    fi
+    if ! fc_revision="$(registry_revision_or_legacy "$fc_immutable_ref")"; then
+      echo "ERROR: could not verify immutable ${family} Firecracker source revision" >&2
+      exit 1
+    fi
+    [ "$fc_revision" = "$source_sha" ] || {
+      echo "ERROR: immutable ${family} Firecracker revision does not match committed SHA $source_sha" >&2
+      exit 1
+    }
+  fi
 
   if [ "$(registry_digest "$kvm_rolling_ref")" != "$kvm_commit_digest" ]; then
     marker_changed=1
@@ -378,7 +476,7 @@ for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_
           echo "ERROR: ${family} rolling family is not coherent at committed SHA $source_sha" >&2
           exit 1
         else
-          create_dom0_tag "$rolling_ref" "$dom0_digest"
+          create_family_tag "$rolling_ref" "$dom0_digest"
           repaired=1
         fi
       fi
@@ -387,6 +485,31 @@ for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_
         break
       fi
     done
+  fi
+
+  if [ "$marker_changed" -eq 0 ]; then
+    if [ "$(registry_digest "$kvm_rolling_ref")" != "$kvm_commit_digest" ]; then
+      marker_changed=1
+    else
+      rolling_fc_ref="$REPOSITORY:$FC_ROLLING_TAG"
+      rolling_fc_digest="$(registry_digest_or_missing "$rolling_fc_ref")"
+      if [ "$family_schema" = 2 ]; then
+        if [ "$rolling_fc_digest" != "$fc_digest" ]; then
+          if [ "$verify_only" -eq 1 ]; then
+            echo "ERROR: ${family} Firecracker rolling tag is not coherent at committed SHA $source_sha" >&2
+            exit 1
+          fi
+          create_family_tag "$rolling_fc_ref" "$fc_digest"
+          repaired=1
+        fi
+      elif [ "$rolling_fc_digest" != missing ]; then
+        delete_rolling_fc_tag
+        repaired=1
+      fi
+      if [ "$(registry_digest "$kvm_rolling_ref")" != "$kvm_commit_digest" ]; then
+        marker_changed=1
+      fi
+    fi
   fi
 
   if [ "$marker_changed" -eq 0 ]; then
@@ -410,6 +533,20 @@ for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_
     done
   fi
 
+  if [ "$marker_changed" -eq 0 ]; then
+    if [ "$(registry_digest "$kvm_rolling_ref")" != "$kvm_commit_digest" ]; then
+      marker_changed=1
+    else
+      actual_fc="$(registry_digest_or_missing "$REPOSITORY:$FC_ROLLING_TAG")"
+      if [ "$actual_fc" != "$fc_digest" ]; then
+        marker_changed=1
+      fi
+      if [ "$(registry_digest "$kvm_rolling_ref")" != "$kvm_commit_digest" ]; then
+        marker_changed=1
+      fi
+    fi
+  fi
+
   if [ "$marker_changed" -eq 0 ] \
       && [ "$(registry_digest "$kvm_rolling_ref")" = "$kvm_commit_digest" ]; then
     recovery_complete=1
@@ -425,7 +562,7 @@ done
 }
 
 if [ "$repaired" -eq 1 ]; then
-  echo "Recovered ${family} rolling Dom0 aliases to committed SHA $source_sha (dom0=$dom0_digest kvm=$kvm_commit_digest)"
+  echo "Recovered ${family} rolling family to committed SHA $source_sha (schema=$family_schema dom0=$dom0_digest fc=$fc_digest kvm=$kvm_commit_digest)"
 else
-  echo "Verified consistent ${family} rolling family at committed SHA $source_sha (dom0=$dom0_digest kvm=$kvm_commit_digest)"
+  echo "Verified consistent ${family} rolling family at committed SHA $source_sha (schema=$family_schema dom0=$dom0_digest fc=$fc_digest kvm=$kvm_commit_digest)"
 fi
