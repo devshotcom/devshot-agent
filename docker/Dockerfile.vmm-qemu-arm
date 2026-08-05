@@ -66,6 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   apparmor-utils \
   libseccomp2 \
   util-linux \
+  tini \
   procps \
   socat \
   ca-certificates \
