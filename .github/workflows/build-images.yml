@@ -769,8 +769,20 @@ jobs:
             anticipatercom/devshot:arm64-mac-${{ github.sha }}
 
   # ── Direct QEMU backend: Linux ARM64 ──────────────────────────────────
+  # Spec 207 — OUT OF SCOPE until a real ARM64 KVM builder exists.
+  # This job's preflight rightly refuses to validate an ARM64 VMM image under
+  # TCG, but the only `devshot-arm64` runner is an aarch64 guest emulated on an
+  # x86_64 host: no EL2, so `/dev/kvm` can never appear and every agent release
+  # failed here from 2026-08-04 on. The job is gated, NOT deleted — its body and
+  # tests stay reviewed so re-enabling is one variable, not code archaeology.
+  # Re-enable: provide a Linux ARM64 runner with real /dev/kvm (8 GB RAM, 40 GB
+  # disk) labelled `devshot-arm64`, then set DEVSHOT_ARM64_VMM_RELEASE=1 on BOTH
+  # devshotcom/devshot and devshotcom/devshot-agent. Consequence while off:
+  # `arm64-kvm` and `arm64-fc` receive no new builds and go stale, so set the
+  # variable BEFORE provisioning any Linux ARM64 pool host.
   build-vmm-qemu-arm64:
     needs: build-dom0-arm64
+    if: ${{ vars.DEVSHOT_ARM64_VMM_RELEASE == '1' }}
     runs-on:
       group: devshot-agent-builders
       labels: [self-hosted, Linux, ARM64, devshot-arm64]
