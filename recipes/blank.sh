@@ -166,6 +166,24 @@ tar -xzf /tmp/openvscode.tar.gz -C /opt/openvscode-server --strip-components=1
 rm /tmp/openvscode.tar.gz
 node /opt/openvscode-server/out/server-main.js --version | head -1
 
+# --- grok-build agent (spec 212) ------------------------------------------
+# The static-pie official grok binary runs on Alpine x86_64 as-is (no
+# cross-build, no gcompat — verified 2026-08-08). Baked here so a blank VM boots
+# WITH grok present; the console bridge (STUDIO_GROK_BRIDGE) launches
+# `grok agent serve` and drives it over ACP. Pinned by version + sha256; never
+# "latest" — a silent grok update must not change agent behaviour unreviewed.
+GROK_VERSION=1.0.0
+GROK_SHA256=28dbc967a5843dae2374b6834dadbab95354e685c7e5c8dc750b92a4e5fc7c3e
+if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+  mkdir -p /opt/grok
+  wget -q -O /tmp/grok "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-${GROK_VERSION}-linux-x86_64"
+  echo "${GROK_SHA256}  /tmp/grok" | sha256sum -c -
+  install -m 0755 /tmp/grok /opt/grok/grok && rm -f /tmp/grok
+  /opt/grok/grok --version | head -1
+else
+  echo "grok bake skipped: no published linux binary for arch $ARCH"
+fi
+
 # Editor profile: Dark Modern, no welcome, trust off (throwaway VM). Written
 # AS devshot (it's devshot's home) so the user-data dir is devshot-owned and
 # the editor (which runs as devshot) can write runtime state into it.
