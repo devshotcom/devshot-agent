@@ -53,7 +53,9 @@ profile devshot-vmm-qemu-@{VM_NAME} {
 
   # Block everything outside the VM's namespace.
   deny /xen/agent.env r,
-  deny /opt/devshot/agent rix,
+  # Deny rules use bare `x`; AppArmor rejects inherited-exec qualifiers such
+  # as `ix` after `deny` before the VM can boot.
+  deny /opt/devshot/agent rx,
 
   # No capabilities inside the VM.
   deny capability,
