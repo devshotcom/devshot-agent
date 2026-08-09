@@ -678,7 +678,7 @@ cleanup() {
   while [ "$#" -gt 0 ]; do
     exact_image="$1"
     shift
-    if ! [[ "$exact_image" =~ ^anticipatercom/devshot:(amd64|arm64)(-kvm)?-[0-9a-f]{40}$ ]] \
+    if ! [[ "$exact_image" =~ ^anticipatercom/devshot:(amd64|arm64)(-(kvm|fc))?-[0-9a-f]{40}$ ]] \
       && ! [[ "$exact_image" =~ ^anticipatercom/devshot:arm64-mac-[0-9a-f]{40}$ ]] \
       && ! [[ "$exact_image" =~ ^devshot-studio-runtime-test:[0-9]+-[0-9]+$ ]] \
       && ! [[ "$exact_image" =~ ^devshot-(amd64|arm64)-candidate:[0-9]+-[0-9]+-(dom0|kvm|fc)$ ]]; then

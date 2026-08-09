@@ -29,13 +29,12 @@
 # devshot:exposed_ports=[{"port":5900,"name":"vnc","proto":"tcp"}]
 #
 # Memory floor: Xvnc + openbox + tint2 + picom + the agent (~104MB RSS)
-# does not fit in the default 256MB pool VM — we hit the kernel OOM
-# killer in production and lost the agent within seconds of boot. 512MB
-# leaves comfortable headroom for the operator to run a browser or
-# editor on top without the agent getting evicted. createVM honours
+# does not fit in the default 256MB pool VM. Desktop Studio now also bakes
+# Chromium for browser and research workflows; 1GB leaves room for a normal
+# page without evicting the desktop or agent. createVM honours
 # this and overrides the per-pool default when spawning from a template
 # that declares it.
-# devshot:memory_mb=512
+# devshot:memory_mb=1024
 set -eux
 
 # ── 1. Packages ─────────────────────────────────────────────────────────
@@ -60,24 +59,56 @@ echo 'options single-request-reopen' >> /etc/resolv.conf 2>/dev/null || true
 echo 'nameserver 1.1.1.1'              >> /etc/resolv.conf 2>/dev/null || true
 apk update || (sleep 5 && apk update)
 apk add --no-cache \
+    ca-certificates wget git \
     tigervnc \
     openbox tint2 picom \
     pcmanfm xterm \
     dbus dbus-x11 \
-    xdotool scrot \
+    xdotool scrot xclip \
+    chromium chromium-swiftshader \
     greybird-themes-gtk2 greybird-themes-gtk3 numix-themes-openbox \
     adwaita-icon-theme papirus-icon-theme \
     font-noto font-noto-emoji \
     feh
 
-# xdotool + scrot back the spec 055 AI-desktop-control surface:
+# xdotool + scrot + xclip back the typed AI-desktop-control surface.
+# Chromium is part of the desktop image (like git and Grok), so browser and
+# research scenarios never depend on an interactive runtime install:
 #   /api/vms/:vm/desktop/screenshot (scrot via vm-exec)
 #   /api/vms/:vm/desktop/action     (xdotool key/type/click via vm-exec)
 #   /api/vms/:vm/browser/action     (chromium URL bar via xdotool + scrot)
 # Without these baked in, screenshot endpoints return 503 and browser
 # actions error out with "sh: xdotool: not found".
 
-# ── 2. Per-user desktop config ─────────────────────────────────────────
+# ── 2. Grok Build ACP agent ─────────────────────────────────────────────
+# Desktop Studio uses the same in-VM ACP agent as the coding Studio image.
+# Bake the reviewed native artifact into the template so a fresh VM never
+# depends on a runtime download and /opt/grok/grok is available from boot.
+GROK_VERSION=1.0.0
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64|amd64)
+    GROK_ARCH=x86_64
+    GROK_SHA256=28dbc967a5843dae2374b6834dadbab95354e685c7e5c8dc750b92a4e5fc7c3e
+    ;;
+  aarch64|arm64)
+    GROK_ARCH=aarch64
+    GROK_SHA256=bb7c51116564a2219f6a49850815060f416918ac407f1f2ba82c53c0b0d4383f
+    ;;
+  *)
+    echo "ERROR: unsupported architecture $ARCH for Grok Build" >&2
+    exit 1
+    ;;
+esac
+mkdir -p /opt/grok
+wget -q -O /tmp/grok "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-${GROK_VERSION}-linux-${GROK_ARCH}"
+echo "${GROK_SHA256}  /tmp/grok" | sha256sum -c -
+install -m 0755 /tmp/grok /opt/grok/grok
+ln -sfn /opt/grok/grok /usr/local/bin/grok
+rm -f /tmp/grok
+grok --version | head -1
+
+# ── 3. Per-user desktop config ─────────────────────────────────────────
 # The universal base already created the `devshot` user with a hidden
 # random password (project_vm_user_auth memory). We just need to drop
 # config + wallpaper into its $HOME. mkdir -p is idempotent, so this
@@ -152,6 +183,7 @@ cat > "$DEVSHOT_HOME/.config/openbox/menu.xml" <<'OBMENU'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_menu xmlns="http://openbox.org/3.5/menu">
   <menu id="root-menu" label="DevShot">
+    <item label="Browser"><action name="Execute"><execute>/usr/local/bin/devshot-browser</execute></action></item>
     <item label="Terminal"><action name="Execute"><execute>xterm -fa "Noto Sans Mono" -fs 11 -bg "#1c1c1e" -fg "#e5e5e7"</execute></action></item>
     <item label="File Manager"><action name="Execute"><execute>pcmanfm</execute></action></item>
     <separator />
@@ -195,6 +227,7 @@ panel_monitor = all
 launcher_padding = 4 2 4
 launcher_background_id = 0
 launcher_icon_size = 24
+launcher_item_app = /usr/share/applications/chromium.desktop
 launcher_item_app = /usr/share/applications/xterm.desktop
 launcher_item_app = /usr/share/applications/pcmanfm.desktop
 
@@ -280,7 +313,7 @@ chmod +x "$DEVSHOT_HOME/.config/openbox/autostart"
 
 chown -R devshot:devshot "$DEVSHOT_HOME"
 
-# ── 3. /usr/local/bin launchers ────────────────────────────────────────
+# ── 4. /usr/local/bin launchers ────────────────────────────────────────
 # start-desktop  → bring up Xvnc :0 + openbox (foreground or -d).
 # stop-desktop   → kill the lot.
 # Same UX shape as start-n8n / start-flowise so muscle memory carries.
@@ -356,7 +389,28 @@ echo "Desktop stopped."
 STOP
 chmod 0755 /usr/local/bin/stop-desktop
 
-# ── 4. OpenRC service: auto-start on boot ──────────────────────────────
+# Raise a running browser or start the baked Chromium on the shared X display.
+# This mirrors docker/devshot-browser.sh for qcow2 recipe images.
+cat > /usr/local/bin/devshot-browser <<'BROWSER'
+#!/bin/sh
+set -eu
+export DISPLAY=:0
+
+if pgrep chromium >/dev/null 2>&1; then
+  xdotool search --onlyvisible --class chromium windowactivate --sync >/dev/null 2>&1 || true
+  exit 0
+fi
+
+nohup chromium \
+  --no-sandbox \
+  --disable-features=Translate \
+  --disable-dev-shm-usage \
+  --start-maximized \
+  >/tmp/chromium.log 2>&1 &
+BROWSER
+chmod 0755 /usr/local/bin/devshot-browser
+
+# ── 5. OpenRC service: auto-start on boot ──────────────────────────────
 # Operators who want a "claim a desktop, point browser at it" flow get
 # this for free — the desktop is up by the time the spec-050 forward
 # channel can reach :5900/:6080. To opt out post-claim:
@@ -396,6 +450,13 @@ chmod +x /etc/init.d/devshot-desktop
 rc-update add devshot-desktop default
 
 echo "=== desktop recipe complete ==="
-ls /usr/local/bin/start-desktop /usr/local/bin/stop-desktop
+ls /usr/local/bin/start-desktop /usr/local/bin/stop-desktop /usr/local/bin/devshot-browser
 ls /etc/init.d/devshot-desktop
-which Xvnc openbox tint2 picom
+for binary in Xvnc openbox tint2 picom pcmanfm xterm xdotool scrot xclip chromium git grok; do
+  command -v "$binary" >/dev/null 2>&1 || {
+    echo "ERROR: Desktop runtime is missing $binary" >&2
+    exit 1
+  }
+done
+test -x /usr/local/bin/devshot-browser
+echo "Desktop runtime prerequisites verified"

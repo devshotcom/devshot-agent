@@ -70,6 +70,28 @@ cleanup() {
   status=$?
   trap - EXIT INT TERM
   cleanup_failed=0
+  local -a cleanup_command
+  cleanup_command=(
+    "$docker_bin" run --rm --name "${container_name}-cleanup"
+    --privileged --network=none
+  )
+  if [ "$backend" = qemu ]; then
+    cleanup_command+=(
+      --security-opt apparmor=unconfined
+      --mount type=bind,src=/sys/kernel/security,dst=/sys/kernel/security
+    )
+  fi
+  cleanup_command+=(
+    --mount "type=bind,src=$workspace,dst=/workspace"
+    --entrypoint /bin/sh "$candidate_image" -eu -c '
+      for profile in /workspace/.apparmor-cleanup/*; do
+        [ -f "$profile" ] || continue
+        command -v apparmor_parser >/dev/null
+        apparmor_parser --remove "$profile"
+      done
+      find /workspace -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    '
+  )
   if [ "$container_started" -eq 1 ]; then
     if [ "$backend" = qemu ]; then
       "$timeout_bin" --foreground --signal=TERM --kill-after=5s 20s \
@@ -85,17 +107,7 @@ cleanup() {
       "$docker_bin" rm -f "$container_name" >/dev/null 2>&1 || true
   fi
   if ! "$timeout_bin" --foreground --signal=TERM --kill-after=5s 30s \
-    "$docker_bin" run --rm --name "${container_name}-cleanup" \
-      --privileged --network=none \
-      --mount "type=bind,src=$workspace,dst=/workspace" \
-      --entrypoint /bin/sh "$candidate_image" -eu -c '
-        for profile in /workspace/.apparmor-cleanup/*; do
-          [ -f "$profile" ] || continue
-          command -v apparmor_parser >/dev/null
-          apparmor_parser --remove "$profile"
-        done
-        find /workspace -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-      ' >/dev/null 2>&1; then
+    "${cleanup_command[@]}" >/dev/null 2>&1; then
     cleanup_failed=1
     "$timeout_bin" --foreground --signal=TERM --kill-after=5s 20s \
       "$docker_bin" rm -f "${container_name}-cleanup" >/dev/null 2>&1 || true
@@ -155,6 +167,7 @@ if [ "$backend" = qemu ]; then
       --cgroupns=host --network=none \
       --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
       --mount type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup \
+      --mount type=bind,src=/sys/kernel/security,dst=/sys/kernel/security \
       --mount type=bind,src=/dev/null,dst=/etc/systemd/system/devshot-vmm-qemu.service,readonly \
       --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
       "${common_env[@]}" "${common_mounts[@]}" \
