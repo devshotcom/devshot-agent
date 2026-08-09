@@ -30,6 +30,12 @@ profile devshot-vmm-qemu-@{VM_NAME} {
   # QEMU binary + kernel + base image (read-only).
   /usr/bin/qemu-system-aarch64 rix,
   /usr/bin/qemu-system-x86_64 rix,
+  # QEMU resolves its read-only firmware and option ROMs at runtime. Debian
+  # keeps x86 firmware below qemu/seabios and AArch64 firmware below AAVMF.
+  /usr/share/qemu/** r,
+  /usr/share/seabios/** r,
+  /usr/share/AAVMF/** r,
+  /usr/share/qemu-efi-aarch64/** r,
   /xen/boot/Image-domu r,
   /xen/devshot-guest-base.qcow2 r,
   @{VM_BACKING} r,

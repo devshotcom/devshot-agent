@@ -17,6 +17,7 @@
       "comment": "Core process lifecycle",
       "names": [
         "exit", "exit_group", "clone", "clone3", "fork", "vfork",
+        "execve", "setsid",
         "wait4", "waitid", "getpid", "getppid", "gettid",
         "set_tid_address", "sched_yield", "nanosleep",
         "clock_nanosleep", "clock_gettime", "clock_getres",
