@@ -38,6 +38,10 @@ if [ ! -x /usr/local/bin/devshot-sandbox-init ]; then
   echo "ERROR: required sandbox helper /usr/local/bin/devshot-sandbox-init is missing"
   exit 1
 fi
+if [ ! -x /usr/local/bin/devshot-userns-run ]; then
+  echo "ERROR: required namespace helper /usr/local/bin/devshot-userns-run is missing"
+  exit 1
+fi
 if [ ! -d /run/systemd/system ] || ! systemctl show --property=SystemState --value >/dev/null 2>&1; then
   echo "ERROR: systemd system manager is not operational"
   exit 1

@@ -95,7 +95,8 @@ COPY --from=artifacts /xen/configs/ /xen/configs/
 # Copy the Go agent binary (built by CI in the agent-build job).
 COPY bin/devshot-agent-linux-arm64 /opt/devshot/agent
 COPY bin/devshot-sandbox-init-linux-arm64 /usr/local/bin/devshot-sandbox-init
-RUN chmod 0755 /opt/devshot/agent /usr/local/bin/devshot-sandbox-init
+COPY bin/devshot-userns-run-linux-arm64 /usr/local/bin/devshot-userns-run
+RUN chmod 0755 /opt/devshot/agent /usr/local/bin/devshot-sandbox-init /usr/local/bin/devshot-userns-run
 
 COPY yara_rules /opt/devshot/yara_rules
 
