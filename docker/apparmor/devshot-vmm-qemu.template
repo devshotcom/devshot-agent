@@ -42,9 +42,13 @@ profile devshot-vmm-qemu-@{VM_NAME} {
   @{VM_BACKING}/ r,
   @{VM_BACKING}/** r,
 
-  # The host control directory is bind-mounted at this stable path after
-  # pivot_root. Only this VM sees its own mount instance there. QEMU takes an
-  # advisory lock on its PID file; AppArmor models that separately as `k`.
+  # AppArmor can mediate a bind-mounted file through either its host source
+  # alias or the post-pivot path used by QEMU. Permit only this VM's exact
+  # control directory through both aliases. QEMU takes an advisory lock on its
+  # PID file; AppArmor models that separately as `k`.
+  @{VM_ROOT}/control/ rw,
+  @{VM_ROOT}/control/pid rwk,
+  @{VM_ROOT}/control/** rw,
   /run/devshot/ rw,
   /run/devshot/pid rwk,
   /run/devshot/** rw,
