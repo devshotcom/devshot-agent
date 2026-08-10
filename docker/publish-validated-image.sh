@@ -6,6 +6,8 @@
 set -euo pipefail
 
 readonly REPOSITORY='anticipatercom/devshot'
+readonly REGISTRY_PUSH_MAX_ATTEMPTS=5
+readonly -a REGISTRY_PUSH_RETRY_DELAYS=(15 30 60 120)
 PROMOTION_AUTH_DIR=''
 
 usage() {
@@ -143,16 +145,17 @@ ensure_immutable_tag() {
 }
 
 push_with_retry() {
-  local reference="$1" attempt
-  for attempt in 1 2; do
+  local reference="$1" attempt delay
+  for ((attempt = 1; attempt <= REGISTRY_PUSH_MAX_ATTEMPTS; attempt++)); do
     if bounded_docker 1800 push "$reference"; then
       return 0
     fi
-    if [ "$attempt" -eq 1 ]; then
-      echo "Retrying immutable image push after a bounded failure: $reference" >&2
-    fi
+    [ "$attempt" -lt "$REGISTRY_PUSH_MAX_ATTEMPTS" ] || break
+    delay="${REGISTRY_PUSH_RETRY_DELAYS[$((attempt - 1))]}"
+    echo "Retrying immutable image push in ${delay}s after a bounded failure (attempt $((attempt + 1))/$REGISTRY_PUSH_MAX_ATTEMPTS): $reference" >&2
+    sleep "$delay"
   done
-  echo "ERROR: immutable image push failed twice: $reference" >&2
+  echo "ERROR: immutable image push failed after $REGISTRY_PUSH_MAX_ATTEMPTS attempts: $reference" >&2
   return 1
 }
 

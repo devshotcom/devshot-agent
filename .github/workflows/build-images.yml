@@ -288,6 +288,10 @@ jobs:
           }
           bash docker/self-hosted-builder.sh prepare 40
 
+      - name: Prove QEMU sandbox bootstrap before expensive image work
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/verify-qemu-sandbox-host.sh
+
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -852,6 +856,10 @@ jobs:
           }
           install -d -m 0700 "$promotion_state_dir"
           printf 'PROMOTION_STATE_DIR=%s\n' "$promotion_state_dir" >> "$GITHUB_ENV"
+
+      - name: Prove QEMU sandbox bootstrap before expensive image work
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        run: bash docker/verify-qemu-sandbox-host.sh
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:

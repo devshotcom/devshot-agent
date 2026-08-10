@@ -42,12 +42,10 @@ profile devshot-vmm-qemu-@{VM_NAME} {
   @{VM_BACKING}/ r,
   @{VM_BACKING}/** r,
 
-  # Per-VM runtime dir (full read/write — that's the VM's own scratch).
-  @{VM_ROOT}/** rw,
-  @{VM_ROOT}/console.sock rw,
-  @{VM_ROOT}/monitor.sock rw,
-  @{VM_ROOT}/pid w,
-  @{VM_ROOT}/xenstore/** rw,
+  # The host control directory is bind-mounted at this stable path after
+  # pivot_root. Only this VM sees its own mount instance there.
+  /run/devshot/ rw,
+  /run/devshot/** rw,
 
   # Per-VM disk overlay (read-write — QEMU opens it directly).
   @{VM_DISK} rw,
