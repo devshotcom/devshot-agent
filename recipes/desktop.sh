@@ -59,7 +59,7 @@ echo 'options single-request-reopen' >> /etc/resolv.conf 2>/dev/null || true
 echo 'nameserver 1.1.1.1'              >> /etc/resolv.conf 2>/dev/null || true
 apk update || (sleep 5 && apk update)
 apk add --no-cache \
-    ca-certificates wget git \
+    ca-certificates wget git sudo \
     tigervnc \
     openbox tint2 picom \
     pcmanfm xterm \
@@ -70,6 +70,15 @@ apk add --no-cache \
     adwaita-icon-theme papirus-icon-theme \
     font-noto font-noto-emoji \
     feh
+
+# Desktop tools and Studio onboarding run as the unprivileged devshot user.
+# Keep the qcow2 recipe's privilege contract identical to the standalone
+# desktop container: maintenance commands must never block on an interactive
+# password prompt inside an ephemeral VM.
+install -d -m 0750 /etc/sudoers.d
+printf 'devshot ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/devshot
+chmod 0440 /etc/sudoers.d/devshot
+visudo -cf /etc/sudoers
 
 # xdotool + scrot + xclip back the typed AI-desktop-control surface.
 # Chromium is part of the desktop image (like git and Grok), so browser and
@@ -458,5 +467,6 @@ for binary in Xvnc openbox tint2 picom pcmanfm xterm xdotool scrot xclip chromiu
     exit 1
   }
 done
+su -s /bin/sh devshot -c 'sudo -n true'
 test -x /usr/local/bin/devshot-browser
 echo "Desktop runtime prerequisites verified"

@@ -106,8 +106,10 @@ COPY bin/devshot-agent-linux-${TARGETARCH} ./agent
 # Random, unknown password — unlocks the account (sudo NOPASSWD works) without
 # leaving it `!`-locked or empty-passworded.
 RUN adduser -D -s /bin/bash -h /home/devshot devshot \
- && echo "devshot ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/devshot \
- && chmod 440 /etc/sudoers.d/devshot \
+ && install -d -m 0750 /etc/sudoers.d \
+ && printf 'devshot ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/devshot \
+ && chmod 0440 /etc/sudoers.d/devshot \
+ && visudo -cf /etc/sudoers \
  && mkdir -p /home/devshot/workspace /home/devshot/.vnc /home/devshot/.config/openbox \
  && chown -R devshot:devshot /home/devshot /opt/pw \
  && mkdir -p /tmp/xenstore /tmp/.X11-unix \
