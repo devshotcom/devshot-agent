@@ -52,6 +52,13 @@ profile devshot-vmm-qemu-@{VM_NAME} flags=(chroot_relative) {
   /run/devshot/pid rwk,
   /run/devshot/** rw,
 
+  # AppArmor mediates filesystem-backed Unix sockets twice: the socket
+  # operation here and the pathname through the file rules above. Spell out
+  # the stream operations instead of relying on the coarse network-to-unix
+  # compatibility mapping; the pathname grant remains confined to this VM's
+  # private control directory.
+  unix (create, bind, listen, accept, connect, send, receive, getattr, setattr, getopt, setopt, shutdown) type=stream,
+
   # Per-VM disk overlay (read-write — QEMU opens it directly).
   @{VM_DISK} rw,
 
@@ -89,7 +96,6 @@ profile devshot-vmm-qemu-@{VM_NAME} flags=(chroot_relative) {
   deny /dev/xvd* rwklmx,
 
   # Networking: virtio over the tap only.
-  network unix stream,
   network inet stream,
   network inet dgram,
   network inet6 stream,

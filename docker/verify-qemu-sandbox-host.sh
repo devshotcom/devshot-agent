@@ -6,8 +6,8 @@ agent_root="$(cd "$script_dir/.." && pwd)"
 bin_dir="${DEVSHOT_SANDBOX_BIN_DIR:-$agent_root/bin}"
 docker_bin="${DOCKER_BIN:-docker}"
 timeout_bin="${TIMEOUT_BIN:-timeout}"
-probe_image="${DEVSHOT_SANDBOX_PROBE_IMAGE:-debian:bookworm-slim}"
 profile_loader_image="${DEVSHOT_SANDBOX_PROFILE_LOADER_IMAGE:-}"
+probe_image="${DEVSHOT_SANDBOX_PROBE_IMAGE:-$profile_loader_image}"
 
 case "$(uname -m)" in
   x86_64|amd64) arch=amd64 ;;
@@ -95,7 +95,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 pull_dependency_image "$profile_loader_image" "AppArmor profile loader"
-pull_dependency_image "$probe_image" "sandbox probe"
+if [ "$probe_image" != "$profile_loader_image" ]; then
+  pull_dependency_image "$probe_image" "sandbox probe"
+fi
 
 cat > "$profile_path" <<EOF
 #include <tunables/global>
@@ -107,6 +109,7 @@ profile $profile_name flags=(chroot_relative) {
   /usr/sbin/** rix,
   /run/devshot/ rw,
   /run/devshot/** rw,
+  unix (create, bind, listen, accept, connect, send, receive, getattr, setattr, getopt, setopt, shutdown) type=stream,
   /tmp/ rw,
   /tmp/** rw,
   /dev/null rw,
@@ -138,6 +141,21 @@ test "$no_new_privs" = 1
 test "$namespace_pid" = 1
 test "$(cat /run/devshot/host-marker)" = host-visible
 printf guest-visible > /run/devshot/guest-marker
+socat -T 5 UNIX-LISTEN:/run/devshot/probe.sock EXEC:/bin/cat &
+socket_server_pid=$!
+socket_ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if test -S /run/devshot/probe.sock; then
+    socket_ready=1
+    break
+  fi
+  kill -0 "$socket_server_pid"
+  sleep 0.1
+done
+test "$socket_ready" = 1
+test "$(printf unix-socket-ok | socat -T 5 - UNIX-CONNECT:/run/devshot/probe.sock)" = unix-socket-ok
+wait "$socket_server_pid"
+rm -f /run/devshot/probe.sock
 mkdir -p /tmp/devshot-mount-probe
 if mount -t tmpfs none /tmp/devshot-mount-probe 2>/dev/null; then
   echo "ERROR: sandboxed process retained mount capability" >&2
