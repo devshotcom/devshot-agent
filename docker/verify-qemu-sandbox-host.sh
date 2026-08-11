@@ -30,6 +30,10 @@ if [[ ! "$profile_loader_image" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$ ]]; then
   echo "ERROR: invalid AppArmor profile loader image reference: $profile_loader_image" >&2
   exit 2
 fi
+if [[ ! "$probe_image" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$ ]]; then
+  echo "ERROR: invalid sandbox probe image reference: $probe_image" >&2
+  exit 2
+fi
 case "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" in
   Y|y) ;;
   *) echo "ERROR: AppArmor is not enabled on the QEMU build host" >&2; exit 2 ;;
@@ -40,10 +44,26 @@ probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/devshot-qemu-sandbox-probe.XXXXXXXX")"
 profile_name="devshot-qemu-sandbox-probe-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-$$"
 profile_path="$probe_dir/$profile_name"
 profile_loaded=0
+pull_dependency_image() {
+  local image_ref="$1"
+  local description="$2"
+  local attempt
+  for attempt in 1 2 3 4; do
+    if "$timeout_bin" --foreground --signal=TERM --kill-after=5s 300s \
+      "$docker_bin" pull "$image_ref"; then
+      return 0
+    fi
+    if [ "$attempt" -lt 4 ]; then
+      echo "$description pull attempt $attempt failed; resuming on the next attempt" >&2
+    fi
+  done
+  echo "ERROR: failed to pull $description image after four bounded attempts: $image_ref" >&2
+  return 1
+}
 run_profile_parser() {
   local operation="$1"
   "$timeout_bin" --foreground --signal=TERM --kill-after=5s 60s \
-    "$docker_bin" run --rm --privileged --network=none \
+    "$docker_bin" run --rm --pull=never --privileged --network=none \
       --security-opt apparmor=unconfined \
       --mount type=bind,src=/sys/kernel/security,dst=/sys/kernel/security \
       --mount "type=bind,src=$profile_path,dst=/tmp/$profile_name,readonly" \
@@ -73,6 +93,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+pull_dependency_image "$profile_loader_image" "AppArmor profile loader"
+pull_dependency_image "$probe_image" "sandbox probe"
 
 cat > "$profile_path" <<EOF
 #include <tunables/global>
@@ -125,7 +148,7 @@ printf "DEVSHOT_QEMU_SANDBOX_HOST_OK uid=%s gid=%s pid=%s\n" "$(id -u)" "$(id -g
 '
 
 "$timeout_bin" --foreground --signal=TERM --kill-after=5s 45s \
-  "$docker_bin" run --rm --privileged --network=none \
+  "$docker_bin" run --rm --pull=never --privileged --network=none \
     --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
     --tmpfs /workspace:exec,mode=0755 \
     --mount "type=bind,src=$namespace_helper,dst=/usr/local/bin/devshot-userns-run,readonly" \
