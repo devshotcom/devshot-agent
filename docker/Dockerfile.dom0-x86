@@ -572,10 +572,12 @@ RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
 # ─── Stage 5: Final image ──────────────────────────────────────────────────
 FROM --platform=linux/amd64 debian:bookworm-slim
 
+# The exact immutable Dom0 image loads the pre-build AppArmor probe from a
+# privileged container, so the CI runner never needs passwordless sudo.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     qemu-system-x86 qemu-utils \
     socat netcat-openbsd tmux \
-    curl ca-certificates bash tini openssl \
+    curl ca-certificates bash tini openssl apparmor-utils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Xen hypervisor + kernel + rootfs (from build stages)

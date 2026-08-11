@@ -7,6 +7,7 @@ bin_dir="${DEVSHOT_SANDBOX_BIN_DIR:-$agent_root/bin}"
 docker_bin="${DOCKER_BIN:-docker}"
 timeout_bin="${TIMEOUT_BIN:-timeout}"
 probe_image="${DEVSHOT_SANDBOX_PROBE_IMAGE:-debian:bookworm-slim}"
+profile_loader_image="${DEVSHOT_SANDBOX_PROFILE_LOADER_IMAGE:-}"
 
 case "$(uname -m)" in
   x86_64|amd64) arch=amd64 ;;
@@ -24,29 +25,37 @@ for binary in "$namespace_helper" "$sandbox_init"; do
 done
 command -v "$docker_bin" >/dev/null 2>&1 || { echo "ERROR: docker is unavailable" >&2; exit 2; }
 command -v "$timeout_bin" >/dev/null 2>&1 || { echo "ERROR: GNU timeout is unavailable" >&2; exit 2; }
-command -v apparmor_parser >/dev/null 2>&1 || { echo "ERROR: apparmor_parser is unavailable" >&2; exit 2; }
+[ -n "$profile_loader_image" ] || { echo "ERROR: DEVSHOT_SANDBOX_PROFILE_LOADER_IMAGE is required" >&2; exit 2; }
+if [[ ! "$profile_loader_image" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$ ]]; then
+  echo "ERROR: invalid AppArmor profile loader image reference: $profile_loader_image" >&2
+  exit 2
+fi
 case "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" in
   Y|y) ;;
   *) echo "ERROR: AppArmor is not enabled on the QEMU build host" >&2; exit 2 ;;
 esac
-
-if [ "$(id -u)" -eq 0 ]; then
-  apparmor_parser=(apparmor_parser)
-else
-  command -v sudo >/dev/null 2>&1 || { echo "ERROR: passwordless sudo is required to load the sandbox probe profile" >&2; exit 2; }
-  apparmor_parser=(sudo -n apparmor_parser)
-fi
+[ -d /sys/kernel/security ] || { echo "ERROR: AppArmor securityfs is unavailable" >&2; exit 2; }
 
 probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/devshot-qemu-sandbox-probe.XXXXXXXX")"
 profile_name="devshot-qemu-sandbox-probe-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-$$"
 profile_path="$probe_dir/$profile_name"
 profile_loaded=0
+run_profile_parser() {
+  local operation="$1"
+  "$timeout_bin" --foreground --signal=TERM --kill-after=5s 60s \
+    "$docker_bin" run --rm --privileged --network=none \
+      --security-opt apparmor=unconfined \
+      --mount type=bind,src=/sys/kernel/security,dst=/sys/kernel/security \
+      --mount "type=bind,src=$profile_path,dst=/tmp/$profile_name,readonly" \
+      --entrypoint /usr/sbin/apparmor_parser \
+      "$profile_loader_image" "$operation" "/tmp/$profile_name"
+}
 cleanup() {
   status=$?
   trap - EXIT INT TERM
   cleanup_failed=0
   if [ "$profile_loaded" -eq 1 ]; then
-    if ! "${apparmor_parser[@]}" --remove "$profile_path" >/dev/null 2>&1; then
+    if ! run_profile_parser --remove >/dev/null 2>&1; then
       echo "ERROR: failed to unload AppArmor sandbox probe profile $profile_name" >&2
       cleanup_failed=1
     fi
@@ -85,7 +94,7 @@ profile $profile_name flags=(chroot_relative) {
   deny pivot_root,
 }
 EOF
-"${apparmor_parser[@]}" -r "$profile_path"
+run_profile_parser -r
 profile_loaded=1
 
 probe='\
