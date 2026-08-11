@@ -148,7 +148,7 @@ printf guest-visible > /run/devshot/guest-marker
 # file locking separately from read/write, so exercise a real non-blocking
 # fcntl lock before any expensive image work.
 printf qcow2 > /run/devshot/disk.qcow2
-python3 -c "import fcntl; f=open(\"/run/devshot/disk.qcow2\", \"r+b\"); fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB); f.write(b\"-lock-ok\"); f.flush(); fcntl.lockf(f, fcntl.LOCK_UN); f.close()"
+python3 -c "import fcntl, os; f=open(\"/run/devshot/disk.qcow2\", \"r+b\"); fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB); f.seek(0, os.SEEK_END); f.write(b\"-lock-ok\"); f.flush(); fcntl.lockf(f, fcntl.LOCK_UN); f.close()"
 test "$(cat /run/devshot/disk.qcow2)" = qcow2-lock-ok
 python3 -c "import fcntl; f=open(\"/run/devshot/backing.qcow2\", \"rb\"); fcntl.lockf(f, fcntl.LOCK_SH | fcntl.LOCK_NB); fcntl.lockf(f, fcntl.LOCK_UN); f.close()"
 test "$(cat /run/devshot/backing.qcow2)" = backing
