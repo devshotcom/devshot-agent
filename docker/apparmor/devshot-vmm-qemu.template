@@ -16,7 +16,7 @@
 
 #include <tunables/global>
 
-profile devshot-vmm-qemu-@{VM_NAME} {
+profile devshot-vmm-qemu-@{VM_NAME} flags=(chroot_relative) {
   #include <abstractions/base>
 
   # Deny default — only explicit permissions work.
@@ -42,13 +42,10 @@ profile devshot-vmm-qemu-@{VM_NAME} {
   @{VM_BACKING}/ r,
   @{VM_BACKING}/** r,
 
-  # AppArmor can mediate a bind-mounted file through either its host source
-  # alias or the post-pivot path used by QEMU. Permit only this VM's exact
-  # control directory through both aliases. QEMU takes an advisory lock on its
-  # PID file; AppArmor models that separately as `k`.
-  @{VM_ROOT}/control/ rw,
-  @{VM_ROOT}/control/pid rwk,
-  @{VM_ROOT}/control/** rw,
+  # QEMU enters this profile only after pivot_root. chroot_relative makes
+  # AppArmor mediate the private root exactly as QEMU sees it, including the
+  # bind-mounted control directory. QEMU takes an advisory lock on its PID
+  # file; AppArmor models that separately as `k`.
   /run/devshot/ rw,
   /run/devshot/pid rwk,
   /run/devshot/** rw,
