@@ -142,7 +142,11 @@ test "$no_new_privs" = 1
 test "$namespace_pid" = 1
 test "$(cat /run/devshot/host-marker)" = host-visible
 printf guest-visible > /run/devshot/guest-marker
-socat -T 5 UNIX-LISTEN:/run/devshot/probe.sock EXEC:/bin/cat &
+# socat implements its relay with select(2) and aborts when the hardened
+# namespace bootstrap inherits a descriptor outside FD_SETSIZE. Exercise the
+# production socket operations directly so the gate tests AppArmor rather than
+# the test helper descriptor ceiling.
+python3 -c "import socket; p=\"/run/devshot/probe.sock\"; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind(p); s.listen(1); c,_=s.accept(); data=c.recv(64); c.sendall(data); c.close(); s.close()" &
 socket_server_pid=$!
 socket_ready=0
 # The production profile intentionally grants no signal mediation, so readiness
@@ -155,7 +159,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.1
 done
 test "$socket_ready" = 1
-test "$(printf unix-socket-ok | socat -T 5 - UNIX-CONNECT:/run/devshot/probe.sock)" = unix-socket-ok
+socket_response="$(python3 -c "import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(\"/run/devshot/probe.sock\"); s.sendall(b\"unix-socket-ok\"); data=s.recv(64); s.close(); print(data.decode(), end=\"\")")"
+test "$socket_response" = unix-socket-ok
 wait "$socket_server_pid"
 rm -f /run/devshot/probe.sock
 mkdir -p /tmp/devshot-mount-probe
