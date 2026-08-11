@@ -24,6 +24,69 @@ for binary in "$namespace_helper" "$sandbox_init"; do
 done
 command -v "$docker_bin" >/dev/null 2>&1 || { echo "ERROR: docker is unavailable" >&2; exit 2; }
 command -v "$timeout_bin" >/dev/null 2>&1 || { echo "ERROR: GNU timeout is unavailable" >&2; exit 2; }
+command -v apparmor_parser >/dev/null 2>&1 || { echo "ERROR: apparmor_parser is unavailable" >&2; exit 2; }
+case "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" in
+  Y|y) ;;
+  *) echo "ERROR: AppArmor is not enabled on the QEMU build host" >&2; exit 2 ;;
+esac
+
+if [ "$(id -u)" -eq 0 ]; then
+  apparmor_parser=(apparmor_parser)
+else
+  command -v sudo >/dev/null 2>&1 || { echo "ERROR: passwordless sudo is required to load the sandbox probe profile" >&2; exit 2; }
+  apparmor_parser=(sudo -n apparmor_parser)
+fi
+
+probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/devshot-qemu-sandbox-probe.XXXXXXXX")"
+profile_name="devshot-qemu-sandbox-probe-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-$$"
+profile_path="$probe_dir/$profile_name"
+profile_loaded=0
+cleanup() {
+  status=$?
+  trap - EXIT INT TERM
+  cleanup_failed=0
+  if [ "$profile_loaded" -eq 1 ]; then
+    if ! "${apparmor_parser[@]}" --remove "$profile_path" >/dev/null 2>&1; then
+      echo "ERROR: failed to unload AppArmor sandbox probe profile $profile_name" >&2
+      cleanup_failed=1
+    fi
+  fi
+  case "$probe_dir" in
+    "${TMPDIR:-/tmp}"/devshot-qemu-sandbox-probe.*)
+      rm -f -- "$profile_path"
+      rmdir "$probe_dir" 2>/dev/null || cleanup_failed=1
+      ;;
+    *) echo "ERROR: refusing unsafe sandbox probe cleanup: $probe_dir" >&2; cleanup_failed=1 ;;
+  esac
+  if [ "$cleanup_failed" -ne 0 ]; then status=1; fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+cat > "$profile_path" <<EOF
+#include <tunables/global>
+profile $profile_name flags=(chroot_relative) {
+  /** mr,
+  /bin/** rix,
+  /sbin/** rix,
+  /usr/bin/** rix,
+  /usr/sbin/** rix,
+  /run/devshot/ rw,
+  /run/devshot/** rw,
+  /tmp/ rw,
+  /tmp/** rw,
+  /dev/null rw,
+  deny capability,
+  deny mount,
+  deny umount,
+  deny remount,
+  deny pivot_root,
+}
+EOF
+"${apparmor_parser[@]}" -r "$profile_path"
+profile_loaded=1
 
 probe='\
 test "$(id -u)" = 20001
@@ -58,15 +121,16 @@ printf "DEVSHOT_QEMU_SANDBOX_HOST_OK uid=%s gid=%s pid=%s\n" "$(id -u)" "$(id -g
     --tmpfs /workspace:exec,mode=0755 \
     --mount "type=bind,src=$namespace_helper,dst=/usr/local/bin/devshot-userns-run,readonly" \
     --mount "type=bind,src=$sandbox_init,dst=/usr/local/bin/devshot-sandbox-init,readonly" \
+    -e "DEVSHOT_APPARMOR_PROFILE=$profile_name" \
     -e "DEVSHOT_SANDBOX_PROBE=$probe" \
     --entrypoint /bin/sh "$probe_image" -eu -c '
-      mkdir -p /workspace/root /workspace/control/tmp
-      printf host-visible > /workspace/control/host-marker
-      chown -R 20001:108 /workspace /workspace/root /workspace/control
+      mkdir -p /workspace/root/run/devshot/tmp
+      printf host-visible > /workspace/root/run/devshot/host-marker
+      chown -R 20001:108 /workspace/root
       /usr/local/bin/devshot-userns-run --uid=20001 --gid=108 --net -- \
         /usr/local/bin/devshot-sandbox-init \
-          --chroot=/workspace/root --control-dir=/workspace/control \
-          --uid=20001 --gid=108 -- \
+          --chroot=/workspace/root --uid=20001 --gid=108 \
+          --apparmor="$DEVSHOT_APPARMOR_PROFILE" -- \
           /bin/sh -eu -c "$DEVSHOT_SANDBOX_PROBE"
-      test "$(cat /workspace/control/guest-marker)" = guest-visible
+      test "$(cat /workspace/root/run/devshot/guest-marker)" = guest-visible
     '

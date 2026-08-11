@@ -44,8 +44,10 @@ profile devshot-vmm-qemu-@{VM_NAME} flags=(chroot_relative) {
 
   # QEMU enters this profile only after pivot_root. chroot_relative makes
   # AppArmor mediate the private root exactly as QEMU sees it, including the
-  # bind-mounted control directory. QEMU takes an advisory lock on its PID
-  # file; AppArmor models that separately as `k`.
+  # native control directory. Keeping it native avoids AppArmor's disconnected
+  # path mediation for a directory bind-mounted from outside the private root.
+  # QEMU takes an advisory lock on its PID file; AppArmor models that
+  # separately as `k`.
   /run/devshot/ rw,
   /run/devshot/pid rwk,
   /run/devshot/** rw,
