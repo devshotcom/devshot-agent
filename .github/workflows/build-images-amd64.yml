@@ -1,0 +1,16 @@
+name: Build & Push AMD64 Orchestrator Images
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  build-amd64:
+    uses: ./.github/workflows/build-images.yml
+    with:
+      image_family: amd64
+    secrets: inherit

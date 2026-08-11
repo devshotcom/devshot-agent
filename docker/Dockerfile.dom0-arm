@@ -24,6 +24,8 @@
 #     anticipatercom/devshot:arm64
 # =============================================================================
 
+ARG DEVSHOT_DOM0_PLATFORM=linux/arm64
+
 # ─── Stage 1: Build Xen hypervisor + tools/libs ────────────────────────────
 FROM debian:bookworm AS xen-builder
 
@@ -286,7 +288,7 @@ RUN cd /rootfs && tar czf /build/dom0-rootfs.tar.gz . && \
 # Uses native arm64 Alpine to install packages (QEMU user-mode handles cross-arch),
 # then exports rootfs as tarball. Config files that Docker bind-mounts read-only
 # (/etc/hosts, /etc/hostname, /etc/resolv.conf) are patched in the converter stage.
-FROM --platform=linux/arm64 alpine:3.23 AS domu-rootfs
+FROM --platform=${DEVSHOT_DOM0_PLATFORM} alpine:3.23 AS domu-rootfs
 
 RUN apk add --no-cache \
     alpine-base openssh openrc e2fsprogs xe-guest-utilities \

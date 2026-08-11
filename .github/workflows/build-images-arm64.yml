@@ -1,0 +1,16 @@
+name: Build & Push ARM64 Orchestrator Images
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  build-arm64:
+    uses: ./.github/workflows/build-images.yml
+    with:
+      image_family: arm64
+    secrets: inherit

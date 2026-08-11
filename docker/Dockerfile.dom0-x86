@@ -15,8 +15,10 @@
 #     -e DEVSHOT_TUNNEL_URL=wss://console.devshot.com \
 #     anticipatercom/devshot:amd64
 
+ARG DEVSHOT_DOM0_PLATFORM=linux/amd64
+
 # ─── Stage 1: Build Xen hypervisor + tools/libs ────────────────────────────
-FROM --platform=linux/amd64 debian:bookworm AS xen-builder
+FROM --platform=${DEVSHOT_DOM0_PLATFORM} debian:bookworm AS xen-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -52,7 +54,7 @@ RUN --mount=type=cache,target=/build/xen,id=xen-src-x86 \
         tar czf /tmp/xen-dev.tar.gz -T -
 
 # ─── Stage 2: Build QEMU with Xen device model ─────────────────────────────
-FROM --platform=linux/amd64 debian:bookworm AS qemu-xen-builder
+FROM --platform=${DEVSHOT_DOM0_PLATFORM} debian:bookworm AS qemu-xen-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -113,7 +115,7 @@ RUN --mount=type=cache,target=/build/qemu-xen,id=qemu-xen-src-x86 \
     cp build/qemu-system-x86_64 /tmp/qemu-system-x86_64-xen
 
 # ─── Stage 3: Build Linux kernel (Dom0) ────────────────────────────────────
-FROM --platform=linux/amd64 debian:bookworm AS kernel-builder
+FROM --platform=${DEVSHOT_DOM0_PLATFORM} debian:bookworm AS kernel-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -201,7 +203,7 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
     make ARCH=x86_64 INSTALL_MOD_PATH=/tmp/modules modules_install
 
 # ─── Stage 4: Build Dom0 rootfs (Debian Bookworm) ──────────────────────────
-FROM --platform=linux/amd64 debian:bookworm AS rootfs-builder
+FROM --platform=${DEVSHOT_DOM0_PLATFORM} debian:bookworm AS rootfs-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -294,7 +296,7 @@ RUN cd /rootfs && tar czf /build/dom0-rootfs-x86.tar.gz . && \
     rm /tmp/disk.raw
 
 # ─── Stage 4: Build DomU guest base image (Alpine rootfs for pool VMs) ────
-FROM --platform=linux/amd64 alpine:3.23 AS domu-rootfs
+FROM --platform=${DEVSHOT_DOM0_PLATFORM} alpine:3.23 AS domu-rootfs
 
 RUN apk add --no-cache \
     alpine-base openssh openrc e2fsprogs xe-guest-utilities \
@@ -570,7 +572,7 @@ RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
     rm /tmp/devshot-guest-base.qcow2
 
 # ─── Stage 5: Final image ──────────────────────────────────────────────────
-FROM --platform=linux/amd64 debian:bookworm-slim
+FROM --platform=${DEVSHOT_DOM0_PLATFORM} debian:bookworm-slim
 
 # The exact immutable Dom0 image loads the pre-build AppArmor probe from a
 # privileged container, so the CI runner never needs passwordless sudo.

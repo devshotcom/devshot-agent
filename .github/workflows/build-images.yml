@@ -1,12 +1,11 @@
-name: Build & Push Orchestrator Images
+name: Build & Push Architecture Image Family
 
 # Source of truth: apps/agent/docker/build-images.yml in the devshotcom/devshot
 # monorepo. The monorepo's build-agent.yml workflow copies this file to
 # .github/workflows/build-images.yml in the devshot-agent repo each time it
 # pushes a new deploy artifact — so this workflow actually runs there.
 #
-# Triggered every time CI in the monorepo pushes new binaries + Dockerfiles
-# to the devshot-agent repo.
+# Called independently by the AMD64 and ARM64 push workflows copied beside it.
 #
 # Active groups:
 #   Group 1 (x86)            — dom0-amd64 followed by vmm-qemu-amd64 on
@@ -41,16 +40,17 @@ name: Build & Push Orchestrator Images
 # Docker Hub will race this workflow and clobber the manifests.
 
 on:
-  push:
-    branches: [main]
+  workflow_call:
+    inputs:
+      image_family:
+        description: Exact architecture family to build
+        required: true
+        type: string
 
 concurrency:
-  group: build-images-${{ github.ref }}
-  # Do NOT cancel an in-flight image build when a newer push lands. Every
-  # monorepo release tag pushes to this repo's `main`, so they all share one
-  # concurrency group — cancel-in-progress let a rapid run of release tags
-  # abort each other's image builds, leaving the registry stuck on a stale
-  # image (the "agent/orchestrator never updates" bug). Queue instead.
+  group: build-images-${{ inputs.image_family }}-${{ github.ref }}
+  # Queue releases only within the same architecture. AMD64 and ARM64 have
+  # separate caller workflows and never wait on each other's workflow run.
   cancel-in-progress: false
 
 permissions:
@@ -63,7 +63,7 @@ env:
 jobs:
   # An interrupted promotion can leave Dom0 on a newer digest while KVM still
   # names the previously committed family. Repair that registry state before
-  # either architecture starts another build. The helper never moves KVM.
+  # this architecture starts another build. The helper never moves KVM.
   recover-published-families:
     runs-on:
       group: devshot-agent-builders
@@ -95,8 +95,10 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          bash docker/recover-published-family.sh amd64
-          bash docker/recover-published-family.sh arm64
+          case "${{ inputs.image_family }}" in
+            amd64|arm64) bash docker/recover-published-family.sh "${{ inputs.image_family }}" ;;
+            *) echo "ERROR: unsupported image family: ${{ inputs.image_family }}" >&2; exit 64 ;;
+          esac
 
   # ═══════════════════════════════════════════════════════════════════════
   # Group 1 — x86 (active)
@@ -108,6 +110,7 @@ jobs:
   # ── Dom0 orchestrator: Linux x86_64 ────────────────────────────────────
   build-dom0-amd64:
     needs: recover-published-families
+    if: ${{ inputs.image_family == 'amd64' }}
     runs-on:
       group: devshot-agent-builders
       labels: [self-hosted, Linux, X64, devshot-runner]
@@ -258,6 +261,7 @@ jobs:
   # ── Direct QEMU backend: Linux x86_64 ──────────────────────────────────
   build-vmm-qemu-amd64:
     needs: build-dom0-amd64
+    if: ${{ inputs.image_family == 'amd64' }}
     runs-on:
       group: devshot-agent-builders
       labels: [self-hosted, Linux, X64, devshot-runner]
@@ -411,7 +415,6 @@ jobs:
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
           tags: ${{ env.CANDIDATE_IMAGE }}
       # Retry once on a transient BuildKit / Docker Hub flake. The bake step
       # above already produced its artifacts, so only the push is re-attempted.
@@ -429,10 +432,9 @@ jobs:
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
           tags: ${{ env.CANDIDATE_IMAGE }}
 
-      - name: Materialize local AMD64 KVM Studio runtime candidate after registry cache export
+      - name: Materialize local AMD64 KVM Studio runtime candidate after build
         if: steps.reuse_kvm_amd64.outputs.reused != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -525,6 +527,7 @@ jobs:
   # ── Dom0 orchestrator: Linux ARM64 (+ arm64-mac alias) ────────────────
   build-dom0-arm64:
     needs: recover-published-families
+    if: ${{ inputs.image_family == 'arm64' }}
     runs-on:
       group: devshot-agent-builders
       labels: [self-hosted, Linux, ARM64, devshot-arm64]
@@ -837,7 +840,7 @@ jobs:
   # variable BEFORE provisioning any Linux ARM64 pool host.
   build-vmm-qemu-arm64:
     needs: build-dom0-arm64
-    if: ${{ vars.DEVSHOT_ARM64_VMM_RELEASE == '1' }}
+    if: ${{ inputs.image_family == 'arm64' && vars.DEVSHOT_ARM64_VMM_RELEASE == '1' }}
     runs-on:
       group: devshot-agent-builders
       labels: [self-hosted, Linux, ARM64, devshot-arm64]
@@ -981,7 +984,6 @@ jobs:
             BASE_IMAGE=anticipatercom/devshot:arm64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64,mode=min,ignore-error=true
           tags: ${{ env.CANDIDATE_IMAGE }}
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -998,10 +1000,9 @@ jobs:
             BASE_IMAGE=anticipatercom/devshot:arm64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64,mode=min,ignore-error=true
           tags: ${{ env.CANDIDATE_IMAGE }}
 
-      - name: Materialize local ARM64 KVM Studio runtime candidate after registry cache export
+      - name: Materialize local ARM64 KVM Studio runtime candidate after build
         if: steps.reuse_kvm_arm64.outputs.reused != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -1121,8 +1122,10 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          bash docker/recover-published-family.sh amd64
-          bash docker/recover-published-family.sh arm64
+          case "${{ inputs.image_family }}" in
+            amd64|arm64) bash docker/recover-published-family.sh "${{ inputs.image_family }}" ;;
+            *) echo "ERROR: unsupported image family: ${{ inputs.image_family }}" >&2; exit 64 ;;
+          esac
 
   # ═══════════════════════════════════════════════════════════════════════
   # Group 3 — multi-arch domu (disabled)

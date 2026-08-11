@@ -213,7 +213,11 @@ remove_buildx_builder() {
 
   for attempt in 1 2; do
     operation_failed=0
-    if ! bounded_docker 120 buildx rm --force "$builder" >/dev/null; then
+    if ! builders="$(bounded_docker 60 buildx ls --format '{{.Name}}')"; then
+      operation_failed=1
+      builders=""
+    elif grep -Fxq -- "$builder" <<< "$builders" \
+      && ! bounded_docker 120 buildx rm --force "$builder" >/dev/null; then
       operation_failed=1
     fi
 

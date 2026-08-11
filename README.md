@@ -6,8 +6,10 @@ This repo is **auto-generated** on every push to
 [devshotcom/devshot](https://github.com/devshotcom/devshot)'s `main`
 branch. Do not edit files here directly — they will be overwritten.
 The Docker images published to Docker Hub (`anticipatercom/devshot:*`)
-are built from this repo by `.github/workflows/build-images.yml`
-on the isolated `devshot-agent-builders` self-hosted runner group.
+are built from this repo by the independent
+`.github/workflows/build-images-amd64.yml` and
+`.github/workflows/build-images-arm64.yml` workflows on the isolated
+`devshot-agent-builders` self-hosted runner group.
 
 Release policy: create semantic `vX.Y.Z` and `backend-vX.Y.Z` tags on the
 current `main` commit only. The patch counter is shared across every full and scoped release.
@@ -31,7 +33,7 @@ Or grab a copy-paste install command from
 
 ## Docker Images
 
-Published to Docker Hub by `.github/workflows/build-images.yml` on every push.
+Published to Docker Hub by separate AMD64 and ARM64 workflows on every push.
 
 ### Dom0 orchestrator (multi-VM, full Xen hypervisor)
 
@@ -227,6 +229,6 @@ Stripped (`-ldflags="-s -w"`), statically linked (`CGO_ENABLED=0`).
 
 ## Build Info
 
-Auto-deployed by CI from [devshotcom/devshot@c2fe4a342378fd5fd2f19cabca803c20b0e81bee](https://github.com/devshotcom/devshot/commit/c2fe4a342378fd5fd2f19cabca803c20b0e81bee).
+Auto-deployed by CI from [devshotcom/devshot@501c65ba7f3ec914008b176349bc162963724990](https://github.com/devshotcom/devshot/commit/501c65ba7f3ec914008b176349bc162963724990).
 
-Last built: 2026-08-11T17:15:52Z
+Last built: 2026-08-11T20:09:29Z
