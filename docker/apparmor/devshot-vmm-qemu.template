@@ -14,6 +14,7 @@
 #
 # Spec 038 FR-015 — per-VM enforcement, strictest possible scope.
 
+abi <abi/3.0>,
 #include <tunables/global>
 
 profile devshot-vmm-qemu-@{VM_NAME} flags=(chroot_relative) {

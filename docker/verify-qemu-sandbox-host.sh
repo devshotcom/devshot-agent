@@ -100,6 +100,7 @@ if [ "$probe_image" != "$profile_loader_image" ]; then
 fi
 
 cat > "$profile_path" <<EOF
+abi <abi/3.0>,
 #include <tunables/global>
 profile $profile_name flags=(chroot_relative) {
   /** mr,
