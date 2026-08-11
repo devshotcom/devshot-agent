@@ -190,7 +190,7 @@ jobs:
           platforms: linux/amd64
           provenance: false
           push: false
-          load: true
+          load: false
           # mode=min (was mode=max): only push the final image's layers
           # to the registry cache, not every intermediate stage. Saves
           # ~10 GB of buildkit disk pressure during the push phase of
@@ -212,9 +212,27 @@ jobs:
           platforms: linux/amd64
           provenance: false
           push: false
-          load: true
+          load: false
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min,ignore-error=true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      # BuildKit runs image and registry-cache exporters concurrently. On the
+      # shared builder the early Docker import can be reclaimed while a slow
+      # cache export is still running. Materialize only after that export has
+      # completed so the next step can validate the exact local candidate.
+      - name: Materialize local AMD64 Studio runtime candidate after registry cache export
+        if: steps.reuse_dom0_amd64.outputs.reused != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-x86
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/amd64
+          provenance: false
+          push: false
+          load: true
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
           tags: ${{ env.CANDIDATE_IMAGE }}
 
       - name: Verify local AMD64 Studio runtime candidate
@@ -386,7 +404,7 @@ jobs:
           platforms: linux/amd64
           provenance: false
           push: false
-          load: true
+          load: false
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
@@ -404,12 +422,29 @@ jobs:
           platforms: linux/amd64
           provenance: false
           push: false
-          load: true
+          load: false
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64,mode=min,ignore-error=true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      - name: Materialize local AMD64 KVM Studio runtime candidate after registry cache export
+        if: steps.reuse_kvm_amd64.outputs.reused != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.vmm-qemu-x86
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/amd64
+          provenance: false
+          push: false
+          load: true
+          build-args: |
+            BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
+            SOURCE_SHA=${{ github.sha }}
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           tags: ${{ env.CANDIDATE_IMAGE }}
 
       - name: Verify local AMD64 KVM Studio runtime candidate
@@ -591,7 +626,7 @@ jobs:
           platforms: linux/arm64
           provenance: false
           push: false
-          load: true
+          load: false
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=min,ignore-error=true
           tags: ${{ env.CANDIDATE_IMAGE }}
@@ -605,9 +640,23 @@ jobs:
           platforms: linux/arm64
           provenance: false
           push: false
-          load: true
+          load: false
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=min,ignore-error=true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      - name: Materialize local ARM64 Studio runtime candidate after registry cache export
+        if: steps.reuse_dom0_arm64.outputs.reused != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-arm
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/arm64
+          provenance: false
+          push: false
+          load: true
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
           tags: ${{ env.CANDIDATE_IMAGE }}
 
       - name: Verify local ARM64 Studio runtime candidate
@@ -923,7 +972,7 @@ jobs:
           platforms: linux/arm64
           provenance: false
           push: false
-          load: true
+          load: false
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:arm64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
@@ -940,12 +989,29 @@ jobs:
           platforms: linux/arm64
           provenance: false
           push: false
-          load: true
+          load: false
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:arm64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64
           cache-to: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64,mode=min,ignore-error=true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+
+      - name: Materialize local ARM64 KVM Studio runtime candidate after registry cache export
+        if: steps.reuse_kvm_arm64.outputs.reused != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
+          file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.vmm-qemu-arm
+          builder: ${{ env.BUILDER_NAME }}
+          platforms: linux/arm64
+          provenance: false
+          push: false
+          load: true
+          build-args: |
+            BASE_IMAGE=anticipatercom/devshot:arm64-${{ github.sha }}
+            SOURCE_SHA=${{ github.sha }}
+          cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-arm64
           tags: ${{ env.CANDIDATE_IMAGE }}
 
       - name: Verify local ARM64 KVM Studio runtime candidate
