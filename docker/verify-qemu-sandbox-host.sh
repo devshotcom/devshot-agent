@@ -144,12 +144,13 @@ printf guest-visible > /run/devshot/guest-marker
 socat -T 5 UNIX-LISTEN:/run/devshot/probe.sock EXEC:/bin/cat &
 socket_server_pid=$!
 socket_ready=0
+# The production profile intentionally grants no signal mediation, so readiness
+# must be observed through the confined socket pathname rather than kill(2).
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if test -S /run/devshot/probe.sock; then
     socket_ready=1
     break
   fi
-  kill -0 "$socket_server_pid"
   sleep 0.1
 done
 test "$socket_ready" = 1
