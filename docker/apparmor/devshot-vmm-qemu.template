@@ -38,10 +38,11 @@ profile devshot-vmm-qemu-@{VM_NAME} flags=(chroot_relative) {
   /usr/share/AAVMF/** r,
   /usr/share/qemu-efi-aarch64/** r,
   /xen/boot/Image-domu r,
-  /xen/devshot-guest-base.qcow2 r,
-  @{VM_BACKING} r,
+  # QEMU also takes shared OFD locks on read-only backing-chain files.
+  /xen/devshot-guest-base.qcow2 rk,
+  @{VM_BACKING} rk,
   @{VM_BACKING}/ r,
-  @{VM_BACKING}/** r,
+  @{VM_BACKING}/** rk,
 
   # QEMU enters this profile only after pivot_root. chroot_relative makes
   # AppArmor mediate the private root exactly as QEMU sees it, including the
@@ -60,8 +61,9 @@ profile devshot-vmm-qemu-@{VM_NAME} flags=(chroot_relative) {
   # private control directory.
   unix (create, bind, listen, accept, connect, send, receive, getattr, setattr, getopt, setopt, shutdown) type=stream,
 
-  # Per-VM disk overlay (read-write — QEMU opens it directly).
-  @{VM_DISK} rw,
+  # Per-VM disk overlay. QEMU takes an OFD lock on every writable qcow2;
+  # AppArmor models that separately as `k`, just like the PID-file lock.
+  @{VM_DISK} rwk,
 
   # Every other VM runtime and guest disk remains inaccessible by default:
   # AppArmor grants only the exact VM root/disk and backing path above. Do not

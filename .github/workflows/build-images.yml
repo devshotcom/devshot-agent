@@ -59,6 +59,13 @@ permissions:
 
 env:
   BUILDX_CLOUD_ENDPOINT: anticipatercom/devshot
+  # Each persistent-runner job removes its exact Buildx builder before action
+  # post hooks run. Disable only the post-job summary/record export so pinned
+  # build-push actions do not query that intentionally removed builder and emit
+  # misleading warning annotations. Build checks and their annotations remain
+  # enabled.
+  DOCKER_BUILD_SUMMARY: "false"
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
   # An interrupted promotion can leave Dom0 on a newer digest while KVM still

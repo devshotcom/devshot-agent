@@ -110,6 +110,8 @@ profile $profile_name flags=(chroot_relative) {
   /usr/sbin/** rix,
   /run/devshot/ rw,
   /run/devshot/** rw,
+  /run/devshot/disk.qcow2 rwk,
+  /run/devshot/backing.qcow2 rk,
   unix (create, bind, listen, accept, connect, send, receive, getattr, setattr, getopt, setopt, shutdown) type=stream,
   /tmp/ rw,
   /tmp/** rw,
@@ -142,6 +144,14 @@ test "$no_new_privs" = 1
 test "$namespace_pid" = 1
 test "$(cat /run/devshot/host-marker)" = host-visible
 printf guest-visible > /run/devshot/guest-marker
+# QEMU requires an advisory OFD lock on each writable qcow2. AppArmor grants
+# file locking separately from read/write, so exercise a real non-blocking
+# fcntl lock before any expensive image work.
+printf qcow2 > /run/devshot/disk.qcow2
+python3 -c "import fcntl; f=open(\"/run/devshot/disk.qcow2\", \"r+b\"); fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB); f.write(b\"-lock-ok\"); f.flush(); fcntl.lockf(f, fcntl.LOCK_UN); f.close()"
+test "$(cat /run/devshot/disk.qcow2)" = qcow2-lock-ok
+python3 -c "import fcntl; f=open(\"/run/devshot/backing.qcow2\", \"rb\"); fcntl.lockf(f, fcntl.LOCK_SH | fcntl.LOCK_NB); fcntl.lockf(f, fcntl.LOCK_UN); f.close()"
+test "$(cat /run/devshot/backing.qcow2)" = backing
 # socat implements its relay with select(2) and aborts when the hardened
 # namespace bootstrap inherits a descriptor outside FD_SETSIZE. Exercise the
 # production socket operations directly so the gate tests AppArmor rather than
@@ -183,6 +193,7 @@ printf "DEVSHOT_QEMU_SANDBOX_HOST_OK uid=%s gid=%s pid=%s\n" "$(id -u)" "$(id -g
     --entrypoint /bin/sh "$probe_image" -eu -c '
       mkdir -p /workspace/root/run/devshot/tmp
       printf host-visible > /workspace/root/run/devshot/host-marker
+      printf backing > /workspace/root/run/devshot/backing.qcow2
       chown -R 20001:108 /workspace/root
       /usr/local/bin/devshot-userns-run --uid=20001 --gid=108 --net -- \
         /usr/local/bin/devshot-sandbox-init \
