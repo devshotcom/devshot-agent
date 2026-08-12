@@ -69,4 +69,9 @@ else
     apply_tunnel_host_alias "$XS_ROOT"
 fi
 
-exec /opt/devshot/agent
+# Pool guests must expose the authenticated readiness marker on their serial
+# console. Firecracker has no QGA channel and the host deliberately avoids
+# mounting the live writable config disk, so its fail-closed WaitReady gate
+# consumes this console evidence. The generated Xen guest wrapper already
+# uses the same console contract.
+exec /opt/devshot/agent >/dev/console 2>&1
