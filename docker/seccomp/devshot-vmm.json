@@ -31,7 +31,7 @@
         "read", "readv", "pread64", "preadv", "preadv2",
         "write", "writev", "pwrite64", "pwritev", "pwritev2",
         "open", "openat", "openat2", "close", "fstat", "stat",
-        "newfstatat", "fstatat64", "statx", "lstat",
+        "newfstatat", "fstatat64", "statx", "lstat", "fstatfs",
         "lseek", "dup", "dup2", "dup3", "pipe", "pipe2",
         "fcntl", "flock", "fallocate", "ftruncate", "fsync",
         "fdatasync", "sync_file_range", "copy_file_range",

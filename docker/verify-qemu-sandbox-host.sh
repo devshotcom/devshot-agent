@@ -146,8 +146,9 @@ test "$namespace_pid" = 1
 test "$(cat /run/devshot/host-marker)" = host-visible
 printf guest-visible > /run/devshot/guest-marker
 # The QEMU virtio-9p local backend must be able to stat the exact FileXenstore
-# directory. AppArmor treats the directory path separately from its children.
+# filesystem. fstatvfs(2) uses fstatfs(2), matching the QEMU local 9p backend.
 test -d /run/devshot/xenstore
+python3 -c "import os; fd=os.open(\"/run/devshot/xenstore\", os.O_RDONLY | os.O_DIRECTORY); os.fstatvfs(fd); os.close(fd)"
 # QEMU requires an advisory OFD lock on each writable qcow2. AppArmor grants
 # file locking separately from read/write, so exercise a real non-blocking
 # fcntl lock before any expensive image work.
