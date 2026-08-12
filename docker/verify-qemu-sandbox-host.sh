@@ -109,6 +109,7 @@ profile $profile_name flags=(chroot_relative) {
   /usr/bin/** rix,
   /usr/sbin/** rix,
   /run/devshot/ rw,
+  /run/devshot/xenstore/ rw,
   /run/devshot/** rw,
   /run/devshot/disk.qcow2 rwk,
   /run/devshot/backing.qcow2 rk,
@@ -144,6 +145,9 @@ test "$no_new_privs" = 1
 test "$namespace_pid" = 1
 test "$(cat /run/devshot/host-marker)" = host-visible
 printf guest-visible > /run/devshot/guest-marker
+# The QEMU virtio-9p local backend must be able to stat the exact FileXenstore
+# directory. AppArmor treats the directory path separately from its children.
+test -d /run/devshot/xenstore
 # QEMU requires an advisory OFD lock on each writable qcow2. AppArmor grants
 # file locking separately from read/write, so exercise a real non-blocking
 # fcntl lock before any expensive image work.
@@ -191,7 +195,7 @@ printf "DEVSHOT_QEMU_SANDBOX_HOST_OK uid=%s gid=%s pid=%s\n" "$(id -u)" "$(id -g
     -e "DEVSHOT_APPARMOR_PROFILE=$profile_name" \
     -e "DEVSHOT_SANDBOX_PROBE=$probe" \
     --entrypoint /bin/sh "$probe_image" -eu -c '
-      mkdir -p /workspace/root/run/devshot/tmp
+      mkdir -p /workspace/root/run/devshot/tmp /workspace/root/run/devshot/xenstore
       printf host-visible > /workspace/root/run/devshot/host-marker
       printf backing > /workspace/root/run/devshot/backing.qcow2
       chown -R 20001:108 /workspace/root
