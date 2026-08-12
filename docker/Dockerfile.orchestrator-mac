@@ -203,7 +203,6 @@ fi\n\
 \n\
 # Set up orchestrator environment\n\
 export ROLE=dom0\n\
-export LAMP_RELEASE_INDEX_URL="${LAMP_RELEASE_INDEX_URL:-https://github.com/devshotcom/devshot-agent/releases/download/lamp-matrix-latest/lamp-matrix-index-v2.json}"\n\
 export LAMP_SYNC_INTERVAL="${LAMP_SYNC_INTERVAL:-5m}"\n\
 export LAMP_SYNC_DOWNLOAD_TIMEOUT="${LAMP_SYNC_DOWNLOAD_TIMEOUT:-30m}"\n\
 export DEVSHOT_HYPERVISOR=qemu\n\
@@ -261,7 +260,7 @@ RUN tar czf /tmp/orchestrator-rootfs.tar.gz \
 # ─── Stage 2: Convert to qcow2 ────────────────────────────────────────────
 FROM debian:bookworm AS orchestrator-converter
 
-RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=orchestrator-rootfs /tmp/orchestrator-rootfs.tar.gz /tmp/orchestrator-rootfs.tar.gz

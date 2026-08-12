@@ -169,9 +169,9 @@ node /opt/openvscode-server/out/server-main.js --version | head -1
 # --- grok-build agent (spec 212) ------------------------------------------
 # The static-pie official grok binary runs on Alpine x86_64 as-is (no
 # cross-build, no gcompat — verified 2026-08-08). Baked here so a blank VM boots
-# WITH grok present; the console bridge (STUDIO_GROK_BRIDGE) launches
-# `grok agent serve` and drives it over ACP. Pinned by version + sha256; never
-# "latest" — a silent grok update must not change agent behaviour unreviewed.
+# WITH grok present; the live agent capability lets Console launch `grok agent
+# serve` and drive it over ACP. Pinned by version + sha256; never "latest" — a
+# silent grok update must not change agent behaviour unreviewed.
 GROK_VERSION=1.0.0
 case "$ARCH" in
   x86_64|amd64)

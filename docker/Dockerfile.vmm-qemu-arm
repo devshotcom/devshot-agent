@@ -52,7 +52,7 @@ LABEL org.opencontainers.image.revision="$SOURCE_SHA" \
       io.devshot.image-family.schema="2"
 
 # Install runtime deps (minimal).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   qemu-system-arm \
   qemu-utils \
   systemd \

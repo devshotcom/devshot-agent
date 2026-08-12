@@ -126,7 +126,6 @@ DEVSHOT_TLS_SKIP=${DEVSHOT_TLS_SKIP:-0}
 # apps/agent/go/vmmanager.go.
 READY_TIMEOUT=${READY_TIMEOUT:-300000}
 LOG_LEVEL=${LOG_LEVEL:-info}
-LAMP_RELEASE_INDEX_URL=${LAMP_RELEASE_INDEX_URL:-https://github.com/devshotcom/devshot-agent/releases/download/lamp-matrix-latest/lamp-matrix-index-v2.json}
 LAMP_SYNC_INTERVAL=${LAMP_SYNC_INTERVAL:-5m}
 LAMP_SYNC_DOWNLOAD_TIMEOUT=${LAMP_SYNC_DOWNLOAD_TIMEOUT:-30m}
 ENV
