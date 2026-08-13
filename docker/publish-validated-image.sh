@@ -8,6 +8,8 @@ set -euo pipefail
 readonly REPOSITORY='anticipatercom/devshot'
 readonly REGISTRY_PUSH_MAX_ATTEMPTS=5
 readonly -a REGISTRY_PUSH_RETRY_DELAYS=(15 30 60 120)
+readonly REGISTRY_PUSH_DEFAULT_TIMEOUT_SECONDS=1800
+readonly REGISTRY_PUSH_KVM_TIMEOUT_SECONDS=7200
 PROMOTION_AUTH_DIR=''
 
 usage() {
@@ -145,9 +147,9 @@ ensure_immutable_tag() {
 }
 
 push_with_retry() {
-  local reference="$1" attempt delay
+  local reference="$1" timeout_seconds="$2" attempt delay
   for ((attempt = 1; attempt <= REGISTRY_PUSH_MAX_ATTEMPTS; attempt++)); do
-    if bounded_docker 1800 push "$reference"; then
+    if bounded_docker "$timeout_seconds" push "$reference"; then
       return 0
     fi
     [ "$attempt" -lt "$REGISTRY_PUSH_MAX_ATTEMPTS" ] || break
@@ -286,7 +288,7 @@ reuse_immutable() {
 
 push_immutable() {
   local variant="${1:-}" candidate="${2:-}" source_sha="${3:-}" architecture
-  local immutable candidate_digest registry_candidate expected_arch
+  local immutable candidate_digest registry_candidate expected_arch push_timeout_seconds
   local -a immutable_tags
   require_sha "$source_sha"
   require_candidate_identity "$variant" "$candidate"
@@ -327,11 +329,21 @@ push_immutable() {
   }
   require_local_vmm_identity "$variant" "$candidate" "$source_sha"
 
+  # KVM images carry multi-gigabyte qcow2 and Studio template layers. A
+  # measured 20 Mbit/s builder link needs more than 30 minutes for the largest
+  # layer alone, so the default bound would repeatedly terminate healthy
+  # uploads. Keep the wider bound scoped to KVM; smaller Dom0 and Firecracker
+  # publications retain the original timeout.
+  case "$variant" in
+    *-kvm) push_timeout_seconds="$REGISTRY_PUSH_KVM_TIMEOUT_SECONDS" ;;
+    *) push_timeout_seconds="$REGISTRY_PUSH_DEFAULT_TIMEOUT_SECONDS" ;;
+  esac
+
   # This run-specific registry candidate is published only after the local
   # runtime validator passed. It lets us resolve the registry manifest digest
   # without ever creating local SHA/rolling tags or mutating an existing SHA.
   bounded_docker 60 tag "$candidate" "$registry_candidate"
-  push_with_retry "$registry_candidate"
+  push_with_retry "$registry_candidate" "$push_timeout_seconds"
   candidate_digest="$(registry_digest "$registry_candidate")"
   if [[ "$variant" == *-kvm || "$variant" == *-fc ]] \
     && [ "$(registry_revision "$registry_candidate")" != "$source_sha" ]; then
