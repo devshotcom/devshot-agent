@@ -147,8 +147,17 @@ ensure_immutable_tag() {
 }
 
 push_with_retry() {
-  local reference="$1" timeout_seconds="$2" attempt delay
+  local candidate="$1" reference="$2" timeout_seconds="$3" attempt delay
   for ((attempt = 1; attempt <= REGISTRY_PUSH_MAX_ATTEMPTS; attempt++)); do
+    # A failed registry upload can leave Docker's run-scoped target tag absent
+    # even though the validated local candidate is still intact. Recreate that
+    # exact alias before every attempt so retries do not immediately collapse
+    # into "tag does not exist". The candidate name is bound to this run and
+    # its architecture/revision were verified before entering this loop.
+    if ! bounded_docker 60 tag "$candidate" "$reference"; then
+      echo "ERROR: validated local candidate disappeared before registry retry: $candidate" >&2
+      return 1
+    fi
     if bounded_docker "$timeout_seconds" push "$reference"; then
       return 0
     fi
@@ -342,8 +351,7 @@ push_immutable() {
   # This run-specific registry candidate is published only after the local
   # runtime validator passed. It lets us resolve the registry manifest digest
   # without ever creating local SHA/rolling tags or mutating an existing SHA.
-  bounded_docker 60 tag "$candidate" "$registry_candidate"
-  push_with_retry "$registry_candidate" "$push_timeout_seconds"
+  push_with_retry "$candidate" "$registry_candidate" "$push_timeout_seconds"
   candidate_digest="$(registry_digest "$registry_candidate")"
   if [[ "$variant" == *-kvm || "$variant" == *-fc ]] \
     && [ "$(registry_revision "$registry_candidate")" != "$source_sha" ]; then
