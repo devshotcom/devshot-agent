@@ -797,17 +797,41 @@ jobs:
           mv "$payload/provenance.json.tmp" "$payload/provenance.json"
           (cd "$payload" && sha256sum -c SHA256SUMS)
 
-      - name: Upload exact validated Homebrew ARM64 payload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: homebrew-arm64-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ env.HOMEBREW_ARTIFACT_DIR }}/payload
-          if-no-files-found: error
-          # A rerun must still be able to complete an immutable Homebrew release
-          # after the GitHub release record has been created but before its asset
-          # was uploaded. Keep the exact, digest-bound payload for the maximum
-          # standard Actions retention window.
-          retention-days: 90
+      - name: Publish exact validated Homebrew ARM64 payload to the public registry
+        working-directory: ${{ env.CHECKOUT_DIR }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          payload="$HOMEBREW_ARTIFACT_DIR/payload"
+          payload_tag="homebrew-arm64-${GITHUB_SHA}-${GITHUB_RUN_ATTEMPT}"
+          payload_reference="anticipatercom/devshot:${payload_tag}"
+          publish_payload() {
+            timeout --foreground --signal=TERM --kill-after=30s 1800s \
+              python3 scripts/publish-homebrew-payload.py \
+                --payload-dir "$payload" \
+                --reference "$payload_reference" \
+                --agent-sha "$GITHUB_SHA" \
+                --image-digest "$(jq -er '.image_digest' "$payload/provenance.json")" \
+                --run-id "$GITHUB_RUN_ID" \
+                --run-attempt "$GITHUB_RUN_ATTEMPT"
+          }
+          manifest_digest=''
+          for attempt in 1 2 3; do
+            if manifest_digest="$(publish_payload)"; then
+              break
+            fi
+            [ "$attempt" -lt 3 ] || {
+              echo "ERROR: immutable Homebrew payload publication failed three times" >&2
+              exit 1
+            }
+            echo "Retrying exact Homebrew payload publication ($((attempt + 1))/3)" >&2
+            sleep "$((attempt * 15))"
+          done
+
+          [[ "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "Published exact Homebrew payload $payload_reference ($manifest_digest)"
 
       - name: Remove exact Homebrew artifact staging
         if: always()
