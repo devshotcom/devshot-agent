@@ -10,7 +10,7 @@
 #          -o type=local,dest=.build/orchestrator apps/agent
 
 # ─── Stage 1: Alpine rootfs with orchestrator packages ─────────────────────
-FROM --platform=linux/arm64 alpine:3.23 AS orchestrator-rootfs
+FROM alpine:3.23 AS orchestrator-rootfs
 
 # Base packages (same as pool VM)
 RUN apk add --no-cache \
