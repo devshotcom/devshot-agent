@@ -46,7 +46,7 @@ else
     modprobe 9pnet_virtio 2>/dev/null
     mkdir -p /tmp/xenstore
 
-    if mount -t 9p -o trans=virtio,version=9p2000.L xen_shared /tmp/xenstore 2>/dev/null; then
+    if mount -t 9p -o trans=virtio,version=9p2000.L,access=any xen_shared /tmp/xenstore 2>/dev/null; then
         # QEMU backend (spec 038): orchestrator populated the 9p share
         # with the FileXenstore tree before launch.
         export XS_REAL=0
