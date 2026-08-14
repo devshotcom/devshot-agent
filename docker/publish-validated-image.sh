@@ -147,25 +147,86 @@ ensure_immutable_tag() {
 }
 
 push_with_retry() {
-  local candidate="$1" reference="$2" timeout_seconds="$3" attempt delay
+  local candidate="$1" reference="$2" timeout_seconds="$3" variant="$4"
+  local attempt delay candidate_archive_dir='' candidate_archive_path='' expected_image_id actual_image_id
+
+  expected_image_id="$(bounded_docker 60 image inspect --format '{{.Id}}' "$candidate")"
+  [[ "$expected_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    echo "ERROR: validated local candidate has no immutable image ID: $candidate" >&2
+    return 1
+  }
+
+  # VMM images contain multi-gigabyte qcow2 and Studio layers. Docker can drop
+  # the original local tag or a referenced content blob after a long failed
+  # registry copy, even while the run-scoped target alias remains. Preserve a
+  # private run-local Docker archive before the first upload so every retry can
+  # restore the exact already-validated image instead of rebuilding it or
+  # degrading into a misleading "tag does not exist" failure.
+  case "$variant" in
+    *-kvm|*-fc)
+      : "${RUNNER_TEMP:?RUNNER_TEMP is required for resilient VMM publication}"
+      candidate_archive_dir="$(mktemp -d "${RUNNER_TEMP%/}/devshot-vmm-publish-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
+      candidate_archive_path="$candidate_archive_dir/candidate.tar"
+      chmod 0700 "$candidate_archive_dir"
+      if ! bounded_docker "$timeout_seconds" image save --output "$candidate_archive_path" "$candidate"; then
+        rm -rf -- "$candidate_archive_dir"
+        echo "ERROR: could not preserve validated VMM candidate for registry retries: $candidate" >&2
+        return 1
+      fi
+      chmod 0600 "$candidate_archive_path"
+      ;;
+  esac
+
   for ((attempt = 1; attempt <= REGISTRY_PUSH_MAX_ATTEMPTS; attempt++)); do
     # A failed registry upload can leave Docker's run-scoped target tag absent
     # even though the validated local candidate is still intact. Recreate that
     # exact alias before every attempt so retries do not immediately collapse
     # into "tag does not exist". The candidate name is bound to this run and
     # its architecture/revision were verified before entering this loop.
-    if ! bounded_docker 60 tag "$candidate" "$reference"; then
+    actual_image_id="$(bounded_docker 60 image inspect --format '{{.Id}}' "$candidate" 2>/dev/null || true)"
+    if [ "$actual_image_id" != "$expected_image_id" ] && [ -n "$candidate_archive_path" ]; then
+      echo "Restoring exact validated VMM candidate before registry retry: $candidate" >&2
+      if ! bounded_docker "$timeout_seconds" image load --input "$candidate_archive_path" >/dev/null; then
+        rm -rf -- "$candidate_archive_dir"
+        echo "ERROR: could not restore validated VMM candidate before registry retry: $candidate" >&2
+        return 1
+      fi
+      actual_image_id="$(bounded_docker 60 image inspect --format '{{.Id}}' "$candidate" 2>/dev/null || true)"
+    fi
+    if [ "$actual_image_id" != "$expected_image_id" ]; then
+      [ -z "$candidate_archive_dir" ] || rm -rf -- "$candidate_archive_dir"
       echo "ERROR: validated local candidate disappeared before registry retry: $candidate" >&2
       return 1
     fi
+    if ! bounded_docker 60 tag "$candidate" "$reference"; then
+      [ -z "$candidate_archive_dir" ] || rm -rf -- "$candidate_archive_dir"
+      echo "ERROR: could not recreate exact run-scoped registry alias: $reference" >&2
+      return 1
+    fi
     if bounded_docker "$timeout_seconds" push "$reference"; then
+      [ -z "$candidate_archive_dir" ] || rm -rf -- "$candidate_archive_dir"
       return 0
     fi
     [ "$attempt" -lt "$REGISTRY_PUSH_MAX_ATTEMPTS" ] || break
+    if [ -n "$candidate_archive_path" ]; then
+      echo "Restoring exact validated VMM candidate after bounded registry failure: $candidate" >&2
+      if ! bounded_docker "$timeout_seconds" image load --input "$candidate_archive_path" >/dev/null; then
+        rm -rf -- "$candidate_archive_dir"
+        echo "ERROR: could not restore validated VMM candidate after registry failure: $candidate" >&2
+        return 1
+      fi
+      actual_image_id="$(bounded_docker 60 image inspect --format '{{.Id}}' "$candidate" 2>/dev/null || true)"
+      if [ "$actual_image_id" != "$expected_image_id" ]; then
+        rm -rf -- "$candidate_archive_dir"
+        echo "ERROR: restored VMM candidate image ID changed before registry retry: $candidate" >&2
+        return 1
+      fi
+    fi
     delay="${REGISTRY_PUSH_RETRY_DELAYS[$((attempt - 1))]}"
     echo "Retrying immutable image push in ${delay}s after a bounded failure (attempt $((attempt + 1))/$REGISTRY_PUSH_MAX_ATTEMPTS): $reference" >&2
     sleep "$delay"
   done
+  [ -z "$candidate_archive_dir" ] || rm -rf -- "$candidate_archive_dir"
   echo "ERROR: immutable image push failed after $REGISTRY_PUSH_MAX_ATTEMPTS attempts: $reference" >&2
   return 1
 }
@@ -352,7 +413,7 @@ push_immutable() {
   # This run-specific registry candidate is published only after the local
   # runtime validator passed. It lets us resolve the registry manifest digest
   # without ever creating local SHA/rolling tags or mutating an existing SHA.
-  push_with_retry "$candidate" "$registry_candidate" "$push_timeout_seconds"
+  push_with_retry "$candidate" "$registry_candidate" "$push_timeout_seconds" "$variant"
   candidate_digest="$(registry_digest "$registry_candidate")"
   if [[ "$variant" == *-kvm || "$variant" == *-fc ]] \
     && [ "$(registry_revision "$registry_candidate")" != "$source_sha" ]; then
