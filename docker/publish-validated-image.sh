@@ -9,7 +9,7 @@ readonly REPOSITORY='anticipatercom/devshot'
 readonly REGISTRY_PUSH_MAX_ATTEMPTS=5
 readonly -a REGISTRY_PUSH_RETRY_DELAYS=(15 30 60 120)
 readonly REGISTRY_PUSH_DEFAULT_TIMEOUT_SECONDS=1800
-readonly REGISTRY_PUSH_KVM_TIMEOUT_SECONDS=7200
+readonly REGISTRY_PUSH_VMM_TIMEOUT_SECONDS=7200
 PROMOTION_AUTH_DIR=''
 
 usage() {
@@ -338,13 +338,14 @@ push_immutable() {
   }
   require_local_vmm_identity "$variant" "$candidate" "$source_sha"
 
-  # KVM images carry multi-gigabyte qcow2 and Studio template layers. A
+  # Firecracker and KVM images carry multi-gigabyte qcow2 and Studio template
+  # layers. A
   # measured 20 Mbit/s builder link needs more than 30 minutes for the largest
   # layer alone, so the default bound would repeatedly terminate healthy
-  # uploads. Keep the wider bound scoped to KVM; smaller Dom0 and Firecracker
+  # uploads. Keep the wider bound scoped to VMM images; smaller Dom0
   # publications retain the original timeout.
   case "$variant" in
-    *-kvm) push_timeout_seconds="$REGISTRY_PUSH_KVM_TIMEOUT_SECONDS" ;;
+    *-kvm|*-fc) push_timeout_seconds="$REGISTRY_PUSH_VMM_TIMEOUT_SECONDS" ;;
     *) push_timeout_seconds="$REGISTRY_PUSH_DEFAULT_TIMEOUT_SECONDS" ;;
   esac
 
