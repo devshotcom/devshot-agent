@@ -89,33 +89,8 @@ visudo -cf /etc/sudoers
 # Without these baked in, screenshot endpoints return 503 and browser
 # actions error out with "sh: xdotool: not found".
 
-# ── 2. Grok Build ACP agent ─────────────────────────────────────────────
-# Desktop Studio uses the same in-VM ACP agent as the coding Studio image.
-# Bake the reviewed native artifact into the template so a fresh VM never
-# depends on a runtime download and /opt/grok/grok is available from boot.
-GROK_VERSION=1.0.0
-ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64|amd64)
-    GROK_ARCH=x86_64
-    GROK_SHA256=28dbc967a5843dae2374b6834dadbab95354e685c7e5c8dc750b92a4e5fc7c3e
-    ;;
-  aarch64|arm64)
-    GROK_ARCH=aarch64
-    GROK_SHA256=bb7c51116564a2219f6a49850815060f416918ac407f1f2ba82c53c0b0d4383f
-    ;;
-  *)
-    echo "ERROR: unsupported architecture $ARCH for Grok Build" >&2
-    exit 1
-    ;;
-esac
-mkdir -p /opt/grok
-wget -q -O /tmp/grok "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-${GROK_VERSION}-linux-${GROK_ARCH}"
-echo "${GROK_SHA256}  /tmp/grok" | sha256sum -c -
-install -m 0755 /tmp/grok /opt/grok/grok
-ln -sfn /opt/grok/grok /usr/local/bin/grok
-rm -f /tmp/grok
-grok --version | head -1
+# ── 2. Grok Build + official GitHub Spec Kit ────────────────────────────
+/usr/local/libexec/devshot/install-grok-speckit.sh
 
 # ── 3. Per-user desktop config ─────────────────────────────────────────
 # The universal base already created the `devshot` user with a hidden

@@ -295,6 +295,9 @@ RUN apk add --no-cache \
     qemu-guest-agent \
     iputils sudo tmux curl bash openssl tini coreutils
 
+COPY --chmod=0755 recipes/lib/install-grok-speckit.sh /usr/local/libexec/devshot/install-grok-speckit.sh
+COPY --chmod=0755 recipes/lib/ensure-grok-speckit.sh /usr/local/libexec/devshot/ensure-grok-speckit.sh
+
 COPY roles/dom0/files/verify-studio-runtime-prerequisites.sh /tmp/verify-studio-runtime-prerequisites.sh
 RUN /bin/sh /tmp/verify-studio-runtime-prerequisites.sh && \
     rm -f /tmp/verify-studio-runtime-prerequisites.sh
