@@ -112,6 +112,17 @@
         "personality", "capget", "capset"
       ],
       "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "9p mapped-xattr ownership (spec 228). The virtio-9p xenstore share runs security_model=mapped-xattr: the guest-visible uid/gid/mode live in user.virtfs.* xattrs that dom0 seeds before QEMU starts. QEMU's local backend reads them with lgetxattr/fgetxattr on every stat and stamps them with lsetxattr on every create; without these the guest sees the host sandbox uid, root cannot enter its own 0700 share, and the DomU agent's ready=1 write dies with EPERM — the pool never becomes claimable. utimensat is the same backend's setattr(times) path.",
+      "names": [
+        "getxattr", "lgetxattr", "fgetxattr",
+        "setxattr", "lsetxattr", "fsetxattr",
+        "listxattr", "llistxattr", "flistxattr",
+        "removexattr", "lremovexattr", "fremovexattr",
+        "utimensat"
+      ],
+      "action": "SCMP_ACT_ALLOW"
     }
   ],
   "comment_blocked": "The following syscalls are EXPLICITLY BLOCKED (they hit defaultAction=ERRNO): ptrace, mount, umount2, pivot_root, reboot, kexec_load, init_module, finit_module, delete_module, setns, unshare, add_key, request_key, keyctl, create_module, nfsservctl, io_uring_enter, io_uring_setup, io_uring_register, process_vm_readv, process_vm_writev, kcmp, bpf, userfaultfd, perf_event_open, seccomp (we do NOT allow the sandboxed child to load further filters), mknod, mknodat, swapon, swapoff, acct."
