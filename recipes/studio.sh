@@ -210,6 +210,25 @@ done
 if [ -n "$VM_NAME" ]; then
     export DEVSHOT_ASSET_PREFIX="/api/public/p/${VM_NAME}/${PORT}"
     echo "Studio asset prefix: $DEVSHOT_ASSET_PREFIX"
+    # Spec 240 — a per-VM value that lives only in one process is lost on the
+    # first restart. The export above reaches the dev server this script execs,
+    # and nothing else: the agent restarting `npm run dev` while fixing
+    # something, a crash restart, a workspace reset — all of those come up with
+    # assetPrefix undefined and every /_next chunk 500s behind the proxy. The
+    # session cannot recompute it (sudo is removed at claim time and the
+    # xenstore node is root-only 0600), so write it where Next itself reads it
+    # on EVERY start. .env.local is loaded before next.config.mjs is evaluated.
+    # Console rewrites this file per turn as well, which is what corrects a
+    # workspace restored from a different VM.
+    if [ -d /var/www/studio ]; then
+        _envf=/var/www/studio/.env.local
+        _want="DEVSHOT_ASSET_PREFIX=${DEVSHOT_ASSET_PREFIX}"
+        if ! grep -qxF "$_want" "$_envf" 2>/dev/null; then
+            { grep -v '^DEVSHOT_ASSET_PREFIX=' "$_envf" 2>/dev/null || true; echo "$_want"; } > "$_envf.devshot-tmp" \
+                && mv "$_envf.devshot-tmp" "$_envf" \
+                && chown devshot:devshot "$_envf" 2>/dev/null || true
+        fi
+    fi
 else
     echo "WARN: vm-name not found in xenstore — assets may 404 behind the proxy" >&2
 fi
