@@ -51,6 +51,23 @@ apk add --no-cache \
   nodejs npm gcompat libstdc++ libc6-compat ca-certificates wget tar curl \
   docker docker-cli docker-cli-compose
 
+# --- E2E browser-verification harness (spec 270) ---------------------
+# devshot-verify / devshot-army / the run_e2e tool drive a REAL headless
+# chromium via puppeteer-core from the fixed /opt path. Blank was the one
+# stack without it, so the verify army could only fall back to HTTP checks
+# ("the headless browser verification tool isn't installed on this machine",
+# measured live 2026-08-21). Installed at BAKE time (network is available
+# here) so it works offline on the network-locked runtime VM; puppeteer-core
+# ships NO browser of its own (PUPPETEER_SKIP_DOWNLOAD=1 — it uses the apk
+# chromium), so this stays small. Mirrors studio.sh / lamp/_core.sh.
+apk add --no-cache chromium chromium-swiftshader
+install -d /opt/devshot-e2e
+# `ws` rides along for realtime verification: the agent simulates websocket
+# clients against the app it built (measured live 2026-08-21 — "a websocket
+# client isn't available" forced a headless re-implementation of the game
+# loop instead of driving the real server).
+( cd /opt/devshot-e2e && npm init -y >/dev/null 2>&1 && PUPPETEER_SKIP_DOWNLOAD=1 npm install --no-audit --no-fund --omit=dev puppeteer-core ws )
+
 # --- Docker: group + cgroup-parent + boot wiring ---------------------
 # devshot runs the editor, the agent's vm-exec, and every docker/ddev call,
 # so put it in the docker group → plain `docker` works without sudo (it also
