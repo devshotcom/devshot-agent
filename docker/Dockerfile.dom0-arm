@@ -44,7 +44,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /build
 
 RUN --mount=type=cache,target=/build/xen,id=xen-src \
-    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
+    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/786432)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/xen/.git ]; then \
         git clone --depth 1 --branch RELEASE-4.17.5 \
             https://xenbits.xen.org/git-http/xen.git /build/xen; \
@@ -83,7 +83,7 @@ COPY --from=xen-builder /tmp/xen-dev.tar.gz /tmp/xen-dev.tar.gz
 RUN tar xzf /tmp/xen-dev.tar.gz -C / && ldconfig && rm /tmp/xen-dev.tar.gz
 
 RUN --mount=type=cache,target=/build/qemu-xen,id=qemu-xen-src \
-    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
+    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/786432)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/qemu-xen/.git ]; then \
         git clone --depth 1 --branch stable-4.17 \
             https://xenbits.xen.org/git-http/qemu-xen.git /build/qemu-xen; \
@@ -142,7 +142,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /build
 
 RUN --mount=type=cache,target=/build/linux,id=linux-src \
-    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
+    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/786432)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/linux/.git ]; then \
         git clone --depth 1 --branch linux-6.1.y \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /build/linux; \
