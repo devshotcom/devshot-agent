@@ -44,19 +44,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /build
 
 RUN --mount=type=cache,target=/build/xen,id=xen-src \
+    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/xen/.git ]; then \
         git clone --depth 1 --branch RELEASE-4.17.5 \
             https://xenbits.xen.org/git-http/xen.git /build/xen; \
     fi && \
     cd /build/xen && \
     if [ ! -f xen/.config ]; then make -C xen XEN_TARGET_ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig; fi && \
-    make -C xen XEN_TARGET_ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) && \
+    make -C xen XEN_TARGET_ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$J" && \
     cp xen/xen /tmp/xen-arm64 && \
     ./configure --disable-docs --disable-stubdom && \
     make -C tools/include install && \
     make -C tools/libs install && \
     ldconfig && \
-    make -C tools/firmware -j$(nproc) 2>/dev/null || true && \
+    make -C tools/firmware -j"$J" 2>/dev/null || true && \
     make -C tools/firmware install 2>/dev/null || true && \
     mkdir -p /tmp/xen-firmware && \
     (cp -a /usr/local/lib/xen/boot/* /tmp/xen-firmware/ 2>/dev/null || true) && \
@@ -82,6 +83,7 @@ COPY --from=xen-builder /tmp/xen-dev.tar.gz /tmp/xen-dev.tar.gz
 RUN tar xzf /tmp/xen-dev.tar.gz -C / && ldconfig && rm /tmp/xen-dev.tar.gz
 
 RUN --mount=type=cache,target=/build/qemu-xen,id=qemu-xen-src \
+    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/qemu-xen/.git ]; then \
         git clone --depth 1 --branch stable-4.17 \
             https://xenbits.xen.org/git-http/qemu-xen.git /build/qemu-xen; \
@@ -121,7 +123,7 @@ RUN --mount=type=cache,target=/build/qemu-xen,id=qemu-xen-src \
         --disable-numa \
         --disable-membarrier \
         --disable-debug-info \
-    && make -j$(nproc) && \
+    && make -j"$J" && \
     cp build/qemu-system-aarch64 /tmp/qemu-system-aarch64-xen
 
 # ─── Stage 3: Build Linux kernel (Dom0) ────────────────────────────────────
@@ -140,6 +142,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /build
 
 RUN --mount=type=cache,target=/build/linux,id=linux-src \
+    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/linux/.git ]; then \
         git clone --depth 1 --branch linux-6.1.y \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /build/linux; \
@@ -203,7 +206,7 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src \
         --set-val CONFIG_NETFILTER_XT_MATCH_COMMENT y && \
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig && \
     sed -i 's/CONFIG_BRIDGE=m/CONFIG_BRIDGE=y/; s/CONFIG_BRIDGE_NETFILTER=m/CONFIG_BRIDGE_NETFILTER=y/; s/CONFIG_VETH=m/CONFIG_VETH=y/; s/CONFIG_TUN=m/CONFIG_TUN=y/; s/CONFIG_BLK_DEV_NBD=m/CONFIG_BLK_DEV_NBD=y/; s/CONFIG_NETFILTER_XT_MATCH_STATE=m/CONFIG_NETFILTER_XT_MATCH_STATE=y/; s/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=m/CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y/; s/CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=m/CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y/; s/CONFIG_NETFILTER_XT_NAT=m/CONFIG_NETFILTER_XT_NAT=y/; s/CONFIG_NETFILTER_XT_TARGET_MASQUERADE=m/CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y/; s/CONFIG_NETFILTER_XT_MATCH_MULTIPORT=m/CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y/; s/CONFIG_NETFILTER_XT_MATCH_COMMENT=m/CONFIG_NETFILTER_XT_MATCH_COMMENT=y/' .config && \
-    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image modules && \
+    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$J" Image modules && \
     cp arch/arm64/boot/Image /tmp/Image-dom0 && \
     cp arch/arm64/boot/Image /tmp/vmlinux-domu-fc && \
     mkdir -p /tmp/modules && \
