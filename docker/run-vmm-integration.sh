@@ -106,22 +106,46 @@ cleanup() {
     "$timeout_bin" --foreground --signal=TERM --kill-after=5s 20s \
       "$docker_bin" rm -f "$container_name" >/dev/null 2>&1 || true
   fi
+  # Spec 295 — keep the evidence. This whole cleanup used to run under
+  # >/dev/null 2>&1, so a failure surfaced only as "could not prove all
+  # temporary resources absent" with no way to learn WHY. The integration tests
+  # themselves passed; the job died here, and the reason was discarded.
+  cleanup_log="$(mktemp "${TMPDIR:-/tmp}/devshot-vmm-integration-cleanup.XXXXXXXX")"
   if ! "$timeout_bin" --foreground --signal=TERM --kill-after=5s 30s \
-    "${cleanup_command[@]}" >/dev/null 2>&1; then
+    "${cleanup_command[@]}" >>"$cleanup_log" 2>&1; then
     cleanup_failed=1
     "$timeout_bin" --foreground --signal=TERM --kill-after=5s 20s \
-      "$docker_bin" rm -f "${container_name}-cleanup" >/dev/null 2>&1 || true
+      "$docker_bin" rm -f "${container_name}-cleanup" >>"$cleanup_log" 2>&1 || true
   fi
   case "$workspace" in
     "${TMPDIR:-/tmp}"/devshot-vmm-integration.*)
-      if ! rmdir "$workspace" 2>/dev/null; then cleanup_failed=1; fi
+      # A leftover mount inside the workspace (the QEMU/Firecracker backends
+      # bind and overlay-mount under it) makes both `rm -rf` and `rmdir` fail
+      # with EBUSY. Detaching deepest-first turns that recoverable state into a
+      # clean proof instead of a hard job failure; anything that still refuses
+      # to unmount is reported below rather than swallowed.
+      while IFS= read -r mount_point; do
+        [ -n "$mount_point" ] || continue
+        umount "$mount_point" >>"$cleanup_log" 2>&1 \
+          || umount -l "$mount_point" >>"$cleanup_log" 2>&1 \
+          || true
+      done <<EOF_MOUNTS
+$(awk -v w="$workspace/" 'index($2, w) == 1 { print $2 }' /proc/self/mounts 2>/dev/null | sort -r)
+EOF_MOUNTS
+      if ! rmdir "$workspace" >>"$cleanup_log" 2>&1; then cleanup_failed=1; fi
       ;;
     *) echo "ERROR: refusing unsafe integration workspace cleanup: $workspace" >&2; cleanup_failed=1 ;;
   esac
   if [ "$cleanup_failed" -ne 0 ]; then
     echo "ERROR: candidate integration cleanup could not prove all temporary resources absent: $workspace" >&2
+    echo "--- cleanup output ---" >&2
+    tail -n 40 "$cleanup_log" >&2 2>/dev/null || true
+    echo "--- workspace contents ---" >&2
+    ls -la "$workspace" >&2 2>&1 || true
+    awk -v w="$workspace" 'index($2, w) == 1 { print "still mounted: " $2 }' /proc/self/mounts >&2 2>/dev/null || true
     status=1
   fi
+  rm -f "$cleanup_log" 2>/dev/null || true
   exit "$status"
 }
 trap cleanup EXIT

@@ -120,17 +120,50 @@ start_mariadb_for_bake() {
     >/var/log/mysql/bake.log 2>&1 &
   LAMP_MYSQL_PID=$!
 
-  for _ in $(seq 1 30); do
-    [ -S /run/mysqld/mysqld.sock ] && break
-    sleep 1
-  done
-  [ -S /run/mysqld/mysqld.sock ] || { echo "ERROR: mariadb socket missing" >&2; cat /var/log/mysql/bake.log >&2; exit 1; }
+  # Spec 293 — wait until mariadb SERVES, not until it merely exists.
+  #
+  # The old gate accepted a socket file plus `nc -z 127.0.0.1 3306`. Both are
+  # true before the server finishes crash recovery and loads its privilege
+  # tables, and both stay true for a moment after the process dies. The bake
+  # then ran the app installer against a server that was not answering, and
+  # Shopware's system:install failed the whole nightly rebake with
+  # "SQLSTATE[HY000] [2002] Connection refused" - taking every OTHER variant
+  # down with it, including the wordpress image the public demo needs.
+  #
+  # Prove three things instead: the process is still alive, the socket answers
+  # a ping, and a TCP client completes a real handshake. "Access denied" counts
+  # as served - it means the server replied, which is exactly what the
+  # installer needs; only connection-level failures keep us waiting.
+  mariadb_bake_died() {
+    ! kill -0 "${LAMP_MYSQL_PID:-0}" 2>/dev/null
+  }
+  mariadb_bake_serves() {
+    mariadb-admin --socket=/run/mysqld/mysqld.sock -uroot ping >/dev/null 2>&1 || return 1
+    tcp_probe=$(mariadb --protocol=TCP -h 127.0.0.1 -P 3306 -uroot -e 'SELECT 1' 2>&1) && return 0
+    case "$tcp_probe" in
+      *"Access denied"*) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
 
-  for _ in $(seq 1 10); do
-    nc -z 127.0.0.1 3306 && break
+  mariadb_ready=0
+  for _ in $(seq 1 90); do
+    if mariadb_bake_died; then
+      echo "ERROR: mariadb exited during bake startup" >&2
+      cat /var/log/mysql/bake.log >&2
+      exit 1
+    fi
+    if mariadb_bake_serves; then
+      mariadb_ready=1
+      break
+    fi
     sleep 1
   done
-  nc -z 127.0.0.1 3306 || { echo "ERROR: mariadb not listening on 127.0.0.1:3306" >&2; cat /var/log/mysql/bake.log >&2; exit 1; }
+  if [ "$mariadb_ready" != "1" ]; then
+    echo "ERROR: mariadb never served a query on socket+127.0.0.1:3306" >&2
+    cat /var/log/mysql/bake.log >&2
+    exit 1
+  fi
 }
 
 stop_mariadb_after_bake() {

@@ -315,7 +315,7 @@ jobs:
             echo "ERROR: QEMU systemd scopes require cgroup v2" >&2
             exit 1
           }
-          bash docker/self-hosted-builder.sh prepare 40
+          bash docker/self-hosted-builder.sh prepare 80
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -331,7 +331,7 @@ jobs:
 
       - name: Verify Docker data capacity
         working-directory: ${{ env.CHECKOUT_DIR }}
-        run: bash docker/self-hosted-builder.sh verify-docker-storage 40
+        run: bash docker/self-hosted-builder.sh verify-docker-storage 80
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
@@ -928,7 +928,7 @@ jobs:
             exit 1
           }
           bash docker/self-hosted-builder.sh verify-memory 8
-          bash docker/self-hosted-builder.sh prepare 40
+          bash docker/self-hosted-builder.sh prepare 80
           runner_home="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
           promotion_state_dir="${runner_home%/}/.devshot-actions"
           case "$promotion_state_dir" in
@@ -956,7 +956,7 @@ jobs:
 
       - name: Verify Docker data capacity
         working-directory: ${{ env.CHECKOUT_DIR }}
-        run: bash docker/self-hosted-builder.sh verify-docker-storage 40
+        run: bash docker/self-hosted-builder.sh verify-docker-storage 80
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
