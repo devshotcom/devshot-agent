@@ -107,6 +107,33 @@ JSON
 JSON
 }
 
+# Spec 315 — did the SERVER answer, or did we never reach one?
+#
+# A refusal is an answer. Spec 293 already said so ("only connection-level
+# failures keep us waiting") but whitelisted exactly one wording, "Access
+# denied" (1045). A fresh datadir has only root@localhost, so a TCP probe as
+# root is refused with 1130 — "Host '127.0.0.1' is not allowed to connect" —
+# which is just as much proof that the server is up and serving. It fell into
+# the catch-all, the gate waited its full 90s, and the AMD64 image build failed
+# with "mariadb never served a query" while mariadb was serving perfectly.
+# Measured on the mirror's AMD64 builds from 6fb28891 and ec698a66, both of
+# which carried agent fixes that never reached an image because of this.
+#
+# The apps themselves were never affected: create_app_db grants every app user
+# on BOTH 'localhost' and '127.0.0.1'. Only the root probe hits 1130.
+#
+# Kept as a separate function so the classification can be tested without a
+# server: it is the decision, not the connection, that was wrong.
+mariadb_probe_says_served() {
+  case "$1" in
+    # The server replied and refused us. It is up.
+    *"Access denied"*|*"is not allowed to connect"*) return 0 ;;
+    # Anything else — refused connection, no route, half-open socket, a dead
+    # process mid-handshake — means we never reached a serving database.
+    *) return 1 ;;
+  esac
+}
+
 # Start mariadb in the background for the bake step. Required because
 # every app's installer either runs SQL directly (wp install, typo3
 # setup) or connects via DATABASE_URL (shopware system:install).
@@ -140,10 +167,7 @@ start_mariadb_for_bake() {
   mariadb_bake_serves() {
     mariadb-admin --socket=/run/mysqld/mysqld.sock -uroot ping >/dev/null 2>&1 || return 1
     tcp_probe=$(mariadb --protocol=TCP -h 127.0.0.1 -P 3306 -uroot -e 'SELECT 1' 2>&1) && return 0
-    case "$tcp_probe" in
-      *"Access denied"*) return 0 ;;
-      *) return 1 ;;
-    esac
+    mariadb_probe_says_served "$tcp_probe"
   }
 
   mariadb_ready=0
