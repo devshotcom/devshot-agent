@@ -98,6 +98,7 @@ start_xvnc() {
       -AcceptSetDesktopSize \
       -pn \
       -localhost=0 \
+      -UseBlacklist=0 \
       2>/tmp/xvnc.log &
   "
 

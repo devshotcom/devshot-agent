@@ -337,7 +337,7 @@ chmod 1777 /tmp/.X11-unix
 su -s /bin/sh devshot -c "Xvnc :0 \
   -geometry $VNC_GEOMETRY -depth $VNC_DEPTH \
   -rfbport $VNC_PORT -SecurityTypes None -AlwaysShared \
-  -AcceptSetDesktopSize -pn -localhost=0 \
+  -AcceptSetDesktopSize -pn -localhost=0 -UseBlacklist=0 \
   >/tmp/xvnc.log 2>&1 &"
 
 # Wait briefly for the X socket to appear before launching openbox.

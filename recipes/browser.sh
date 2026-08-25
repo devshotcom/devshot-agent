@@ -242,6 +242,7 @@ sudo -u devshot env DISPLAY=:0 \
   -rfbport "$VNC_PORT" \
   -rfbauth /dev/null \
   -localhost no \
+  -UseBlacklist=0 \
   &> /tmp/Xvnc.log &
 XVNC_PID=$!
 

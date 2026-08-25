@@ -201,14 +201,19 @@ jobs:
           provenance: false
           push: false
           load: false
-          # mode=min (was mode=max): only push the final image's layers
-          # to the registry cache, not every intermediate stage. Saves
-          # ~10 GB of buildkit disk pressure during the push phase of
-          # the heavy multi-stage build — the registry still rehydrates
-          # the most expensive layers (kernel, xen, android rootfs) on
-          # the next run because they all land in the final image too.
+          # mode=max (spec 302). It was reduced to min to save ~10 GB of
+          # BuildKit disk pressure, on the assumption that "the registry
+          # still rehydrates the most expensive layers because they all
+          # land in the final image too". That is true of the ARTIFACTS
+          # and false of the work producing them: xen-builder,
+          # qemu-xen-builder and kernel-builder are separate stages whose
+          # output is COPY --from'd, so mode=min never exported them and
+          # every release recompiled Xen, QEMU and Linux from source —
+          # measured mid-build as two cc1 at 98% CPU and zero CACHED
+          # steps. The builder stays per-run; the registry is the shared
+          # store a fresh builder imports from.
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min,ignore-error=true
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=max,ignore-error=true
           tags: ${{ env.CANDIDATE_IMAGE }}
       # Retry once on a transient BuildKit / Docker Hub flake (builder
       # graceful_stop, registry 400 on layer PUT). If this second attempt
@@ -224,7 +229,7 @@ jobs:
           push: false
           load: false
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=min,ignore-error=true
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-amd64,mode=max,ignore-error=true
           tags: ${{ env.CANDIDATE_IMAGE }}
 
       # BuildKit runs image and registry-cache exporters concurrently. On the
@@ -640,7 +645,7 @@ jobs:
           push: false
           load: false
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=min,ignore-error=true
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=max,ignore-error=true
           tags: ${{ env.CANDIDATE_IMAGE }}
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -654,7 +659,7 @@ jobs:
           push: false
           load: false
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64
-          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=min,ignore-error=true
+          cache-to: type=registry,ref=anticipatercom/devshot:buildcache-dom0-arm64,mode=max,ignore-error=true
           tags: ${{ env.CANDIDATE_IMAGE }}
 
       - name: Materialize local ARM64 Studio runtime candidate after registry cache export
