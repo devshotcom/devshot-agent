@@ -441,6 +441,74 @@ export function apply(ctx: any) {
 BRIDGESOURCE
 chmod 0644 /opt/devshot-cordis-agent-bridge/package.json /opt/devshot-cordis-agent-bridge/index.ts
 
+# Every Cordis project gets one stable, project-owned result surface. The
+# Cordis dashboard remains available to the runtime, while Studio and its agent
+# render /result/ and edit this file instead of patching framework node_modules.
+# Keep an immutable seed outside the workspace so an older project restore can
+# recover the contract without overwriting user changes that are still present.
+install -d -m 0755 /opt/devshot-cordis-output/src /opt/devshot-cordis-output/public
+cat > /opt/devshot-cordis-output/package.json <<'OUTPUTPACKAGE'
+{
+  "name": "devshot-cordis-output",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts"
+}
+OUTPUTPACKAGE
+cat > /opt/devshot-cordis-output/src/index.ts <<'OUTPUTSOURCE'
+import { readFile } from 'node:fs/promises'
+
+export const name = 'devshot-cordis-output'
+export const inject = ['server']
+
+const outputFile = new URL('../public/index.html', import.meta.url)
+
+export function apply(ctx: any) {
+  ctx.server.get(/^\/result(?:\/.*)?$/, async (_request: any, response: any) => {
+    response.headers.set('content-type', 'text/html; charset=utf-8')
+    response.headers.set('cache-control', 'no-store')
+    response.text(await readFile(outputFile, 'utf8'))
+  })
+}
+OUTPUTSOURCE
+cat > /opt/devshot-cordis-output/public/index.html <<'OUTPUTHTML'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cordis result</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { min-height: 100%; margin: 0; }
+      body { background: #ffffff; color: #111827; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <main id="app" data-cordis-output="ready"></main>
+  </body>
+</html>
+OUTPUTHTML
+chmod 0644 \
+  /opt/devshot-cordis-output/package.json \
+  /opt/devshot-cordis-output/src/index.ts \
+  /opt/devshot-cordis-output/public/index.html
+
+cat > /usr/local/libexec/devshot/ensure-cordis-output <<'ENSUREOUTPUT'
+#!/bin/sh
+set -eu
+cd /var/www/cordis
+install -d packages/devshot-output/src packages/devshot-output/public
+[ -f packages/devshot-output/package.json ] || cp /opt/devshot-cordis-output/package.json packages/devshot-output/package.json
+[ -f packages/devshot-output/src/index.ts ] || cp /opt/devshot-cordis-output/src/index.ts packages/devshot-output/src/index.ts
+[ -f packages/devshot-output/public/index.html ] || cp /opt/devshot-cordis-output/public/index.html packages/devshot-output/public/index.html
+if ! grep -Fq 'name: ./packages/devshot-output/src/index.ts' app.yml; then
+  printf '\n- id: d3570a12\n  name: ./packages/devshot-output/src/index.ts\n' >> app.yml
+fi
+ENSUREOUTPUT
+chmod 0755 /usr/local/libexec/devshot/ensure-cordis-output
+
 # Build the official Cordis scaffold as the same user that later edits and runs it.
 install -d -o devshot -g devshot /var/www
 cat > /tmp/devshot-build-cordis.sh <<'BUILDCORDIS'
@@ -466,6 +534,7 @@ cp /opt/devshot-cordis-agent-bridge/index.ts external/devshot-agent-bridge/src/i
 if ! grep -Fq 'name: ./external/devshot-agent-bridge/src/index.ts' app.yml; then
   printf '\n- id: d3570a11\n  name: ./external/devshot-agent-bridge/src/index.ts\n' >> app.yml
 fi
+/usr/local/libexec/devshot/ensure-cordis-output
 
 # Upstream intentionally defaults to loopback. The DevShot host proxy reaches
 # the guest over its VM interface, so the server must listen on every interface.
@@ -508,6 +577,7 @@ cp /opt/devshot-cordis-agent-bridge/index.ts external/devshot-agent-bridge/src/i
 if ! grep -Fq 'name: ./external/devshot-agent-bridge/src/index.ts' app.yml; then
   printf '\n- id: d3570a11\n  name: ./external/devshot-agent-bridge/src/index.ts\n' >> app.yml
 fi
+/usr/local/libexec/devshot/ensure-cordis-output
 
 # A healthy baked image never installs at boot. This recovery path only handles
 # a workspace restore or explicit cleanup that removed node_modules.
