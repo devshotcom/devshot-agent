@@ -3,6 +3,11 @@
 # Every network input is pinned; runtime project initialization is offline.
 set -eux
 
+# QGA starts bake recipes with a deliberately minimal environment. Keep every
+# executable lookup deterministic so freshly installed /usr/local/bin tools and
+# Python's venv bootstrap work the same in an interactive shell and a bake VM.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 GROK_VERSION=1.0.0
 SPEC_KIT_VERSION=0.12.17
 SPEC_KIT_COMMIT=284e9a6a80106457129addeddedaf1641a374771
@@ -23,19 +28,28 @@ case "$ARCH" in
     ;;
 esac
 
-apk add --no-cache ca-certificates wget git python3 py3-pip
+apk add --no-cache \
+  ca-certificates wget git python3 py3-pip py3-virtualenv \
+  gcompat libc6-compat libstdc++
 
 mkdir -p /opt/grok
 wget -q -O /tmp/grok "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-${GROK_VERSION}-linux-${GROK_ARCH}"
 echo "${GROK_SHA256}  /tmp/grok" | sha256sum -c -
 install -m 0755 /tmp/grok /opt/grok/grok
+# mkdir honours QGA's restrictive bake umask; the agent process runs as the
+# unprivileged devshot user and must be able to traverse this directory.
+chmod -R a+rX /opt/grok
 ln -sfn /opt/grok/grok /usr/local/bin/grok
 rm -f /tmp/grok
-grok --version | head -1
+/opt/grok/grok --version | head -1
 
-python3 -m venv /opt/specify-cli
+/usr/bin/python3 -m venv /opt/specify-cli
 /opt/specify-cli/bin/pip install --no-cache-dir \
   "git+https://github.com/github/spec-kit.git@${SPEC_KIT_COMMIT}"
+# QGA bake commands can inherit a restrictive umask. The runtime agent runs as
+# devshot, so make the public, immutable CLI environment traversable after pip
+# has populated it instead of relying on the caller's directory defaults.
+chmod -R a+rX /opt/specify-cli
 ln -sfn /opt/specify-cli/bin/specify /usr/local/bin/specify
 test "$(specify --version | awk 'NR == 1 { print $2 }')" = "$SPEC_KIT_VERSION"
 
@@ -46,5 +60,5 @@ test "$(specify --version | awk 'NR == 1 { print $2 }')" = "$SPEC_KIT_VERSION"
 install -m 0755 /usr/local/libexec/devshot/ensure-grok-speckit.sh \
   /usr/local/bin/devshot-ensure-grok-speckit
 
-grok --version | head -1
-specify --version | head -1
+/opt/grok/grok --version | head -1
+/usr/local/bin/specify --version | head -1
