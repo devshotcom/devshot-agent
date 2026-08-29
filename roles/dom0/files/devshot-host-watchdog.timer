@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the DevShot independent host watchdog every 30 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+Unit=devshot-host-watchdog.service
+
+[Install]
+WantedBy=timers.target
