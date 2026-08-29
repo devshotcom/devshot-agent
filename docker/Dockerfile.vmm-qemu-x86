@@ -80,6 +80,8 @@ COPY docker/load-credentials.sh /opt/devshot/load-credentials.sh
 COPY docker/sync-templates.sh /opt/devshot/sync-templates.sh
 COPY docker/entrypoint-vmm-qemu.sh /opt/devshot/entrypoint.sh
 COPY docker/devshot-vmm-qemu.service /etc/systemd/system/devshot-vmm-qemu.service
+COPY roles/dom0/files/devshot-host-watchdog.service /etc/systemd/system/devshot-host-watchdog.service
+COPY roles/dom0/files/devshot-host-watchdog.timer /etc/systemd/system/devshot-host-watchdog.timer
 # Debian's dnsmasq package enables its own unit on install. Harmless while tini
 # was PID 1 (nothing started it), but systemd boots it — so the packaged
 # resolver races the one the orchestrator starts itself in
@@ -88,6 +90,7 @@ COPY docker/devshot-vmm-qemu.service /etc/systemd/system/devshot-vmm-qemu.servic
 # unit costs nothing and is what the VMM integration quiescence scan requires.
 RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh /opt/devshot/sync-templates.sh && \
   systemctl enable devshot-vmm-qemu.service && \
+  systemctl enable devshot-host-watchdog.timer && \
   systemctl mask dnsmasq.service
 
 RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav && \

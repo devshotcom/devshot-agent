@@ -261,6 +261,8 @@ RUN mkdir -p /rootfs/usr/lib/xen/boot /rootfs/usr/local/lib/xen/boot && \
 COPY --from=kernel-builder /tmp/modules/lib/modules /rootfs/lib/modules
 
 COPY roles/dom0/files/configure-dom0.sh /tmp/configure-dom0.sh
+COPY roles/dom0/files/devshot-host-watchdog.service /tmp/devshot-host-watchdog.service
+COPY roles/dom0/files/devshot-host-watchdog.timer /tmp/devshot-host-watchdog.timer
 RUN chmod +x /tmp/configure-dom0.sh && /tmp/configure-dom0.sh /rootfs xen-dom0
 
 RUN mkdir -p /rootfs/xen/guests /rootfs/etc/xen/guests /rootfs/etc/xen/auto /rootfs/xen/boot /rootfs/xen/configs
