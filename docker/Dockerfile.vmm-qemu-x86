@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # DevShot QEMU/KVM backend — x86_64 Docker image
 # Tag: anticipatercom/devshot:amd64-kvm
 # See Dockerfile.vmm-qemu-arm for detailed comments; this is the x86 variant.
@@ -53,16 +55,18 @@ COPY --from=artifacts /xen/guests/templates/ /opt/devshot/templates/
 # variants). Baked separately in build-agent.yml — see the
 # `Bake LAMP matrix` step there. Backing chain points each variant at
 # lamp-shared.qcow2 by relative filename, so cp -a-ing both into the
-# same templates dir preserves the chain at runtime. The directory may
-# be absent on a first-ever release (base qcow2 not yet in agent repo);
-# `COPY ... || true` isn't a thing in Dockerfile, so we COPY the parent
-# dir and let the runtime sync handle a missing lamp/ gracefully.
-COPY templates/ /opt/devshot/templates_extra/
-RUN if [ -d /opt/devshot/templates_extra/lamp ]; then \
-      mv /opt/devshot/templates_extra/lamp/* /opt/devshot/templates/ 2>/dev/null || true; \
-    fi && \
-    rm -rf /opt/devshot/templates_extra
-RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
+# same templates dir preserves the chain at runtime. Mount the build context
+# instead of COPYing it into a transient directory: COPY + move + the old
+# image-time /xen copy stored the multi-gigabyte QCOWs in three separate OCI
+# layers and could exhaust a healthy host during an otherwise routine pull.
+# The context always exists; lamp/ is optional for first-ever/local builds.
+RUN --mount=type=bind,source=.,target=/tmp/devshot-build-context,ro \
+    if [ -d /tmp/devshot-build-context/templates/lamp ]; then \
+      cp -a /tmp/devshot-build-context/templates/lamp/. /opt/devshot/templates/; \
+    fi
+# Do not copy templates to /xen here. Runtime installs bind-mount /xen/guests,
+# and entrypoint-vmm-qemu.sh atomically materializes the single immutable copy
+# through sync-templates.sh on every boot.
 COPY --from=artifacts /xen/configs/ /xen/configs/
 
 COPY bin/devshot-agent-linux-amd64 /opt/devshot/agent
