@@ -7,6 +7,7 @@ ConditionPathIsExecutable=/opt/devshot/agent
 Type=oneshot
 EnvironmentFile=-/xen/agent.env
 EnvironmentFile=-/etc/devshot/native-xen.env
+EnvironmentFile=-/opt/devshot/credentials.env
 PassEnvironment=DEVSHOT_HMAC_SECRET DEVSHOT_WATCHDOG_UNIT WATCHDOG_LOAD_MULT WATCHDOG_MIN_MEM_MB WATCHDOG_CRASHLOOP_DELTA WATCHDOG_DRY_RUN
 ExecStart=/opt/devshot/agent host-watchdog
 StandardOutput=append:/xen/host-watchdog.log
