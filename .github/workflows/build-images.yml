@@ -49,9 +49,11 @@ on:
 
 concurrency:
   group: build-images-${{ inputs.image_family }}-${{ github.ref }}
-  # Queue releases only within the same architecture. AMD64 and ARM64 have
-  # separate caller workflows and never wait on each other's workflow run.
-  cancel-in-progress: false
+  # A newer mirror-main commit supersedes every older candidate in the same
+  # architecture. Do not leave an obsolete build holding the only physical
+  # builder for hours. The recovery jobs below repair any partially promoted
+  # rolling family before the replacement build starts.
+  cancel-in-progress: true
 
 permissions:
   actions: read
@@ -74,7 +76,11 @@ jobs:
   recover-published-families:
     runs-on:
       group: devshot-agent-builders
-      labels: [self-hosted, Linux, X64, devshot-runner]
+      labels:
+        - self-hosted
+        - Linux
+        - ${{ inputs.image_family == 'arm64' && 'ARM64' || 'X64' }}
+        - ${{ inputs.image_family == 'arm64' && 'devshot-arm64' || 'devshot-runner' }}
     timeout-minutes: 45
     env:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-family-recovery
@@ -1128,7 +1134,11 @@ jobs:
     if: always()
     runs-on:
       group: devshot-agent-builders
-      labels: [self-hosted, Linux, X64, devshot-runner]
+      labels:
+        - self-hosted
+        - Linux
+        - ${{ inputs.image_family == 'arm64' && 'ARM64' || 'X64' }}
+        - ${{ inputs.image_family == 'arm64' && 'devshot-arm64' || 'devshot-runner' }}
     timeout-minutes: 45
     env:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-family-reconcile
