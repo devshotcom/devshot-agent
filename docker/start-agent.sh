@@ -69,6 +69,19 @@ else
     apply_tunnel_host_alias "$XS_ROOT"
 fi
 
+# A dedicated service guest keeps its role in the same orchestrator-owned boot
+# metadata as its tunnel token. Only the enumerated GPU role is accepted; an
+# arbitrary FileXenstore value can never turn a guest into a host agent.
+agent_role=""
+if [ "${XS_REAL:-0}" = "1" ]; then
+    agent_role="$(xenstore-read "/local/domain/${DOMID:-1}/data/agent-role" 2>/dev/null || true)"
+elif [ -n "${XS_ROOT:-}" ] && [ -r "${XS_ROOT}/local__domain__${DOMID:-1}__data__agent-role" ]; then
+    agent_role="$(cat "${XS_ROOT}/local__domain__${DOMID:-1}__data__agent-role" 2>/dev/null || true)"
+fi
+if [ "$agent_role" = "gpu" ]; then
+    export ROLE=gpu
+fi
+
 # OpenRC owns the Agent service logs. The Agent itself mirrors only its exact
 # post-xenstore readiness marker to the serial console for Firecracker's
 # fail-closed WaitReady gate, keeping the interactive console unpolluted.

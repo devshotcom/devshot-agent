@@ -318,6 +318,7 @@ RUN apk add --no-cache \
 
 COPY --chmod=0755 recipes/lib/install-grok-speckit.sh /usr/local/libexec/devshot/install-grok-speckit.sh
 COPY --chmod=0755 recipes/lib/ensure-grok-speckit.sh /usr/local/libexec/devshot/ensure-grok-speckit.sh
+COPY --chmod=0755 recipes/lib/devshot-shopware-import.mjs /usr/local/bin/devshot-shopware-import
 
 COPY roles/dom0/files/verify-studio-runtime-prerequisites.sh /tmp/verify-studio-runtime-prerequisites.sh
 RUN /bin/sh /tmp/verify-studio-runtime-prerequisites.sh && \

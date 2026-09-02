@@ -34,7 +34,7 @@ PHP_EXTS="cli fpm opcache openssl pdo pdo_mysql mysqli curl gd mbstring \
 xml dom simplexml xmlreader xmlwriter iconv zip intl fileinfo phar \
 tokenizer session ctype bcmath exif sodium sockets"
 
-PKGS="nginx mariadb mariadb-client composer git wget tar gzip unzip ca-certificates openssl"
+PKGS="nginx mariadb mariadb-client composer git wget tar gzip unzip ca-certificates openssl openrc util-linux"
 for ver in 82 83 84; do
   PKGS="$PKGS php${ver}"
   for ext in $PHP_EXTS; do
@@ -42,6 +42,33 @@ for ver in 82 83 84; do
   done
 done
 apk add --no-cache $PKGS
+
+# --- Guest memory pressure safety -----------------------------------
+# LAMP matrix images are built by build-lamp-matrix.sh, outside the Go Baker
+# path that adds swap to ordinary recipe images. That left every published
+# Shopware VM with 0 bytes of swap. Cache maintenance was measured successfully
+# at 1536 MiB without swap, but an unbounded vendor scan could still create a
+# sharp memory-pressure event and take the VM's control channel down with it.
+#
+# Keep one bounded GiB inside the guest: pressure becomes slower I/O instead of
+# killing the agent/VM. The OpenRC boot service is load-bearing — enabling swap
+# only during the bake would produce another runtime image with SwapTotal=0.
+SWAP_MB=1024
+if [ ! -f /swapfile ]; then
+  fallocate -l "${SWAP_MB}M" /swapfile
+fi
+chmod 0600 /swapfile
+mkswap /swapfile >/dev/null
+grep -q '^/swapfile ' /etc/fstab || printf '/swapfile none swap sw 0 0\n' >> /etc/fstab
+[ -x /etc/init.d/swap ] || { echo "ERROR: OpenRC swap service is unavailable" >&2; exit 1; }
+rc-update add swap boot
+swapon /swapfile
+grep -q '^/swapfile[[:space:]]' /proc/swaps || {
+  echo "ERROR: LAMP guest swap did not activate" >&2
+  exit 1
+}
+mkdir -p /etc/sysctl.d
+printf 'vm.swappiness=10\n' > /etc/sysctl.d/60-devshot-swap.conf
 
 # The editor and PHP-FPM intentionally share one workload user. These
 # VMs are disposable dev environments, and keeping generated app files
@@ -55,6 +82,100 @@ id -u devshot >/dev/null 2>&1 || adduser -D -s /bin/bash devshot
 ln -sf /usr/bin/php83 /usr/bin/php
 php -m | grep -qi mysqli || { echo "ERROR: mysqli not loaded on /usr/bin/php" >&2; php -m; exit 1; }
 
+# Keep Shopware maintenance inside the 1536 MiB guest contract. Every ordinary
+# CLI call still runs as the workload user, but commands that rebuild the
+# container/theme are serialized while FPM is quiesced. This removes the only
+# meaningful PHP concurrency spike: a 512 MiB CLI process no longer overlaps a
+# cold Storefront worker compiling the same container. The PATH wrapper catches
+# both `bin/console ...` (#!/usr/bin/env php) and `php bin/console ...` without
+# modifying Shopware's own executable.
+cat > /usr/local/sbin/devshot-shopware-lowmem <<'LOWMEM'
+#!/bin/sh
+set -eu
+[ "$(id -u)" -eq 0 ] || { echo "devshot-shopware-lowmem must run through sudo" >&2; exit 77; }
+[ "$#" -gt 0 ] || { echo "devshot-shopware-lowmem: missing PHP arguments" >&2; exit 64; }
+
+exec 9>/run/devshot-shopware-maintenance.lock
+flock -x 9
+active_fpm=""
+restore_fpm() {
+  trap - 0 1 2 15
+  for svc in $active_fpm; do rc-service "$svc" start >/dev/null 2>&1 || true; done
+}
+trap restore_fpm 0
+trap 'exit 129' 1
+trap 'exit 130' 2
+trap 'exit 143' 15
+
+for svc in php-fpm82 php-fpm83 php-fpm84; do
+  if rc-service "$svc" status >/dev/null 2>&1; then
+    active_fpm="$active_fpm $svc"
+    rc-service "$svc" stop >/dev/null
+  fi
+done
+
+set +e
+su -s /bin/sh -- devshot -c 'exec /usr/bin/php83 "$@"' devshot-shopware-lowmem "$@"
+rc=$?
+set -e
+exit "$rc"
+LOWMEM
+chmod 0755 /usr/local/sbin/devshot-shopware-lowmem
+
+cat > /usr/local/bin/php <<'PHPWRAP'
+#!/bin/sh
+set -eu
+real_php=/usr/bin/php83
+console_path=""
+console_command=""
+seen_console=0
+for arg in "$@"; do
+  if [ "$seen_console" = "1" ]; then
+    case "$arg" in
+      cache:clear|theme:compile|theme:change|theme:refresh|plugin:install|plugin:update|plugin:activate|plugin:deactivate|dal:refresh:index|database:migrate|database:migrate-destructive)
+        console_command=$arg
+        break
+        ;;
+    esac
+  fi
+  case "$arg" in
+    bin/console|./bin/console|*/bin/console) console_path=$arg; seen_console=1 ;;
+  esac
+done
+
+case "$console_command" in
+  cache:clear|theme:compile|theme:change|theme:refresh|plugin:install|plugin:update|plugin:activate|plugin:deactivate|dal:refresh:index|database:migrate|database:migrate-destructive)
+    # During the image bake bin/console is still root-owned. Runtime projects
+    # are devshot-owned; only those enter the maintenance scheduler.
+    owner=$(stat -c %U "$console_path" 2>/dev/null || true)
+    if [ "$owner" = "devshot" ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          memory_limit=*[Gg]|-dmemory_limit=*[Gg]|memory_limit=-1|-dmemory_limit=-1)
+            echo "Shopware low-memory contract: unlimited/GiB PHP heaps are forbidden; maximum is 512M" >&2
+            exit 64
+            ;;
+          memory_limit=*[Mm]|-dmemory_limit=*[Mm])
+            value=${arg##*=}; value=${value%M}; value=${value%m}
+            case "$value" in
+              ''|*[!0-9]*) ;;
+              *) [ "$value" -le 512 ] || {
+                echo "Shopware low-memory contract: PHP memory_limit=${value}M exceeds 512M" >&2
+                exit 64
+              } ;;
+            esac
+            ;;
+        esac
+      done
+      exec sudo -n /usr/local/sbin/devshot-shopware-lowmem "$@"
+    fi
+    ;;
+esac
+
+exec "$real_php" "$@"
+PHPWRAP
+chmod 0755 /usr/local/bin/php
+
 # --- Per-version FPM pools + php.ini ---------------------------------
 for ver in 82 83 84; do
   mkdir -p /run/php-fpm${ver}
@@ -66,7 +187,14 @@ for ver in 82 83 84; do
     -e "s|^;\?listen.owner = .*|listen.owner = nginx|" \
     -e "s|^;\?listen.group = .*|listen.group = nginx|" \
     -e "s|^;\?listen.mode = .*|listen.mode = 0660|" \
+    -e 's|^pm = .*|pm = ondemand|' \
+    -e 's|^pm.max_children = .*|pm.max_children = 1|' \
+    -e 's|^;*pm.process_idle_timeout = .*|pm.process_idle_timeout = 10s|' \
+    -e 's|^;*pm.max_requests = .*|pm.max_requests = 100|' \
+    -e 's|^;*php_admin_value\[memory_limit\] = .*|php_admin_value[memory_limit] = 256M|' \
     "$POOL"
+  grep -q '^php_admin_value\[memory_limit\] = ' "$POOL" \
+    || printf '\nphp_admin_value[memory_limit] = 256M\n' >> "$POOL"
 
   # Shopware migrations and TYPO3 setup both want >256 MB.
   PHPINI=/etc/php${ver}/php.ini
@@ -90,6 +218,14 @@ cat > /etc/my.cnf.d/zz-devshot.cnf <<'CFG'
 skip-networking = 0
 bind-address = 127.0.0.1
 skip-name-resolve
+performance_schema = OFF
+innodb_buffer_pool_size = 128M
+innodb_log_buffer_size = 8M
+max_connections = 20
+table_open_cache = 256
+thread_cache_size = 4
+tmp_table_size = 16M
+max_heap_table_size = 16M
 CFG
 
 mkdir -p /run/mysqld /var/log/mysql
@@ -401,6 +537,10 @@ cat > /etc/init.d/openvscode-server <<'SVC'
 
 name="openvscode-server"
 description="VSCode in the browser (openvscode-server) — DevShot Editor"
+# Stop a single editor process from expanding until the kernel has no room for
+# Shopware maintenance. 256 MiB old-space is ample for the web editor; file and
+# terminal operations keep working, while the 1536 MiB VM retains a hard budget.
+export NODE_OPTIONS="--max-old-space-size=256"
 # OPENVSCODE_DEFAULT_FOLDER is populated per-variant by _app_lib's
 # install_<app> step; falls back to /home/devshot/projects when
 # no app has claimed the editor (lamp-shared boot only — variants
