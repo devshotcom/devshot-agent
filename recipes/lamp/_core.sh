@@ -54,19 +54,28 @@ apk add --no-cache $PKGS
 # killing the agent/VM. The OpenRC boot service is load-bearing — enabling swap
 # only during the bake would produce another runtime image with SwapTotal=0.
 SWAP_MB=1024
-if [ ! -f /swapfile ]; then
-  fallocate -l "${SWAP_MB}M" /swapfile
+SWAP_FILE=/var/swap/devshot.swap
+# Spec 356 — the bake chroots into this image on a runner VM whose OWN
+# /swapfile is active. /proc/swaps is the kernel's, so `mkswap /swapfile`
+# refused the guest's file as "mounted" (nightly rebakes 09-02/09-03,
+# devshot-agent run 33696720385). The guest swap lives at its own path, and
+# activation is best-effort here: in the chroot swapon cannot (and must not)
+# touch the runner's kernel. What makes SwapTotal>0 at runtime is the fstab
+# line plus the OpenRC swap service, which is what gets verified.
+install -d -m 0700 "$(dirname "$SWAP_FILE")"
+if [ ! -f "$SWAP_FILE" ]; then
+  fallocate -l "${SWAP_MB}M" "$SWAP_FILE"
 fi
-chmod 0600 /swapfile
-mkswap /swapfile >/dev/null
-grep -q '^/swapfile ' /etc/fstab || printf '/swapfile none swap sw 0 0\n' >> /etc/fstab
+chmod 0600 "$SWAP_FILE"
+mkswap "$SWAP_FILE" >/dev/null
+grep -q "^$SWAP_FILE " /etc/fstab || printf '%s none swap sw 0 0\n' "$SWAP_FILE" >> /etc/fstab
 [ -x /etc/init.d/swap ] || { echo "ERROR: OpenRC swap service is unavailable" >&2; exit 1; }
 rc-update add swap boot
-swapon /swapfile
-grep -q '^/swapfile[[:space:]]' /proc/swaps || {
-  echo "ERROR: LAMP guest swap did not activate" >&2
+rc-update show boot | grep -q '\bswap\b' || {
+  echo "ERROR: LAMP guest swap service is not enabled at boot" >&2
   exit 1
 }
+swapon "$SWAP_FILE" 2>/dev/null || echo "note: guest swap prepared; it activates at boot (bake chroot)"
 mkdir -p /etc/sysctl.d
 printf 'vm.swappiness=10\n' > /etc/sysctl.d/60-devshot-swap.conf
 
