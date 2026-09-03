@@ -53,6 +53,13 @@ export npm_config_fetch_retries=5
 export npm_config_fetch_retry_mintimeout=20000
 export npm_config_fetch_retry_maxtimeout=120000
 export npm_config_maxsockets=6
+# create-expo-app stages the downloaded template through os.tmpdir(), and this
+# script runs as the unprivileged workload user: the bake's /tmp is not
+# world-writable, so it died with "EACCES: permission denied, mkdir
+# '/tmp/.create-expo-app'" (agent run 33800980629). Node honours TMPDIR, so
+# give it one inside the user's own home.
+export TMPDIR="$HOME/.tmp"
+mkdir -p "$TMPDIR"
 cd /var/www
 npx --yes create-expo-app@latest devshot-expo --template default@sdk-57 --yes
 mv /var/www/devshot-expo /var/www/expo
