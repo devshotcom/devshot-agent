@@ -55,19 +55,26 @@ apk add --no-cache $PKGS
 # only during the bake would produce another runtime image with SwapTotal=0.
 SWAP_MB=1024
 SWAP_FILE=/var/swap/devshot.swap
-# Spec 356 — the bake chroots into this image on a runner VM whose OWN
-# /swapfile is active. /proc/swaps is the kernel's, so `mkswap /swapfile`
-# refused the guest's file as "mounted" (nightly rebakes 09-02/09-03,
-# devshot-agent run 33696720385). The guest swap lives at its own path, and
-# activation is best-effort here: in the chroot swapon cannot (and must not)
-# touch the runner's kernel. What makes SwapTotal>0 at runtime is the fstab
-# line plus the OpenRC swap service, which is what gets verified.
+# Spec 356 — the bake chroots into this image, so /proc/swaps belongs to the
+# RUNNER's kernel and a swapon here activates the guest's file on the RUNNER.
+# That is exactly what happened: run 33777696583 then hit
+# "mkswap: /var/swap/devshot.swap is mounted" because the previous bake had
+# left it active on the builder. So: never swapon during a bake, and make the
+# file itself unambiguous before formatting it. What makes SwapTotal>0 at
+# runtime is the fstab line plus the OpenRC swap service, and those are what
+# this block verifies.
 install -d -m 0700 "$(dirname "$SWAP_FILE")"
-if [ ! -f "$SWAP_FILE" ]; then
-  fallocate -l "${SWAP_MB}M" "$SWAP_FILE"
-fi
+# Release it if THIS file is what the kernel holds, then always start from a
+# fresh inode: a builder that ran an older bake can still list the path in
+# /proc/swaps while the file behind it is long deleted, and no swapoff can
+# clear that entry. A brand-new file cannot be the active one, which is what
+# makes the forced mkswap below safe -- it only overrides that stale
+# path-string check, never a live swap area.
+swapoff "$SWAP_FILE" 2>/dev/null || true
+rm -f "$SWAP_FILE"
+fallocate -l "${SWAP_MB}M" "$SWAP_FILE"
 chmod 0600 "$SWAP_FILE"
-mkswap "$SWAP_FILE" >/dev/null
+mkswap --force "$SWAP_FILE" >/dev/null
 grep -q "^$SWAP_FILE " /etc/fstab || printf '%s none swap sw 0 0\n' "$SWAP_FILE" >> /etc/fstab
 [ -x /etc/init.d/swap ] || { echo "ERROR: OpenRC swap service is unavailable" >&2; exit 1; }
 rc-update add swap boot
@@ -75,7 +82,7 @@ rc-update show boot | grep -q '\bswap\b' || {
   echo "ERROR: LAMP guest swap service is not enabled at boot" >&2
   exit 1
 }
-swapon "$SWAP_FILE" 2>/dev/null || echo "note: guest swap prepared; it activates at boot (bake chroot)"
+echo "guest swap prepared at $SWAP_FILE; it activates at boot via fstab + OpenRC"
 mkdir -p /etc/sysctl.d
 printf 'vm.swappiness=10\n' > /etc/sysctl.d/60-devshot-swap.conf
 
