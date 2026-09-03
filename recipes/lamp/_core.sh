@@ -103,6 +103,11 @@ php -m | grep -qi mysqli || { echo "ERROR: mysqli not loaded on /usr/bin/php" >&
 # cold Storefront worker compiling the same container. The PATH wrapper catches
 # both `bin/console ...` (#!/usr/bin/env php) and `php bin/console ...` without
 # modifying Shopware's own executable.
+# Alpine's base image ships no /usr/local/sbin (and not always /usr/local/bin),
+# so the helpers below had nowhere to land: the bake died with
+# "can't create /usr/local/sbin/devshot-shopware-lowmem: nonexistent
+# directory" (agent run 33793176950).
+install -d -m 0755 /usr/local/sbin /usr/local/bin
 cat > /usr/local/sbin/devshot-shopware-lowmem <<'LOWMEM'
 #!/bin/sh
 set -eu
