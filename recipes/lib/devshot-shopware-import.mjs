@@ -183,7 +183,7 @@ async function replaceProjectFiles(archivePath, temporaryRoot) {
   for (const required of ['composer.json', 'bin/console']) {
     if (!await exists(join(staging, required))) throw new Error(`Shopware archive is missing ${required}`);
   }
-  await rm(join(staging, 'anticipater-manifest.json'), { force: true });
+  await rm(join(staging, 'devshot-manifest.json'), { force: true });
   await pruneMissing(PROJECT_ROOT, staging);
   for (const entry of await readdir(staging)) {
     await cp(join(staging, entry), join(PROJECT_ROOT, entry), {
