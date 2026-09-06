@@ -1143,6 +1143,34 @@ jobs:
     env:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-family-reconcile
     steps:
+      # Spec 370 — a gated job must not leave behind a green run that implies
+      # it published. `DEVSHOT_ARM64_VMM_RELEASE` keeps build-vmm-qemu-arm64
+      # off (spec 207: the only devshot-arm64 runner is a TCG guest with no
+      # EL2, so a KVM image cannot be honestly validated there). But
+      # `promote_arm64_family` moves ALL FOUR rolling tags and lives inside
+      # that job — deliberately, so a rolling tag never points at a
+      # half-validated family. Gating the job therefore also stops `arm64` and
+      # `arm64-mac`, which spec 207 recorded as still publishing normally.
+      # They stopped on 2026-08-03 with the rest, and every run since has
+      # reported success having promoted nothing. Say what was skipped.
+      - name: Report ARM64 rolling tags left unpromoted
+        if: ${{ inputs.image_family == 'arm64' && vars.DEVSHOT_ARM64_VMM_RELEASE != '1' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary="ARM64 rolling tags were NOT promoted: arm64, arm64-mac, arm64-fc and arm64-kvm still point at their previous digests."
+          detail="build-vmm-qemu-arm64 is gated off (DEVSHOT_ARM64_VMM_RELEASE != 1, spec 207) and it owns promote-arm64-family, which moves the whole family at once. Immutable arm64-<sha> tags and the Homebrew ARM64 payload published normally; no offered install target uses the rolling ARM64 tags (see INSTALL_TARGETS in the console)."
+          echo "::warning title=ARM64 rolling tags not promoted::${summary}"
+          {
+            echo "### ARM64 rolling tags not promoted"
+            echo
+            echo "$summary"
+            echo
+            echo "$detail"
+            echo
+            echo "Set the repository variable \`DEVSHOT_ARM64_VMM_RELEASE=1\` once a devshot-arm64 runner with a usable \`/dev/kvm\` exists, and these tags start moving again."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Reclaim self-hosted runner workspace
         shell: bash
         run: |
