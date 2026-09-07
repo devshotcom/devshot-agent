@@ -20,6 +20,7 @@ import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import readline from 'node:readline';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const execFileAsync = promisify(execFile);
 const PROJECT_ROOT = '/var/www/shopware';
@@ -319,12 +320,12 @@ async function loadAgentConfig() {
   return { endpoint, token: values.DEVSHOT_AI_KEY };
 }
 
-async function api(action, importId = '') {
+async function api(action, payload = {}) {
   const config = await loadAgentConfig();
   const response = await fetch(config.endpoint, {
     method: 'POST',
     headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, ...(importId ? { importId } : {}) }),
+    body: JSON.stringify({ action, ...payload }),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `Shopware import API returned HTTP ${response.status}`);
@@ -337,15 +338,47 @@ async function rememberedImportId(value) {
   return (await readFile(IMPORT_ID_FILE, 'utf8')).trim();
 }
 
+export function shopwareApprovalMessage({ approvalUrl, displayFingerprint, approvalNonce, kind }) {
+  const pairing = kind === 'pairing';
+  return [
+    pairing ? 'Shopware connection approval is required.' : 'Shopware requires a fresh one-time approval for this workspace sync.',
+    `Open: ${approvalUrl}`,
+    `Agent fingerprint: ${displayFingerprint}`,
+    ...(approvalNonce ? [`Approval nonce: ${approvalNonce}`] : []),
+    'The link opens the authenticated Shopware Administration. Verify the values there and approve explicitly.',
+  ].join('\n');
+}
+
+async function waitForApproval(action, payload, { timeoutMs = 10 * 60 * 1000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const current = await api(action, payload);
+    if (current.status === 'approved') return current;
+    if (['rejected', 'revoked', 'consumed'].includes(current.status)) {
+      throw new Error(`Shopware rejected the request (${current.status})`);
+    }
+    await delay(2_000);
+  }
+  throw new Error('Shopware approval expired');
+}
+
+async function pair(shopUrl, pairingCode) {
+  if (!shopUrl || !pairingCode) throw new Error('usage: devshot-shopware-import pair <https-shop-url> <pairing-code>');
+  const requested = await api('pair', { shopUrl, pairingCode });
+  process.stdout.write(`${shopwareApprovalMessage({ ...requested, kind: 'pairing' })}\n`);
+  await waitForApproval('pairing-status');
+  process.stdout.write('Shopware connection approved. Future requests remain individually approval-gated.\n');
+}
+
 async function prepare() {
-  const prepared = await api('prepare');
+  const operation = await api('request-sync');
+  process.stdout.write(`${shopwareApprovalMessage({ ...operation, kind: 'operation' })}\n`);
+  await waitForApproval('operation-status', { operationId: operation.operationId });
+  const prepared = await api('prepare', { operationId: operation.operationId });
   await writeFile(IMPORT_ID_FILE, `${prepared.importId}\n`, { mode: 0o600 });
   process.stdout.write([
-    `Shopware import ${prepared.importId} is waiting for the source shop.`,
+    `Shopware import ${prepared.importId} was signed, approved and uploaded by the source shop.`,
     prepared.notice,
-    '',
-    'Run this command from the Shopware project root on the source system:',
-    prepared.sourceCommand,
     '',
     `Then run: devshot-shopware-import apply ${prepared.importId}`,
   ].join('\n') + '\n');
@@ -353,12 +386,12 @@ async function prepare() {
 
 async function status(importId) {
   const id = await rememberedImportId(importId);
-  process.stdout.write(`${JSON.stringify(await api('status', id), null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(await api('status', { importId: id }), null, 2)}\n`);
 }
 
 async function applyImport(importId) {
   const id = await rememberedImportId(importId);
-  const download = await api('download', id);
+  const download = await api('download', { importId: id });
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'devshot-shopware-import-'));
   try {
     const archivePath = join(temporaryRoot, 'project.zip');
@@ -381,7 +414,7 @@ async function applyImport(importId) {
     await run('php', ['bin/console', 'assets:install']);
     await run('php', ['bin/console', 'theme:compile', '-n']);
     await run('php', ['bin/console', 'cache:clear', '-n']);
-    await api('complete', id);
+    await api('complete', { importId: id });
     process.stdout.write(`${JSON.stringify({ ok: true, importId: id, ...imported }, null, 2)}\n`);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
@@ -393,16 +426,31 @@ async function downloadFile(url, path) {
   return download(url, path);
 }
 
-function usage() {
-  return 'usage: devshot-shopware-import <prepare|status|apply> [import-id]';
+export function shopwareImportHelp() {
+  return [
+    'Usage:',
+    '  devshot-shopware-import pair <https-shop-url> <pairing-code>',
+    '  devshot-shopware-import prepare',
+    '  devshot-shopware-import status [import-id]',
+    '  devshot-shopware-import apply [import-id]',
+    '',
+    'The pair and prepare commands print clickable Shopware Administration approval links.',
+    'Every prepare requires a fresh one-time approval nonce; the persistent connection alone cannot authorize an upload.',
+    'Documentation: https://github.com/devshotcom/devshot/blob/main/docs/shopware-connector.md',
+  ].join('\n');
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const [command, importId] = argv;
+  const [command, value, extra] = argv;
+  if (['help', '--help', '-h'].includes(command)) {
+    process.stdout.write(`${shopwareImportHelp()}\n`);
+    return;
+  }
+  if (command === 'pair') return pair(value, extra);
   if (command === 'prepare') return prepare();
-  if (command === 'status') return status(importId);
-  if (command === 'apply') return applyImport(importId);
-  throw new Error(usage());
+  if (command === 'status') return status(value);
+  if (command === 'apply') return applyImport(value);
+  throw new Error(shopwareImportHelp());
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : '';

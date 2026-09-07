@@ -4,9 +4,19 @@ import {
   __test,
   isShopwareContentTable,
   safeZipEntry,
+  shopwareApprovalMessage,
+  shopwareImportHelp,
   shopwareImportsEndpoint,
   sqlLiteral,
 } from './devshot-shopware-import.mjs';
+
+test('documents the clickable approval flow in command help', () => {
+  const help = shopwareImportHelp();
+  assert.match(help, /pair <https-shop-url> <pairing-code>/);
+  assert.match(help, /clickable Shopware Administration approval links/);
+  assert.match(help, /fresh one-time approval nonce/);
+  assert.match(help, /docs\/shopware-connector\.md/);
+});
 
 test('builds the agent API endpoint from the injected Studio gateway base', () => {
   assert.equal(
@@ -14,6 +24,19 @@ test('builds the agent API endpoint from the injected Studio gateway base', () =
     'https://console.devshot.com/api/ai/v1/shopware/imports',
   );
   assert.equal(shopwareImportsEndpoint('not-a-url'), '');
+});
+
+test('prints a clickable backend link plus the exact fingerprint and one-time nonce', () => {
+  const text = shopwareApprovalMessage({
+    approvalUrl: 'https://shop.example/admin#/devshot/pairing/operation/abc',
+    displayFingerprint: 'AAAA:BBBB',
+    approvalNonce: 'nonce-123',
+    kind: 'operation',
+  });
+  assert.match(text, /https:\/\/shop\.example\/admin#\/devshot\/pairing\/operation\/abc/);
+  assert.match(text, /AAAA:BBBB/);
+  assert.match(text, /nonce-123/);
+  assert.match(text, /approve explicitly/);
 });
 
 test('imports storefront content but refuses personal, transactional, secret, and media tables', () => {
