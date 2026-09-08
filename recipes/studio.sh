@@ -76,6 +76,15 @@ install -d -o devshot -g devshot /var/www
 # chroot, so it is embedded VERBATIM here and a console test asserts the two
 # copies are identical (design-catalog-recipe.spec386.test.js).
 install -d -o devshot -g devshot /opt/devshot-design
+# A writable TMPDIR for the unprivileged build below. `/tmp` in the BAKE chroot
+# is root-owned, and nothing needed it before: npm and npx cache under HOME, and
+# create-next-app writes into its target. The shadcn CLI does not — it
+# `mkdtemp()`s in TMPDIR, so the first bake with a catalog died on
+# `EACCES: permission denied, mkdtemp '/tmp/shadcn-XXXXXX'` and took the whole
+# template publish down with it (measured 2026-09-08, rebake 34205262837).
+# Pointing TMPDIR at a directory devshot owns fixes every tool at once and
+# leaves the image's own /tmp semantics alone.
+install -d -o devshot -g devshot /home/devshot/.tmp
 # >>> design-catalog: build-design-catalog.mjs (verbatim copy — do not edit here)
 cat > /tmp/devshot-build-design-catalog.mjs <<'DEVSHOT_DESIGN_BUILDER_EOF'
 #!/usr/bin/env node
@@ -936,6 +945,9 @@ cat > /tmp/devshot-build-studio.sh <<'BUILDSTUDIO'
 set -eux
 export HOME=/home/devshot
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# /tmp is root-owned in the bake chroot; the shadcn CLI mkdtemp()s in TMPDIR.
+# Created devshot-owned by the root half above.
+export TMPDIR=/home/devshot/.tmp
 
 # create-next-app@latest at bake time → always the current starter. --yes accepts
 # defaults (TypeScript + ESLint + Tailwind + App Router); --use-npm pins the
@@ -1615,7 +1627,7 @@ rc-update add openvscode-server default
 
 # --- Cleanup ---------------------------------------------------------
 # npm/npx ran as devshot, so the package cache is under devshot's home now.
-rm -rf /home/devshot/.npm /home/devshot/.cache /root/.npm /tmp/* /var/cache/apk/*
+rm -rf /home/devshot/.npm /home/devshot/.cache /home/devshot/.tmp/* /root/.npm /tmp/* /var/cache/apk/*
 
 echo "=== Studio recipe complete ==="
 node --version
