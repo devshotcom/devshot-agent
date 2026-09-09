@@ -494,6 +494,38 @@ export function mainFile(item, files) {
   return block || files.find((f) => /\.(tsx|jsx|ts)$/.test(f.target)) || files[0];
 }
 
+// summarizeShape — what a block actually renders, from its own source, so ONE
+// `devshot-design list` is enough to shortlist. Spec 390: measured live, the
+// agent ran `list` four times, never `show`, never `code`, and adopted nothing.
+// From "Hero Video Dialog — A hero video dialog component." you cannot tell
+// whether a block fits your page; judging it meant a round trip per candidate,
+// which costs more than writing the section yourself. So the judgement material
+// moves into the listing.
+export function summarizeShape(content) {
+  const s = String(content || '');
+  const count = (re) => (s.match(re) || []).length;
+  const parts = [];
+  const h = count(/<h[1-6][\s/>]/g);
+  const p = count(/<p[\s/>]/g);
+  if (h || p) parts.push(`${h}h${p ? `+${p}p` : ''}`);
+  // A button is a <Button>, a <button>, or a link styled as a call to action.
+  const btn = count(/<Button[\s/>]/g) + count(/<button[\s/>]/g);
+  if (btn) parts.push(`${btn}btn`);
+  const img = count(/<Image[\s/>]/g) + count(/<img[\s/>]/g);
+  if (img) parts.push(`${img}img`);
+  const svg = count(/<svg[\s/>]/g);
+  if (svg && !img) parts.push(`${svg}svg`);
+  // Repeated data is what makes a section a grid: an array literal of objects,
+  // or a .map() over one.
+  const maps = count(/\.map\(/g);
+  if (maps) parts.push(`${maps}map`);
+  if (/from ['"]motion\/react['"]|from ['"]framer-motion['"]/.test(s)) parts.push('motion');
+  if (/'use client'|"use client"/.test(s)) parts.push('client');
+  const lines = s.split('\n').length;
+  parts.push(`${lines}L`);
+  return parts.join('\u00b7');
+}
+
 export function hashContent(s) {
   return crypto.createHash('sha256').update(String(s || '')).digest('hex').slice(0, 16);
 }
@@ -872,6 +904,7 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
         title: it.upstream.title || it.name, description: it.upstream.description || '',
         files: it.files.map((f) => f.target),
         main: main ? main.target : null,
+        shape: main ? summarizeShape(main.content) : '',
         exports: main ? extractExports(main.content) : [],
         dependencies: [...(it.upstream.dependencies || []).filter((d) => !isHeavyDependency(d)), ...(byId.get(it.source)?.extraDependencies || [])],
         registryDependencies: it.registryDependencies,
@@ -1147,6 +1180,7 @@ function cmdList(catalog, words) {
       process.stdout.write('  ' + pad(key, 28) + pad(g.length, 5) + 'e.g. ' + g.slice(0, 3).map((it) => it.id).join(', ') + '\n');
     }
     process.stdout.write('\nSearch: devshot-design list <category or words>   e.g. "devshot-design list hero", "devshot-design list pricing dark"\n');
+    process.stdout.write('Each hit prints its structure (headings, buttons, images, repeated lists, motion, length), so one listing is enough to shortlist.\n');
     return;
   }
   const terms = words.map((w) => w.toLowerCase());
@@ -1165,12 +1199,16 @@ function cmdList(catalog, words) {
   scored.sort((a, b) => b[0] - a[0] || a[1].id.localeCompare(b[1].id));
   if (!scored.length) { process.stdout.write('no items match "' + words.join(' ') + '"; try a category from "devshot-design list"\n'); return; }
   const shown = scored.slice(0, 60);
+  // Spec 390 — the shape column is what makes one listing enough to choose from:
+  // 2h+3p, 2btn, 1img, 4map, motion, 118L says more about whether a section fits
+  // than its marketing sentence does. Titles are truncated before it is dropped.
   for (const [, it] of shown) {
-    const desc = (it.description || '').replace(/\s+/g, ' ').slice(0, 90);
-    process.stdout.write(pad(it.id, 42) + pad(it.category, 13) + (it.title || '') + (desc ? ' — ' + desc : '') + '\n');
+    const desc = (it.description || it.title || '').replace(/\s+/g, ' ').slice(0, 44);
+    process.stdout.write(pad(it.id, 40) + pad(it.category, 12) + pad(String(it.shape || '').slice(0, 30), 32) + desc + '\n');
   }
   if (scored.length > shown.length) process.stdout.write('… ' + (scored.length - shown.length) + ' more; narrow the query\n');
-  process.stdout.write('\nNext: devshot-design show <id>, then devshot-design add <id>\n');
+  process.stdout.write('\nShape: h=headings p=paragraphs btn=buttons img=images map=repeated lists L=lines.\n');
+  process.stdout.write('Next: devshot-design code <id> to read one, then devshot-design add <id>.\n');
 }
 
 function importLine(it) {

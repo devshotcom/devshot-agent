@@ -140,6 +140,10 @@ set -eu
 export CI=1
 export BROWSER=none
 export EXPO_NO_TELEMETRY=1
+# Spec 396 — the offline posture the start command used to ask for with
+# `--offline`, which cannot be combined with `--lan`. As an environment switch
+# it stacks with any bind mode.
+export EXPO_OFFLINE=1
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=384}"
 export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-2}"
 cd /var/www/expo
@@ -153,9 +157,15 @@ if [ ! -x node_modules/.bin/expo ]; then
   exit 1
 fi
 
-# --lan binds beyond loopback so the VM proxy can reach Metro. --offline avoids
-# version/network probes on a claimed VM, and two workers cap peak memory.
-exec ./node_modules/.bin/expo start --web --lan --offline --max-workers 2
+# Spec 396 — measured on a live expo lease 2026-09-09: `--lan --offline` is
+# refused by the Expo CLI outright, "Specify at most one of: --offline, --host,
+# --tunnel, --lan, --localhost". Metro never bound, supervise-daemon respawned
+# it every ~8s forever, and the session sat on "starting app on :8081" until the
+# lease expired. Both intents survive without the conflict: --lan stays, because
+# binding beyond loopback is what lets the VM proxy reach Metro, and the offline
+# posture moves to EXPO_OFFLINE above, which the CLI reads as the same switch.
+# Two workers cap peak memory. Proven on the guest: HTTP 200, 42 KB of app.
+exec ./node_modules/.bin/expo start --web --lan --max-workers 2
 START_EXPO
 chmod 0755 /usr/local/bin/start-expo
 

@@ -90,6 +90,7 @@ function cmdList(catalog, words) {
       process.stdout.write('  ' + pad(key, 28) + pad(g.length, 5) + 'e.g. ' + g.slice(0, 3).map((it) => it.id).join(', ') + '\n');
     }
     process.stdout.write('\nSearch: devshot-design list <category or words>   e.g. "devshot-design list hero", "devshot-design list pricing dark"\n');
+    process.stdout.write('Each hit prints its structure (headings, buttons, images, repeated lists, motion, length), so one listing is enough to shortlist.\n');
     return;
   }
   const terms = words.map((w) => w.toLowerCase());
@@ -108,12 +109,16 @@ function cmdList(catalog, words) {
   scored.sort((a, b) => b[0] - a[0] || a[1].id.localeCompare(b[1].id));
   if (!scored.length) { process.stdout.write('no items match "' + words.join(' ') + '"; try a category from "devshot-design list"\n'); return; }
   const shown = scored.slice(0, 60);
+  // Spec 390 — the shape column is what makes one listing enough to choose from:
+  // 2h+3p, 2btn, 1img, 4map, motion, 118L says more about whether a section fits
+  // than its marketing sentence does. Titles are truncated before it is dropped.
   for (const [, it] of shown) {
-    const desc = (it.description || '').replace(/\s+/g, ' ').slice(0, 90);
-    process.stdout.write(pad(it.id, 42) + pad(it.category, 13) + (it.title || '') + (desc ? ' — ' + desc : '') + '\n');
+    const desc = (it.description || it.title || '').replace(/\s+/g, ' ').slice(0, 44);
+    process.stdout.write(pad(it.id, 40) + pad(it.category, 12) + pad(String(it.shape || '').slice(0, 30), 32) + desc + '\n');
   }
   if (scored.length > shown.length) process.stdout.write('… ' + (scored.length - shown.length) + ' more; narrow the query\n');
-  process.stdout.write('\nNext: devshot-design show <id>, then devshot-design add <id>\n');
+  process.stdout.write('\nShape: h=headings p=paragraphs btn=buttons img=images map=repeated lists L=lines.\n');
+  process.stdout.write('Next: devshot-design code <id> to read one, then devshot-design add <id>.\n');
 }
 
 function importLine(it) {

@@ -405,6 +405,38 @@ export function mainFile(item, files) {
   return block || files.find((f) => /\.(tsx|jsx|ts)$/.test(f.target)) || files[0];
 }
 
+// summarizeShape — what a block actually renders, from its own source, so ONE
+// `devshot-design list` is enough to shortlist. Spec 390: measured live, the
+// agent ran `list` four times, never `show`, never `code`, and adopted nothing.
+// From "Hero Video Dialog — A hero video dialog component." you cannot tell
+// whether a block fits your page; judging it meant a round trip per candidate,
+// which costs more than writing the section yourself. So the judgement material
+// moves into the listing.
+export function summarizeShape(content) {
+  const s = String(content || '');
+  const count = (re) => (s.match(re) || []).length;
+  const parts = [];
+  const h = count(/<h[1-6][\s/>]/g);
+  const p = count(/<p[\s/>]/g);
+  if (h || p) parts.push(`${h}h${p ? `+${p}p` : ''}`);
+  // A button is a <Button>, a <button>, or a link styled as a call to action.
+  const btn = count(/<Button[\s/>]/g) + count(/<button[\s/>]/g);
+  if (btn) parts.push(`${btn}btn`);
+  const img = count(/<Image[\s/>]/g) + count(/<img[\s/>]/g);
+  if (img) parts.push(`${img}img`);
+  const svg = count(/<svg[\s/>]/g);
+  if (svg && !img) parts.push(`${svg}svg`);
+  // Repeated data is what makes a section a grid: an array literal of objects,
+  // or a .map() over one.
+  const maps = count(/\.map\(/g);
+  if (maps) parts.push(`${maps}map`);
+  if (/from ['"]motion\/react['"]|from ['"]framer-motion['"]/.test(s)) parts.push('motion');
+  if (/'use client'|"use client"/.test(s)) parts.push('client');
+  const lines = s.split('\n').length;
+  parts.push(`${lines}L`);
+  return parts.join('\u00b7');
+}
+
 export function hashContent(s) {
   return crypto.createHash('sha256').update(String(s || '')).digest('hex').slice(0, 16);
 }
@@ -783,6 +815,7 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
         title: it.upstream.title || it.name, description: it.upstream.description || '',
         files: it.files.map((f) => f.target),
         main: main ? main.target : null,
+        shape: main ? summarizeShape(main.content) : '',
         exports: main ? extractExports(main.content) : [],
         dependencies: [...(it.upstream.dependencies || []).filter((d) => !isHeavyDependency(d)), ...(byId.get(it.source)?.extraDependencies || [])],
         registryDependencies: it.registryDependencies,
