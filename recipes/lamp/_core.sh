@@ -141,6 +141,25 @@ exit "$rc"
 LOWMEM
 chmod 0755 /usr/local/sbin/devshot-shopware-lowmem
 
+# The wrapper below reaches this helper through `sudo -n`, and until now that
+# rode on the base image's blanket grant for every command. A claimed
+# Studio VM does not have it: measured 2026-09-10 on pool-dewy-merging-thistle,
+# `sudo -n true` answers "sudo: a password is required" and `id` shows devshot
+# in no group but its own. Every Shopware maintenance command therefore died —
+# plugin:install, plugin:activate, cache:clear, theme:compile, dal:refresh:index
+# — and the agent, seeing only that sudo line, concluded bin/console itself had
+# been replaced and stopped. So the recipe grants the ONE rule it depends on,
+# scoped to this root-owned helper on its absolute path and nothing else.
+install -d -m 0750 /etc/sudoers.d
+cat > /etc/sudoers.d/devshot-shopware-lowmem <<'SUDOERS'
+devshot ALL=(root) NOPASSWD: /usr/local/sbin/devshot-shopware-lowmem
+SUDOERS
+chmod 0440 /etc/sudoers.d/devshot-shopware-lowmem
+# A malformed drop-in disables sudo entirely, so refuse to bake one.
+if command -v visudo >/dev/null 2>&1; then
+  visudo -cf /etc/sudoers.d/devshot-shopware-lowmem >/dev/null
+fi
+
 cat > /usr/local/bin/php <<'PHPWRAP'
 #!/bin/sh
 set -eu
@@ -186,6 +205,12 @@ case "$console_command" in
             ;;
         esac
       done
+      if ! sudo -n true 2>/dev/null; then
+        echo "Shopware maintenance needs passwordless sudo for /usr/local/sbin/devshot-shopware-lowmem, and this VM has none." >&2
+        echo "It stops php-fpm for the duration so the CLI has RAM; running without it is what used to OOM the machine." >&2
+        echo "bin/console is intact — check /etc/sudoers.d/devshot-shopware-lowmem on this guest." >&2
+        exit 77
+      fi
       exec sudo -n /usr/local/sbin/devshot-shopware-lowmem "$@"
     fi
     ;;
