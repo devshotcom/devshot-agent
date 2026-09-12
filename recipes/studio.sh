@@ -1430,9 +1430,22 @@ boot_phase "xenstore vm-name resolved after ${i}s: ${VM_NAME:-<none>}"
 # missing — npm ci with a lockfile (fast, deterministic), else npm install.
 # Output streams to $LOG and is announced via boot_phase (spec 089) so a cold
 # install is loudly visible, never a silent stall.
-if [ ! -x node_modules/.bin/next ]; then
-    boot_phase "deps MISSING (node_modules/.bin/next absent) — npm install starting (cold boot will be slow)"
-    echo "Studio deps missing (node_modules/.bin/next absent) — installing before dev server…"
+# Spec 413 — "the launcher symlink resolves" is not "the package is there".
+# Measured 2026-09-12 on project a7356ba7: node_modules/next existed as an EMPTY
+# directory. The agent found it by hand — "The `next` package directory is empty
+# — a broken install" — and spent a turn reinstalling while the preview stayed
+# dead. A half-written package (an install killed by memory pressure, a partial
+# restore) survives an -x test whenever .bin/next still resolves, so ask the
+# package itself, not only its symlink.
+deps_broken() {
+    [ -x node_modules/.bin/next ] || return 0
+    [ -f node_modules/next/package.json ] || return 0
+    [ -d node_modules/next/dist ] || return 0
+    return 1
+}
+if deps_broken; then
+    boot_phase "deps MISSING or INCOMPLETE (next package unusable) — npm install starting (cold boot will be slow)"
+    echo "Studio deps unusable (next package missing or incomplete) — installing before dev server…"
     if [ -f package-lock.json ]; then
         npm ci --prefer-offline --no-audit --no-fund 2>&1 | tee -a "$LOG" \
             || npm install --prefer-offline --no-audit --no-fund 2>&1 | tee -a "$LOG"
@@ -1443,6 +1456,42 @@ if [ ! -x node_modules/.bin/next ]; then
 else
     boot_phase "deps present — skipping install"
 fi
+
+# Spec 413 — take :$PORT back before the supervised launch. `exec npm run dev`
+# forks `next dev`, which forks `next-server`: supervise-daemon kills the pid it
+# tracks and the grandchild can survive, still holding the port. Every respawn
+# then dies on EADDRINUSE, every 3s, forever (respawn_max=0) — a loop that never
+# serves while the ORPHAN keeps answering, so the page looks alive and the
+# service reports dead. Whatever holds this port while the supervised service is
+# starting is by definition a leftover of a previous instance.
+port_pids() {
+    if command -v fuser >/dev/null 2>&1; then
+        fuser -n tcp "$PORT" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true
+    else
+        netstat -tlnp 2>/dev/null \
+            | awk -v pat=":$PORT\$" '$4 ~ pat { split($NF, a, "/"); if (a[1] ~ /^[0-9]+$/) print a[1] }' \
+            | sort -u
+    fi
+}
+reclaim_port() {
+    _held="$(port_pids)"
+    [ -n "$_held" ] || return 0
+    boot_phase "port $PORT held by pid(s) $(echo $_held | tr '\n' ' ')— reclaiming before launch"
+    kill -TERM $_held 2>/dev/null || true
+    _i=0
+    while [ "$_i" -lt 10 ]; do
+        [ -z "$(port_pids)" ] && { boot_phase "port $PORT released"; return 0; }
+        _i=$((_i + 1))
+        sleep 1
+    done
+    boot_phase "port $PORT still held after 10s — SIGKILL"
+    kill -KILL $_held 2>/dev/null || true
+    sleep 1
+}
+# Only the SUPERVISED path reclaims. `start-studio -d` is a manual start (the
+# agent restarting the server by hand); there a running healthy server must win
+# over the newcomer rather than be killed by it.
+[ "$detached" = "1" ] || reclaim_port
 
 # Bind 0.0.0.0 so the console public proxy can reach it; pass through the
 # project's dev script (Turbopack/webpack) with host+port.
