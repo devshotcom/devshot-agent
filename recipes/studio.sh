@@ -1441,6 +1441,12 @@ deps_broken() {
     [ -x node_modules/.bin/next ] || return 0
     [ -f node_modules/next/package.json ] || return 0
     [ -d node_modules/next/dist ] || return 0
+    # Spec 417 — a directory listing is still not the package. Measured
+    # 2026-09-13 on project aef9d277: .bin/next, package.json and dist/ all
+    # present, dist/pages/_error missing after a restore's npm install died on a
+    # registry timeout — and the three checks above said "fine". Ask Node's
+    # resolver, which is what next dev will ask a second later.
+    node -e "require.resolve('next/dist/pages/_error');require.resolve('next/dist/bin/next')" >/dev/null 2>&1 || return 0
     return 1
 }
 if deps_broken; then
