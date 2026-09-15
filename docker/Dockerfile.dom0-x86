@@ -31,13 +31,24 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libyajl-dev libfdt-dev libssl-dev \
     git wget bc iasl pkg-config libncurses-dev
 
+# Spec 426/427 — the hypervisor version, named once per definer.
+# scripts/xen-currency.mjs reads it and fails nightly when this branch
+# ships a newer point release; xen-pin.test.js keeps all four in step.
+ARG XEN_RELEASE=RELEASE-4.17.7
+
 WORKDIR /build
 
+# Spec 427 — the cache mount OUTLIVES the build, so "is there a checkout?" kept
+# compiling the PREVIOUS pin after the tag moved: the RUN layer is invalidated
+# by the edit, finds the old source tree still mounted, and skips the clone.
+# Ask WHICH release is checked out, not whether one is.
 RUN --mount=type=cache,target=/build/xen,id=xen-src-x86 \
     J=$(nproc) && M=$(awk '/MemTotal/{print int($2/786432)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
-    if [ ! -d /build/xen/.git ]; then \
-        git clone --depth 1 --branch RELEASE-4.17.5 \
-            https://xenbits.xen.org/git-http/xen.git /build/xen; \
+    if [ "$(cat /build/xen/.devshot-pin 2>/dev/null)" != "$XEN_RELEASE" ]; then \
+        find /build/xen -mindepth 1 -delete 2>/dev/null || true; \
+        git clone --depth 1 --branch "$XEN_RELEASE" \
+            https://xenbits.xen.org/git-http/xen.git /build/xen && \
+        echo "$XEN_RELEASE" > /build/xen/.devshot-pin; \
     fi && \
     cd /build/xen && \
     if [ ! -f xen/.config ]; then make -C xen XEN_TARGET_ARCH=x86_64 defconfig; fi && \
