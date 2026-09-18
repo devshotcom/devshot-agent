@@ -1060,6 +1060,94 @@ npm install --save motion
 node /tmp/devshot-build-design-catalog.mjs --project /var/www/studio --out /opt/devshot-design --min-items 300
 test -f /opt/devshot-design/catalog.json || { echo "FATAL: design catalog missing after build" >&2; exit 1; }
 
+# --- The root layout, with a font this machine can actually get (spec 438) ---
+# create-next-app's own layout.tsx loads Geist through `next/font/google`, which
+# FETCHES the font from fonts.googleapis.com while the app is compiled. A Studio
+# VM is `shell-only` (lib/session.js): tunnel egress and nothing else. So:
+#
+#   - `next dev` warns and falls back, which is why the preview looks fine and
+#     why nobody ever noticed that the font has never once loaded here;
+#   - `next build` treats the same failed fetch as a hard error, which is why
+#     `Publish this workspace` ended in `build_failed` for every Next project
+#     that still had this layout — measured 2026-09-17, and the reason spec 422
+#     found 162 workspace sites and not one publish that had ever succeeded.
+#
+# `geist` (SIL OFL, no dependencies) is the same typeface as a `next/font/local`
+# import of a woff2 that ships inside the package: nothing is fetched, the CSS
+# variables keep the names the starter's globals.css already uses, and the font
+# renders for the first time. The rule the gate below enforces: NOTHING in this
+# template may reach the network to compile.
+#
+# Written HERE, after create-next-app, the shadcn preset and the design catalog
+# have all had their turn at this tree, so the layout that ships is this one
+# whatever any of them decides to write next.
+npm install --save geist
+cat > app/layout.tsx <<'ROOTLAYOUT'
+import type { Metadata } from "next";
+import { GeistSans } from "geist/font/sans";
+import { GeistMono } from "geist/font/mono";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Your app",
+  description: "Built with DevShot Studio.",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`}>
+      <body className="antialiased">{children}</body>
+    </html>
+  );
+}
+ROOTLAYOUT
+
+# --- Nothing in this template may compile over the network (spec 438) ------
+# The one import that did was create-next-app's own, and it was enough to make
+# `Publish this workspace` impossible on every Next project in production. This
+# gate is here rather than in a test because the template is assembled from
+# upstream at bake time: create-next-app, the shadcn preset and the design
+# catalog all write files into this tree, and any of them may reintroduce it.
+for FONTDIR in app components lib; do
+  if [ -d "$FONTDIR" ] && grep -rl "next/font/google" "$FONTDIR" >/dev/null 2>&1; then
+    echo "FATAL: $FONTDIR imports next/font/google — a Studio VM has no route to fonts.googleapis.com, so this breaks every publish (spec 438)" >&2
+    grep -rn "next/font/google" "$FONTDIR" >&2
+    exit 1
+  fi
+done
+
+# --- Prove the static export this template promises (spec 438) -------------
+# Spec 422 gave the `next` stack a publish contract — `npm run build` → `out/`
+# under output: 'export' — and nothing ever ran it. The contract was wrong for
+# 162 sites for as long as it existed, so the bake now runs the publish build
+# the Console will run and fails if it does not leave an out/index.html behind.
+# Same config shape as publish-commands.js writes, restored on the way out: what
+# ships is the template's own next.config.mjs.
+rm -rf out .next-devshot-publish
+cp next.config.mjs next.config.devshot-publish-base.mjs
+cat > next.config.mjs <<'PUBLISHPROOF'
+import base from './next.config.devshot-publish-base.mjs';
+
+const own = base && typeof base === 'object' ? base : {};
+
+export default {
+  ...own,
+  output: 'export',
+  distDir: '.next-devshot-publish',
+  assetPrefix: undefined,
+  images: { ...(own.images || {}), unoptimized: true, path: undefined },
+};
+PUBLISHPROOF
+npm run build
+test -f out/index.html || { echo "FATAL: the publish build produced no out/index.html — the next stack's publish contract (spec 422) cannot be met by this template" >&2; ls -la out 2>&1 >&2; exit 1; }
+echo "Studio template publish verified: out/index.html exists after an output: 'export' build"
+rm -rf out .next-devshot-publish
+mv -f next.config.devshot-publish-base.mjs next.config.mjs
+
 # Warm .next so the first request after boot compiles fast; dev still recompiles.
 # Best-effort (|| true): a build miss is a COMPILE concern, not a dependency one
 # (dev recompiles on demand), so it must not gate the dep-completeness check below.
