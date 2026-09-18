@@ -1127,7 +1127,7 @@ done
 # the Console will run and fails if it does not leave an out/index.html behind.
 # Same config shape as publish-commands.js writes, restored on the way out: what
 # ships is the template's own next.config.mjs.
-rm -rf out .next-devshot-publish
+rm -rf out
 cp next.config.mjs next.config.devshot-publish-base.mjs
 cat > next.config.mjs <<'PUBLISHPROOF'
 import base from './next.config.devshot-publish-base.mjs';
@@ -1137,7 +1137,8 @@ const own = base && typeof base === 'object' ? base : {};
 export default {
   ...own,
   output: 'export',
-  distDir: '.next-devshot-publish',
+  // Spec 445 — no distDir: with output: 'export' it names where the EXPORT
+  // goes, and setting it is exactly what kept out/ from ever appearing.
   assetPrefix: undefined,
   images: { ...(own.images || {}), unoptimized: true, path: undefined },
 };
@@ -1145,7 +1146,7 @@ PUBLISHPROOF
 npm run build
 test -f out/index.html || { echo "FATAL: the publish build produced no out/index.html — the next stack's publish contract (spec 422) cannot be met by this template" >&2; ls -la out 2>&1 >&2; exit 1; }
 echo "Studio template publish verified: out/index.html exists after an output: 'export' build"
-rm -rf out .next-devshot-publish
+rm -rf out
 mv -f next.config.devshot-publish-base.mjs next.config.mjs
 
 # Warm .next so the first request after boot compiles fast; dev still recompiles.
