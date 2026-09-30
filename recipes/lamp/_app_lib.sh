@@ -1201,6 +1201,15 @@ write_nginx_vhost() {
   host_override=""
   [ "$app" = "shopware" ] && host_override='fastcgi_param HTTP_HOST "localhost";'
 
+  # Spec 448 — <project>/.devshot/ holds DevShot's own files, among them the
+  # governed browser's durable profile (.devshot/browser-profile/: Cookies,
+  # Local Storage — a person's logged-in sessions). WordPress's doc root IS
+  # the project directory, so without this nginx served those files to anyone
+  # holding the preview URL. The exact match covers the bare directory; `^~`
+  # stops the regex locations (\.php$, /\.ht) from ever seeing the tree, so no
+  # PHP front controller or try_files fallback can serve below it. Shopware
+  # and TYPO3 serve <project>/public and get the same block from this one
+  # template.
   cat > /etc/nginx/http.d/${app}.conf <<NGINX
 server {
   listen ${port}${default_marker};
@@ -1208,6 +1217,8 @@ server {
   root ${doc_root};
   index index.php;
   client_max_body_size ${max_body};
+  location = /.devshot { deny all; return 404; }
+  location ^~ /.devshot/ { deny all; return 404; }
   location / { try_files \$uri \$uri/ /index.php\$is_args\$args; }
   location ~ \\.php\$ {
     fastcgi_pass unix:/run/php-fpm83/php-fpm.sock;
