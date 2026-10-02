@@ -574,43 +574,15 @@ EXT
 
 chown -R devshot:devshot /home/devshot
 
-install -o devshot -g devshot -m 0644 /dev/null /var/log/openvscode-server.log
-
-cat > /etc/init.d/openvscode-server <<'SVC'
-#!/sbin/openrc-run
-
-name="openvscode-server"
-description="VSCode in the browser (openvscode-server) — DevShot Editor"
-# Stop a single editor process from expanding until the kernel has no room for
-# Shopware maintenance. 256 MiB old-space is ample for the web editor; file and
-# terminal operations keep working, while the 1536 MiB VM retains a hard budget.
-export NODE_OPTIONS="--max-old-space-size=256"
-# OPENVSCODE_DEFAULT_FOLDER is populated per-variant by _app_lib's
-# install_<app> step; falls back to /home/devshot/projects when
-# no app has claimed the editor (lamp-shared boot only — variants
-# always set it).
-DEFAULT_FOLDER="$(cat /etc/openvscode-default-folder 2>/dev/null || echo /home/devshot/projects)"
-command="/usr/bin/node"
-command_args="/opt/openvscode-server/out/server-main.js \
-  --host 0.0.0.0 --port 8080 \
-  --without-connection-token \
-  --disable-telemetry \
-  --disable-workspace-trust \
-  --user-data-dir /home/devshot/.openvscode-server/data \
-  --server-data-dir /home/devshot/.openvscode-server \
-  --default-folder $DEFAULT_FOLDER"
-command_user="devshot:devshot"
-command_background=true
-pidfile="/run/openvscode-server.pid"
-output_log="/var/log/openvscode-server.log"
-error_log="/var/log/openvscode-server.log"
-
-depend() {
-    need net
-    after firewall
-}
-SVC
-chmod +x /etc/init.d/openvscode-server
+# The shared installer (copied into the guest base image) writes the tokened
+# openvscode-server service; it is never started without a connection token.
+# Each variant points the editor at its own app via /etc/openvscode-default-folder
+# (_app_lib.sh set_editor_workspace); /home/devshot/projects is the lamp-shared
+# default. --max-old-space-mb stops a single editor process from expanding
+# until the kernel has no room for Shopware maintenance: 256 MiB old-space is
+# ample for the web editor, file and terminal operations keep working, and the
+# 1536 MiB VM retains a hard budget.
+/usr/local/libexec/devshot/install-openvscode-service.sh --default-folder /home/devshot/projects --max-old-space-mb 256
 
 # --- OpenRC services auto-start on boot ------------------------------
 # Only the DEFAULT php-fpm (8.3) boots — running all three pools spins up
@@ -620,7 +592,6 @@ chmod +x /etc/init.d/openvscode-server
 rc-update add mariadb default
 rc-update add php-fpm83 default
 rc-update add nginx default
-rc-update add openvscode-server default
 
 # --- devshot-perms: webroot writable to devshot ON EVERY BOOT (spec 110) ----
 # The app kernel (Shopware) AND the agent both run as devshot. If any project

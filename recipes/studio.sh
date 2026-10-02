@@ -1772,40 +1772,12 @@ su devshot -c /tmp/devshot-oc-settings.sh
 rm -f /tmp/devshot-oc-settings.sh
 
 # The editor opens the studio project; the agent and editor share these files.
-echo /var/www/studio > /etc/openvscode-default-folder
 # No chown: the project tree (built above) and the editor's user-data dir are
 # already devshot-owned, and vm-exec runs as devshot at runtime (see
 # handleVMExec) — so devshot (editor + agent) owns everything it touches.
-install -o devshot -g devshot -m 0644 /dev/null /var/log/openvscode-server.log
-
-cat > /etc/init.d/openvscode-server <<'SVC'
-#!/sbin/openrc-run
-
-name="openvscode-server"
-description="VSCode in the browser (openvscode-server) — DevShot Studio editor"
-DEFAULT_FOLDER="$(cat /etc/openvscode-default-folder 2>/dev/null || echo /var/www/studio)"
-command="/usr/bin/node"
-command_args="/opt/openvscode-server/out/server-main.js \
-  --host 0.0.0.0 --port 8080 \
-  --without-connection-token \
-  --disable-telemetry \
-  --disable-workspace-trust \
-  --user-data-dir /home/devshot/.openvscode-server/data \
-  --server-data-dir /home/devshot/.openvscode-server \
-  --default-folder $DEFAULT_FOLDER"
-command_user="devshot:devshot"
-command_background=true
-pidfile="/run/openvscode-server.pid"
-output_log="/var/log/openvscode-server.log"
-error_log="/var/log/openvscode-server.log"
-
-depend() {
-    need net
-    after firewall
-}
-SVC
-chmod +x /etc/init.d/openvscode-server
-rc-update add openvscode-server default
+# The shared installer (copied into the guest base image) writes the tokened
+# openvscode-server service; it is never started without a connection token.
+/usr/local/libexec/devshot/install-openvscode-service.sh --default-folder /var/www/studio
 
 # --- Cleanup ---------------------------------------------------------
 # npm/npx ran as devshot, so the package cache is under devshot's home now.

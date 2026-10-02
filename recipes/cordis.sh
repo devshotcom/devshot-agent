@@ -725,36 +725,9 @@ cat > /home/devshot/.openvscode-server/data/User/settings.json <<'SETTINGS'
 SETTINGS
 chown devshot:devshot /home/devshot/.openvscode-server/data/User/settings.json
 
-echo /var/www/cordis > /etc/openvscode-default-folder
-install -o devshot -g devshot -m 0644 /dev/null /var/log/openvscode-server.log
-cat > /etc/init.d/openvscode-server <<'SVC'
-#!/sbin/openrc-run
-
-name="openvscode-server"
-description="VSCode in the browser — DevShot Cordis editor"
-DEFAULT_FOLDER="$(cat /etc/openvscode-default-folder 2>/dev/null || echo /var/www/cordis)"
-command="/usr/bin/node"
-command_args="/opt/openvscode-server/out/server-main.js \
-  --host 0.0.0.0 --port 8080 \
-  --without-connection-token \
-  --disable-telemetry \
-  --disable-workspace-trust \
-  --user-data-dir /home/devshot/.openvscode-server/data \
-  --server-data-dir /home/devshot/.openvscode-server \
-  --default-folder $DEFAULT_FOLDER"
-command_user="devshot:devshot"
-command_background=true
-pidfile="/run/openvscode-server.pid"
-output_log="/var/log/openvscode-server.log"
-error_log="/var/log/openvscode-server.log"
-
-depend() {
-  need net
-  after firewall
-}
-SVC
-chmod +x /etc/init.d/openvscode-server
-rc-update add openvscode-server default
+# The shared installer (copied into the guest base image) writes the tokened
+# openvscode-server service; it is never started without a connection token.
+/usr/local/libexec/devshot/install-openvscode-service.sh --default-folder /var/www/cordis
 
 # /tmp/xenstore is a live QGA mount during image baking; never sweep /tmp as a
 # glob. Every recipe-owned temporary file was removed at its point of use.
