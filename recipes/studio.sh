@@ -85,20 +85,280 @@ install -d -o devshot -g devshot /opt/devshot-design
 # Pointing TMPDIR at a directory devshot owns fixes every tool at once and
 # leaves the image's own /tmp semantics alone.
 install -d -o devshot -g devshot /home/devshot/.tmp
+install -d /usr/local/lib/devshot-design
+# >>> design-catalog: install-design-items.cjs (verbatim copy — do not edit here)
+cat > /usr/local/lib/devshot-design/install-design-items.cjs <<'DEVSHOT_DESIGN_INSTALLER_EOF'
+// Shared by the template type-check gate and devshot-design add. Registry
+// payloads are already normalized at bake time; installing them is local IO.
+// Never invoke shadcn/npm here: shadcn consults its remote colors registry even
+// for a local item, which is unavailable inside a network-locked Studio VM.
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+
+function contained(root, target) {
+  const relative = path.relative(root, target);
+  return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function localPath(root, relative) {
+  if (typeof relative !== 'string' || !relative || path.isAbsolute(relative) || relative.includes('\\') || relative.split('/').includes('..')) {
+    throw new Error('unsafe local target: ' + relative);
+  }
+  const rootPath = fs.realpathSync(root);
+  const target = path.resolve(rootPath, relative);
+  if (!contained(rootPath, target)) throw new Error('target escapes project: ' + relative);
+  let existing = target;
+  while (!fs.existsSync(existing)) existing = path.dirname(existing);
+  if (!contained(rootPath, fs.realpathSync(existing))) throw new Error('target symlink escapes project: ' + relative);
+  return target;
+}
+
+function packageName(spec) {
+  const match = String(spec).match(/^(@[^/\s]+\/[^@\s]+|[^@/\s]+)(?:@.*)?$/);
+  if (!match) throw new Error('unsupported npm dependency: ' + spec);
+  return match[1];
+}
+
+function kebab(key) { return key.replace(/[A-Z]/g, (letter) => '-' + letter.toLowerCase()); }
+
+function cssObject(value, indent) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('registry CSS must be an object');
+  const prefix = ' '.repeat(indent || 0);
+  return Object.entries(value).map(([key, val]) => {
+    if (val !== null && typeof val === 'object' && !Array.isArray(val)) return prefix + key + ' {\n' + cssObject(val, (indent || 0) + 2) + prefix + '}\n';
+    if (key.startsWith('@') && val === '') return prefix + key + ';\n';
+    if (Array.isArray(val) || val === null || typeof val === 'object') throw new Error('unsupported CSS value for ' + key);
+    return prefix + kebab(key) + ': ' + String(val) + ';\n';
+  }).join('');
+}
+
+const THEME_PREFIXES = {
+  colors: 'color', fontFamily: 'font', fontSize: 'text', fontWeight: 'font-weight',
+  lineHeight: 'leading', letterSpacing: 'tracking', borderRadius: 'radius',
+  spacing: 'spacing', screens: 'breakpoint', boxShadow: 'shadow',
+  animation: 'animate', backgroundImage: 'background-image', transitionTimingFunction: 'ease',
+};
+
+function themeDeclarations(group, value, names) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return Object.entries(value).map(([key, val]) => themeDeclarations(group, val, names.concat(key === 'DEFAULT' ? [] : [key]))).join('');
+  const rendered = Array.isArray(value) && group === 'fontFamily' ? value.join(', ') : value;
+  if (typeof rendered !== 'string' && typeof rendered !== 'number') throw new Error('unsupported Tailwind value: ' + group + '.' + names.join('.'));
+  return '  --' + THEME_PREFIXES[group] + '-' + names.join('-') + ': ' + rendered + ';\n';
+}
+
+function registryStyles(registry) {
+  let css = '';
+  for (const [mode, vars] of Object.entries(registry.cssVars || {})) {
+    const selectors = { theme: '@theme inline', light: ':root', dark: '.dark' };
+    if (!selectors[mode]) throw new Error('unsupported cssVars mode: ' + mode);
+    const declarations = Object.fromEntries(Object.entries(vars).map(([key, val]) => [key.startsWith('--') ? key : '--' + key, val]));
+    css += selectors[mode] + ' {\n' + cssObject(declarations, 2) + '}\n';
+  }
+  if (registry.css) css += cssObject(registry.css, 0);
+  const config = registry.tailwind && registry.tailwind.config;
+  if (config) {
+    const unsupported = Object.keys(config).filter((key) => key !== 'theme');
+    const extraTheme = Object.keys(config.theme || {}).filter((key) => key !== 'extend');
+    if (unsupported.length || extraTheme.length) throw new Error('unsupported Tailwind v3 configuration: ' + unsupported.concat(extraTheme).join(', '));
+    let theme = '';
+    for (const [group, value] of Object.entries((config.theme || {}).extend || {})) {
+      if (group === 'keyframes') {
+        for (const [name, frames] of Object.entries(value)) css += '@keyframes ' + name + ' {\n' + cssObject(frames, 2) + '}\n';
+      } else if (THEME_PREFIXES[group]) theme += themeDeclarations(group, value, []);
+      else throw new Error('unsupported Tailwind v3 theme group: ' + group);
+    }
+    if (theme) css += '@theme inline {\n' + theme + '}\n';
+  }
+  return css;
+}
+
+function writeLocal(file, content) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.devshot-' + crypto.randomUUID();
+  const descriptor = fs.openSync(tmp, 'wx', 0o644);
+  try { fs.writeFileSync(descriptor, content); fs.renameSync(tmp, file); }
+  finally { fs.closeSync(descriptor); if (fs.existsSync(tmp)) fs.unlinkSync(tmp); }
+}
+
+function installRegistryItems({ catalogDir, project, registryFiles, checkPackages = true }) {
+  const root = fs.realpathSync(catalogDir);
+  const records = new Map();
+  const visiting = new Set();
+  function read(file) {
+    const absolute = fs.realpathSync(path.resolve(root, file));
+    if (!contained(root, absolute)) throw new Error('registry dependency is not local to the catalog: ' + file);
+    if (records.has(absolute) || visiting.has(absolute)) return;
+    visiting.add(absolute);
+    const registry = JSON.parse(fs.readFileSync(absolute, 'utf8'));
+    for (const dependency of registry.registryDependencies || []) {
+      if (typeof dependency !== 'string' || /^https?:|^@/.test(dependency)) throw new Error('registry dependency is not a baked local path: ' + dependency);
+      read(dependency);
+    }
+    visiting.delete(absolute);
+    records.set(absolute, { registry, id: path.relative(path.join(root, 'r'), absolute).replace(/\\/g, '/').replace(/\.json$/, '') });
+  }
+  registryFiles.forEach(read);
+  const writes = new Map();
+  const packages = new Set();
+  const styles = [];
+  for (const { registry, id } of records.values()) {
+    for (const dependency of (registry.dependencies || []).concat(registry.devDependencies || [])) packages.add(packageName(dependency));
+    for (const file of registry.files || []) {
+      if (typeof file.content !== 'string') throw new Error('missing baked source content: ' + id + '/' + file.target);
+      const target = localPath(project, file.target);
+      if (writes.has(target) && writes.get(target) !== file.content) throw new Error('conflicting registry sources for ' + file.target);
+      writes.set(target, file.content);
+    }
+    const css = registryStyles(registry);
+    if (css) styles.push({ id, css });
+  }
+  if (checkPackages) {
+    const missing = [...packages].filter((name) => !fs.existsSync(path.join(project, 'node_modules', name, 'package.json')));
+    if (missing.length) throw new Error('required npm packages are not installed: ' + missing.join(', ') + '. Restore the baked node_modules or install these packages explicitly, then retry; no project files were changed.');
+  }
+  if (styles.length) {
+    const config = JSON.parse(fs.readFileSync(path.join(project, 'components.json'), 'utf8'));
+    const cssFile = localPath(project, config.tailwind && config.tailwind.css);
+    let content = fs.readFileSync(cssFile, 'utf8');
+    for (const { id, css } of styles) {
+      const start = '/* devshot-design:' + id + ':start */';
+      const end = '/* devshot-design:' + id + ':end */';
+      const block = start + '\n' + css + end + '\n';
+      const begin = content.indexOf(start);
+      const finish = content.indexOf(end, begin);
+      if (begin !== -1 && finish === -1) throw new Error('incomplete CSS marker for ' + id);
+      content = begin === -1 ? content + '\n' + block : content.slice(0, begin) + block + content.slice(finish + end.length).replace(/^\n/, '');
+    }
+    writes.set(cssFile, content);
+  }
+  for (const [file, content] of writes) writeLocal(file, content);
+  return { records: [...records.values()], files: [...writes.keys()].map((file) => path.relative(fs.realpathSync(project), file)), packages: [...packages] };
+}
+
+module.exports = { contained, localPath, packageName, registryStyles, writeLocal, installRegistryItems };
+DEVSHOT_DESIGN_INSTALLER_EOF
+# <<< design-catalog: install-design-items.cjs
+# >>> design-catalog: design-fonts.cjs (verbatim copy — do not edit here)
+cat > /usr/local/lib/devshot-design/design-fonts.cjs <<'DEVSHOT_DESIGN_FONTS_EOF'
+// A deliberately small, reproducible font pack. Downloads happen once while
+// baking the template; fonts list/show/add never fetch anything at runtime.
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { localPath, writeLocal } = require('./install-design-items.cjs');
+
+const GOOGLE_FONTS_REVISION = '9710da1eacb3be272583c3224dcb70f9da6eadbb';
+const FONT_BASE = 'https://raw.githubusercontent.com/google/fonts/' + GOOGLE_FONTS_REVISION + '/ofl/';
+const FONT_PACK = [
+  {
+    id: 'bodoni-moda', family: 'Bodoni Moda', category: 'serif', weight: '400 900', style: 'normal', format: 'truetype',
+    homepage: 'https://fonts.google.com/specimen/Bodoni+Moda',
+    url: FONT_BASE + 'bodonimoda/BodoniModa%5Bopsz%2Cwght%5D.ttf',
+    sha256: '550f5e34ee0a828d7941b1fe9bc58b34e5260d3f33a61532e6d0a0114e79a5cf',
+    bytes: 162104, licenseUrl: FONT_BASE + 'bodonimoda/OFL.txt',
+    licenseSha256: '931dfe2e0cd3c9443295f5c1d754b8a8403bf060df50c1d5900267ade83d0046',
+  },
+  {
+    id: 'dm-sans', family: 'DM Sans', category: 'sans-serif', weight: '100 1000', style: 'normal', format: 'truetype',
+    homepage: 'https://fonts.google.com/specimen/DM+Sans',
+    url: FONT_BASE + 'dmsans/DMSans%5Bopsz%2Cwght%5D.ttf',
+    sha256: '8cd08d97e89c24d0aa92edd2f0f4c8ee6195eee9b7c9f154865a58b02f0c1c0d',
+    bytes: 240164, licenseUrl: FONT_BASE + 'dmsans/OFL.txt',
+    licenseSha256: '9af36190332437f5ecd09974de43c1f7c77a310a996cdd8ceb25628b458840e1',
+  },
+];
+
+function digest(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
+
+async function bakeFontCatalog({ out, cacheDir, fonts = FONT_PACK, fetchAsset = fetch }) {
+  const items = [];
+  async function download(url, expected) {
+    const cache = cacheDir && path.join(cacheDir, 'font-' + expected);
+    let bytes;
+    if (cache && fs.existsSync(cache)) bytes = fs.readFileSync(cache);
+    else {
+      const response = await fetchAsset(url, { redirect: 'error', signal: AbortSignal.timeout(30000) });
+      if (!response.ok) throw new Error('font asset HTTP ' + response.status + ': ' + url);
+      bytes = Buffer.from(await response.arrayBuffer());
+    }
+    if (digest(bytes) !== expected) throw new Error('font asset checksum mismatch: ' + url);
+    if (cache) { fs.mkdirSync(cacheDir, { recursive: true }); writeLocal(cache, bytes); }
+    return bytes;
+  }
+  for (const font of fonts) {
+    const file = 'fonts/' + font.id + '.ttf';
+    const licenseFile = 'fonts/LICENSES/' + font.id + '.txt';
+    const [bytes, license] = await Promise.all([download(font.url, font.sha256), download(font.licenseUrl, font.licenseSha256)]);
+    if (bytes.length !== font.bytes) throw new Error('unexpected font asset size: ' + font.id);
+    if (!/SIL OPEN FONT LICENSE Version 1\.1/.test(license.toString('utf8'))) throw new Error('font license is not SIL OFL 1.1: ' + font.id);
+    writeLocal(path.join(out, file), bytes);
+    writeLocal(path.join(out, licenseFile), license);
+    items.push({ ...font, license: 'SIL OFL 1.1', file, licenseFile });
+  }
+  const catalog = { version: 1, revision: GOOGLE_FONTS_REVISION, items };
+  writeLocal(path.join(out, 'fonts.json'), JSON.stringify(catalog, null, 1) + '\n');
+  return catalog;
+}
+
+function loadFonts(catalogDir) {
+  const catalog = JSON.parse(fs.readFileSync(path.join(catalogDir, 'fonts.json'), 'utf8'));
+  if (!Array.isArray(catalog.items)) throw new Error('fonts.json is malformed');
+  return catalog;
+}
+
+function fontCss(font) {
+  return '@font-face {\n  font-family: "' + font.family + '";\n  src: url("/fonts/' + font.id + '.ttf") format("' + font.format + '");\n  font-style: ' + font.style + ';\n  font-weight: ' + font.weight + ';\n  font-display: swap;\n}\n';
+}
+
+function installFonts({ catalogDir, project, fonts }) {
+  const writes = [];
+  for (const font of fonts) {
+    const source = fs.readFileSync(localPath(catalogDir, font.file));
+    const license = fs.readFileSync(localPath(catalogDir, font.licenseFile));
+    if (digest(source) !== font.sha256 || digest(license) !== font.licenseSha256) throw new Error('baked font checksum mismatch: ' + font.id);
+    writes.push([localPath(project, 'public/fonts/' + font.id + '.ttf'), source]);
+    writes.push([localPath(project, 'public/fonts/LICENSES/' + font.id + '.txt'), license]);
+  }
+  const stylesheet = localPath(project, 'public/fonts/devshot-fonts.css');
+  let css = fs.existsSync(stylesheet) ? fs.readFileSync(stylesheet, 'utf8') : '';
+  const notice = localPath(project, 'THIRD_PARTY_LICENSES.md');
+  let text = fs.existsSync(notice) ? fs.readFileSync(notice, 'utf8') : '# Third-party licenses\n';
+  for (const font of fonts) {
+    const start = '/* devshot-font:' + font.id + ':start */';
+    const end = '/* devshot-font:' + font.id + ':end */';
+    const begin = css.indexOf(start);
+    const finish = css.indexOf(end, begin);
+    if (begin !== -1 && finish === -1) throw new Error('incomplete font CSS marker: ' + font.id);
+    const block = start + '\n' + fontCss(font) + end + '\n';
+    css = begin === -1 ? css + '\n' + block : css.slice(0, begin) + block + css.slice(finish + end.length).replace(/^\n/, '');
+    const marker = '## Font — ' + font.family;
+    if (!text.includes(marker)) text += '\n' + marker + '\n\nSource: ' + font.url + '\n\n' + fs.readFileSync(localPath(catalogDir, font.licenseFile), 'utf8') + '\n';
+  }
+  writes.push([stylesheet, css], [notice, text]);
+  for (const [file, content] of writes) writeLocal(file, content);
+  return writes.map(([file]) => path.relative(fs.realpathSync(project), file));
+}
+
+module.exports = { FONT_PACK, GOOGLE_FONTS_REVISION, bakeFontCatalog, loadFonts, fontCss, installFonts };
+DEVSHOT_DESIGN_FONTS_EOF
+# <<< design-catalog: design-fonts.cjs
 # >>> design-catalog: build-design-catalog.mjs (verbatim copy — do not edit here)
-cat > /tmp/devshot-build-design-catalog.mjs <<'DEVSHOT_DESIGN_BUILDER_EOF'
+cat > /usr/local/lib/devshot-design/build-design-catalog.mjs <<'DEVSHOT_DESIGN_BUILDER_EOF'
 #!/usr/bin/env node
 // build-design-catalog.mjs — spec 386. Runs INSIDE the studio template bake
-// (apps/agent/recipes/studio.sh embeds this file verbatim; the recipe is the
-// only thing that reaches the chroot, so this script has no siblings there).
+// (apps/agent/recipes/studio.sh embeds the scripts in this directory verbatim;
+// the recipe is the only thing that reaches the chroot).
 //
 // What it produces, at --out (the image ships it at /opt/devshot-design):
 //   r/<source>/<name>.json   one shadcn registry item per catalog entry, with
 //                            every registryDependency rewritten to a LOCAL
 //                            absolute path, every file given an explicit target,
 //                            and import specifiers rewritten where a file was
-//                            relocated — so `shadcn add <path>` works with the
-//                            network gone (the runtime VM only reaches npm).
+//                            relocated. The shared local installer copies these
+//                            files without invoking a remote registry client.
 //   catalog.json             the index the devshot-design CLI and the agent read.
 //   CATALOG.md               the same index for humans, grouped by category.
 //   LICENSES/<source>.md     the upstream license text, fetched — a source whose
@@ -124,6 +384,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import installer from './install-design-items.cjs';
+import fontCatalog from './design-fonts.cjs';
+
+const { installRegistryItems, registryStyles } = installer;
+const { bakeFontCatalog } = fontCatalog;
 
 // ── sources ─────────────────────────────────────────────────────────────────
 // Verified 2026-09-07 (license file, registry index, one item each): every
@@ -610,6 +875,7 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
   fs.rmSync(rDir, { recursive: true, force: true });
   fs.mkdirSync(rDir, { recursive: true });
   fs.mkdirSync(path.join(outAbs, 'LICENSES'), { recursive: true });
+  await bakeFontCatalog({ out: outAbs, cacheDir });
 
   const allSources = [...PRIMITIVE_SOURCES, ...sources]; // primitives first = highest priority
   const byId = new Map(allSources.map((s) => [s.id, s]));
@@ -713,6 +979,9 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
     if (!bad) {
       const heavy = [...(item.dependencies || []), ...(item.devDependencies || [])].find(isHeavyDependency);
       if (heavy) bad = `heavy dependency ${heavy}`;
+    }
+    if (!bad) {
+      try { registryStyles(item); } catch (err) { bad = `unsupported local styles: ${err.message}`; }
     }
     if (bad) { dropped.set(id, bad); return; }
     items.set(id, { id, source: s.id, kit, name: item.name, upstream: item, files, registryDependencies: [...item.registryDependencies] });
@@ -843,13 +1112,8 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
         fs.cpSync(path.join(project, entry), path.join(staging, entry), { recursive: true });
       }
       fs.symlinkSync(path.join(project, 'node_modules'), path.join(staging, 'node_modules'));
-      const shadcn = path.join(project, 'node_modules', '.bin', 'shadcn');
       const ids = [...items.keys()].sort();
-      for (let i = 0; i < ids.length; i += 40) {
-        const chunk = ids.slice(i, i + 40).map(itemPath);
-        const r = spawnSync(shadcn, ['add', '-y', '-o', '-s', '-c', staging, ...chunk], { cwd: staging, encoding: 'utf8', env: { ...process.env, HOME: process.env.HOME || '/tmp', CI: '1' } });
-        if (r.status !== 0) throw new Error(`shadcn add failed in staging (round ${round}):\n${r.stdout}\n${r.stderr}`);
-      }
+      installRegistryItems({ catalogDir: outAbs, project: staging, registryFiles: ids.map(itemPath) });
       // every target the catalog claims must exist where it claims
       let missing = 0;
       for (const it of items.values()) for (const f of it.files) if (!fs.existsSync(path.join(staging, f.target))) { dropped.set(it.id, `CLI did not write ${f.target}`); items.delete(it.id); missing += 1; break; }
@@ -898,7 +1162,7 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
       const s = byId.get(it.source);
       const main = mainFile(it.upstream, it.files);
       return {
-        id: it.id, source: it.source, name: it.name, type: it.upstream.type,
+        id: it.id, source: it.source, kit: it.kit, name: it.name, type: it.upstream.type,
         kind: wanted.includes(it.id) ? s.kind : 'support',
         category: categorize(it.upstream, s.kind),
         title: it.upstream.title || it.name, description: it.upstream.description || '',
@@ -926,6 +1190,9 @@ export function renderCatalogMarkdown(catalog) {
   const lines = ['# DevShot design catalog', '', `Generated ${catalog.generatedAt} · shadcn style ${catalog.style}`, '',
     'Use `devshot-design list <query>` to search, `devshot-design show <id>` for details and',
     '`devshot-design add <id>` to copy a block into the project. Every item is MIT; see LICENSES/.', ''];
+  lines.push('Local fonts: `devshot-design fonts list`, `fonts show <id>`, `fonts add <id…>`.',
+    'Font assets and their SIL OFL licenses are baked under fonts/. No runtime download is needed.',
+    'A missing block id is explained by `devshot-design show <id>` with its bake exclusion reason.', '');
   const groups = new Map();
   for (const it of catalog.items) {
     if (it.kind === 'support') continue;
@@ -972,7 +1239,7 @@ if (isMain) {
 export const __filename_for_tests = fileURLToPath(import.meta.url);
 DEVSHOT_DESIGN_BUILDER_EOF
 # <<< design-catalog: build-design-catalog.mjs
-chmod 0644 /tmp/devshot-build-design-catalog.mjs
+chmod 0644 /usr/local/lib/devshot-design/build-design-catalog.mjs
 cat > /tmp/devshot-build-studio.sh <<'BUILDSTUDIO'
 #!/bin/sh
 set -eux
@@ -1057,7 +1324,7 @@ npm install --save motion
 # project. Fails the bake when a source's license stops reading MIT, when an
 # index changes shape, or when fewer than 300 items survive the tsc gate — a
 # thin or wrong catalog must never publish silently.
-node /tmp/devshot-build-design-catalog.mjs --project /var/www/studio --out /opt/devshot-design --min-items 300
+node /usr/local/lib/devshot-design/build-design-catalog.mjs --project /var/www/studio --out /opt/devshot-design --min-items 300
 test -f /opt/devshot-design/catalog.json || { echo "FATAL: design catalog missing after build" >&2; exit 1; }
 
 # --- The root layout, with a font this machine can actually get (spec 438) ---
@@ -1176,7 +1443,7 @@ rm -f /tmp/devshot-build-studio.sh
 # test as the builder). `add` is a local `shadcn add` through the project's own
 # node_modules/.bin/shadcn, so it works offline and needs no restart.
 # >>> design-catalog: devshot-design.cjs (verbatim copy — do not edit here)
-cat > /usr/local/bin/devshot-design <<'DEVSHOT_DESIGN_CLI_EOF'
+cat > /usr/local/lib/devshot-design/devshot-design.cjs <<'DEVSHOT_DESIGN_CLI_EOF'
 #!/usr/bin/env node
 // devshot-design — spec 386. The agent's hands on the design catalog that
 // build-design-catalog.mjs baked into /opt/devshot-design.
@@ -1185,8 +1452,9 @@ cat > /usr/local/bin/devshot-design <<'DEVSHOT_DESIGN_CLI_EOF'
 //   devshot-design show <id>          what it is, what it exports, what it writes
 //   devshot-design code <id>          print the main file (read before adapting)
 //   devshot-design add <id…>          copy into the project, print the import line
+//   devshot-design fonts list/show/add  inspect and install locally baked fonts
 //
-// 'add' is a local 'shadcn add': the registry item, its dependencies and the
+// 'add' copies the registry item, its dependencies and the
 // shadcn primitives it needs are all files under the catalog, every npm
 // package they import is already in node_modules, so it works with the
 // network gone and needs no dev-server restart — 'next dev' picks new files
@@ -1196,7 +1464,8 @@ cat > /usr/local/bin/devshot-design <<'DEVSHOT_DESIGN_CLI_EOF'
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { installRegistryItems } = require('./install-design-items.cjs');
+const { loadFonts, installFonts } = require('./design-fonts.cjs');
 
 const CATALOG_DIR = process.env.DEVSHOT_DESIGN_DIR || '/opt/devshot-design';
 const DEFAULT_PROJECT = process.env.DEVSHOT_PROJECT_DIR || '/var/www/studio';
@@ -1214,6 +1483,7 @@ function usage() {
     '  show   details for one item: exports, files it will create, npm packages, license',
     '  code   print the item\'s main source file',
     '  add    install one or more items into the project (default ' + DEFAULT_PROJECT + ') and print the import lines',
+    '  fonts list [query] | show <id> | add <id…> [--cwd <project>] — local SIL OFL font assets, no network requests',
   ].join('\n') + '\n');
   process.exit(2);
 }
@@ -1241,14 +1511,28 @@ function findItem(catalog, ref) {
   return null;
 }
 
-function resolveProject(argv) {
+function unavailableMessage(catalog, ref) {
+  const wanted = String(ref).toLowerCase();
+  const dropped = (catalog.dropped || []).find((it) => it.id.toLowerCase() === wanted || it.id.split('/').slice(1).join('/').toLowerCase() === wanted);
+  const id = dropped ? dropped.id : wanted;
+  const source = id.split('/')[0];
+  if (!dropped && !((catalog.sources || []).some((it) => it.id === source) && id.includes('/'))) return 'unknown item "' + ref + '" — search with devshot-design list <words>';
+  const name = id.slice(source.length + 1);
+  const kit = /^(mist|dusk|veil)-/.exec(name);
+  const category = name.replace(/^(mist|dusk|veil)-/, '').replace(/-\d+$/, '').replace(/-section$/, '');
+  const choices = visible(catalog).filter((it) => it.source === source && (!kit || it.name.startsWith(kit[0])) && (it.category === category || it.name.includes(category))).slice(0, 6);
+  const reason = dropped ? dropped.reason : 'not present in this baked catalog; no exclusion reason was recorded';
+  return 'unavailable item "' + id + '": ' + reason + (choices.length ? '\nAvailable in the same source' + (kit ? ' and ' + kit[1] + ' kit' : '') + ': ' + choices.map((it) => it.id).join(', ') + '. Inspect one with devshot-design code; no item is substituted automatically.' : '\nNo matching item in the same kit is available in this baked catalog.');
+}
+
+function resolveProject(argv, requireShadcn = true) {
   const i = argv.indexOf('--cwd');
   let dir = i !== -1 ? argv[i + 1] : null;
   if (i !== -1) argv.splice(i, 2);
   if (!dir) dir = fs.existsSync(path.join(process.cwd(), 'package.json')) ? process.cwd() : DEFAULT_PROJECT;
   dir = path.resolve(dir);
   if (!fs.existsSync(path.join(dir, 'package.json'))) fail('no package.json in ' + dir + ' — pass --cwd <project>', 2);
-  if (!fs.existsSync(path.join(dir, 'components.json'))) fail(dir + ' has no components.json (not a shadcn project)', 2);
+  if (requireShadcn && !fs.existsSync(path.join(dir, 'components.json'))) fail(dir + ' has no components.json (not a shadcn project)', 2);
   return dir;
 }
 
@@ -1269,6 +1553,7 @@ function cmdList(catalog, words) {
       process.stdout.write('  ' + pad(key, 28) + pad(g.length, 5) + 'e.g. ' + g.slice(0, 3).map((it) => it.id).join(', ') + '\n');
     }
     process.stdout.write('\nSearch: devshot-design list <category or words>   e.g. "devshot-design list hero", "devshot-design list pricing dark"\n');
+    process.stdout.write('Local fonts: devshot-design fonts list; devshot-design fonts add <id>. Missing block ids are explained by devshot-design show <id>.\n');
     process.stdout.write('Each hit prints its structure (headings, buttons, images, repeated lists, motion, length), so one listing is enough to shortlist.\n');
     return;
   }
@@ -1312,7 +1597,7 @@ function importLine(it) {
 
 function cmdShow(catalog, ref) {
   const it = findItem(catalog, ref);
-  if (!it) fail('unknown item "' + ref + '" — search with devshot-design list <words>', 2);
+  if (!it) fail(unavailableMessage(catalog, ref), 2);
   const src = (catalog.sources || []).find((s) => s.id === it.source) || {};
   const lines = [
     it.id + ' — ' + (it.title || it.name),
@@ -1341,7 +1626,7 @@ function readRegistryItem(it) {
 
 function cmdCode(catalog, ref) {
   const it = findItem(catalog, ref);
-  if (!it) fail('unknown item "' + ref + '"', 2);
+  if (!it) fail(unavailableMessage(catalog, ref), 2);
   const reg = readRegistryItem(it);
   const main = (reg.files || []).find((f) => f.target === it.main) || (reg.files || [])[0];
   if (!main) fail(it.id + ' has no source file', 3);
@@ -1375,23 +1660,20 @@ function cmdAdd(catalog, argv) {
   if (!argv.length) usage();
   const items = argv.map((ref) => {
     const it = findItem(catalog, ref);
-    if (!it) fail('unknown item "' + ref + '" — search with devshot-design list <words>', 2);
+    if (!it) fail(unavailableMessage(catalog, ref), 2);
     return it;
   });
-  const shadcn = path.join(project, 'node_modules', '.bin', 'shadcn');
-  if (!fs.existsSync(shadcn)) fail('shadcn CLI missing at ' + shadcn + ' — this project was not baked with the design catalog', 3);
   const paths = items.map((it) => path.join(CATALOG_DIR, it.registryFile));
   const before = new Set();
   for (const it of items) for (const f of it.files) if (fs.existsSync(path.join(project, f))) before.add(f);
-  const r = spawnSync(shadcn, ['add', '-y', '-o', '-s', '-c', project].concat(paths), { cwd: project, encoding: 'utf8', env: Object.assign({}, process.env, { CI: '1', HOME: process.env.HOME || '/tmp' }) });
-  if (r.status !== 0) {
-    process.stderr.write((r.stdout || '') + (r.stderr || ''));
-    fail('shadcn add failed (exit ' + r.status + ')', 1);
-  }
+  let installed;
+  try { installed = installRegistryItems({ catalogDir: CATALOG_DIR, project, registryFiles: paths }); }
+  catch (err) { fail(err.message, 3); }
   const missing = [];
   for (const it of items) for (const f of it.files) if (!fs.existsSync(path.join(project, f))) missing.push(f);
-  if (missing.length) fail('shadcn add returned 0 but these files are missing: ' + missing.join(', '), 1);
-  const noted = appendLicenseNote(project, catalog, items);
+  if (missing.length) fail('local installation completed but these files are missing: ' + missing.join(', '), 1);
+  const closure = installed.records.map((record) => catalog.items.find((it) => it.id === record.id) || { source: record.id.split('/')[0] });
+  const noted = appendLicenseNote(project, catalog, closure);
   const out = [];
   for (const it of items) {
     out.push('added ' + it.id + ':');
@@ -1399,15 +1681,47 @@ function cmdAdd(catalog, argv) {
     const imp = importLine(it);
     if (imp) out.push('  ' + imp);
   }
+  out.push('installed ' + installed.records.length + ' local registry items including dependencies; no shadcn, npm or network access was used.');
   if (noted) out.push('license notices recorded in ' + LICENSE_NOTE);
   out.push('Now adapt it: replace every demo headline, paragraph, logo, image and price with this project\'s real content and brand — a block is a starting point, not the deliverable. New files hot-reload; no dev-server restart is needed.');
   process.stdout.write(out.join('\n') + '\n');
+}
+
+function cmdFonts(argv) {
+  const cmd = argv.shift();
+  let catalog;
+  try { catalog = loadFonts(CATALOG_DIR); } catch (err) { fail('local font catalog unavailable: ' + err.message, 3); }
+  if (cmd === 'list') {
+    const query = argv.join(' ').toLowerCase();
+    for (const font of catalog.items.filter((it) => [it.id, it.family, it.category].join(' ').toLowerCase().includes(query))) {
+      process.stdout.write(pad(font.id, 20) + pad(font.family, 20) + font.weight + ' · ' + font.style + ' · ' + Math.round(font.bytes / 1024) + ' KiB · ' + font.license + '\n');
+    }
+    process.stdout.write('Next: devshot-design fonts show <id> or fonts add <id…>. Assets and licenses are baked locally.\n');
+    return;
+  }
+  if (cmd !== 'show' && cmd !== 'add') usage();
+  const project = cmd === 'add' ? resolveProject(argv, false) : null;
+  if (!argv.length || (cmd === 'show' && argv.length !== 1)) usage();
+  const fonts = argv.map((ref) => {
+    const font = catalog.items.find((it) => it.id === ref || it.family.toLowerCase() === ref.toLowerCase());
+    if (!font) fail('unknown font "' + ref + '" — run devshot-design fonts list', 2);
+    return font;
+  });
+  if (cmd === 'show') {
+    const font = fonts[0];
+    process.stdout.write(font.family + ' (' + font.id + ')\n  weight: ' + font.weight + '   style: ' + font.style + '\n  asset: ' + font.file + ' (' + font.bytes + ' bytes)\n  license: ' + font.license + ' — ' + font.licenseFile + '\n  source: ' + font.url + '\n  SHA-256: ' + font.sha256 + '\n  install: devshot-design fonts add ' + font.id + '\n');
+    return;
+  }
+  let files;
+  try { files = installFonts({ catalogDir: CATALOG_DIR, project, fonts }); } catch (err) { fail(err.message, 3); }
+  process.stdout.write('added local fonts: ' + fonts.map((it) => it.family).join(', ') + '\n' + files.map((file) => '  ' + file).join('\n') + '\nLoad the stylesheet in the document head: <link rel="stylesheet" href="/fonts/devshot-fonts.css" />\nUse font-family: ' + fonts.map((it) => '"' + it.family + '"').join(' or ') + '; and font-optical-sizing: auto. These files also work with next/font/local; do not import next/font/google.\n');
 }
 
 function main() {
   const argv = process.argv.slice(2);
   if (!argv.length || argv[0] === '-h' || argv[0] === '--help') usage();
   const cmd = argv.shift();
+  if (cmd === 'fonts') return cmdFonts(argv);
   const catalog = loadCatalog();
   if (cmd === 'list' || cmd === 'search' || cmd === 'ls') return cmdList(catalog, argv);
   if (cmd === 'show' || cmd === 'info') { if (argv.length !== 1) usage(); return cmdShow(catalog, argv[0]); }
@@ -1418,12 +1732,13 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { findItem, importLine, visible, appendLicenseNote, LICENSE_NOTE };
+module.exports = { findItem, importLine, visible, unavailableMessage, appendLicenseNote, LICENSE_NOTE };
 DEVSHOT_DESIGN_CLI_EOF
 # <<< design-catalog: devshot-design.cjs
-chmod 0755 /usr/local/bin/devshot-design
+chmod 0755 /usr/local/lib/devshot-design/devshot-design.cjs
+ln -sf /usr/local/lib/devshot-design/devshot-design.cjs /usr/local/bin/devshot-design
 # Smoke-test the baked catalog exactly the way a turn will use it, as devshot.
-su devshot -c 'cd /var/www/studio && devshot-design list >/dev/null && devshot-design list hero | head -n 3' \
+su devshot -c 'cd /var/www/studio && devshot-design fonts list >/dev/null && devshot-design list >/dev/null && devshot-design list hero | head -n 3' \
   || { echo "FATAL: devshot-design cannot read the baked catalog" >&2; exit 1; }
 cd /var/www/studio
 

@@ -14,8 +14,10 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const RECIPE = path.join(here, '..', 'studio.sh');
 export const EMBEDS = [
-  { file: 'build-design-catalog.mjs', start: '# >>> design-catalog: build-design-catalog.mjs', end: '# <<< design-catalog: build-design-catalog.mjs', heredoc: 'DEVSHOT_DESIGN_BUILDER_EOF', target: '/tmp/devshot-build-design-catalog.mjs' },
-  { file: 'devshot-design.cjs', start: '# >>> design-catalog: devshot-design.cjs', end: '# <<< design-catalog: devshot-design.cjs', heredoc: 'DEVSHOT_DESIGN_CLI_EOF', target: '/usr/local/bin/devshot-design' },
+  { file: 'install-design-items.cjs', start: '# >>> design-catalog: install-design-items.cjs', end: '# <<< design-catalog: install-design-items.cjs', heredoc: 'DEVSHOT_DESIGN_INSTALLER_EOF', target: '/usr/local/lib/devshot-design/install-design-items.cjs' },
+  { file: 'design-fonts.cjs', start: '# >>> design-catalog: design-fonts.cjs', end: '# <<< design-catalog: design-fonts.cjs', heredoc: 'DEVSHOT_DESIGN_FONTS_EOF', target: '/usr/local/lib/devshot-design/design-fonts.cjs' },
+  { file: 'build-design-catalog.mjs', start: '# >>> design-catalog: build-design-catalog.mjs', end: '# <<< design-catalog: build-design-catalog.mjs', heredoc: 'DEVSHOT_DESIGN_BUILDER_EOF', target: '/usr/local/lib/devshot-design/build-design-catalog.mjs' },
+  { file: 'devshot-design.cjs', start: '# >>> design-catalog: devshot-design.cjs', end: '# <<< design-catalog: devshot-design.cjs', heredoc: 'DEVSHOT_DESIGN_CLI_EOF', target: '/usr/local/lib/devshot-design/devshot-design.cjs' },
 ];
 
 export function renderEmbed(embed, source) {

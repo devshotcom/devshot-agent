@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 // build-design-catalog.mjs — spec 386. Runs INSIDE the studio template bake
-// (apps/agent/recipes/studio.sh embeds this file verbatim; the recipe is the
-// only thing that reaches the chroot, so this script has no siblings there).
+// (apps/agent/recipes/studio.sh embeds the scripts in this directory verbatim;
+// the recipe is the only thing that reaches the chroot).
 //
 // What it produces, at --out (the image ships it at /opt/devshot-design):
 //   r/<source>/<name>.json   one shadcn registry item per catalog entry, with
 //                            every registryDependency rewritten to a LOCAL
 //                            absolute path, every file given an explicit target,
 //                            and import specifiers rewritten where a file was
-//                            relocated — so `shadcn add <path>` works with the
-//                            network gone (the runtime VM only reaches npm).
+//                            relocated. The shared local installer copies these
+//                            files without invoking a remote registry client.
 //   catalog.json             the index the devshot-design CLI and the agent read.
 //   CATALOG.md               the same index for humans, grouped by category.
 //   LICENSES/<source>.md     the upstream license text, fetched — a source whose
@@ -35,6 +35,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import installer from './install-design-items.cjs';
+import fontCatalog from './design-fonts.cjs';
+
+const { installRegistryItems, registryStyles } = installer;
+const { bakeFontCatalog } = fontCatalog;
 
 // ── sources ─────────────────────────────────────────────────────────────────
 // Verified 2026-09-07 (license file, registry index, one item each): every
@@ -521,6 +526,7 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
   fs.rmSync(rDir, { recursive: true, force: true });
   fs.mkdirSync(rDir, { recursive: true });
   fs.mkdirSync(path.join(outAbs, 'LICENSES'), { recursive: true });
+  await bakeFontCatalog({ out: outAbs, cacheDir });
 
   const allSources = [...PRIMITIVE_SOURCES, ...sources]; // primitives first = highest priority
   const byId = new Map(allSources.map((s) => [s.id, s]));
@@ -624,6 +630,9 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
     if (!bad) {
       const heavy = [...(item.dependencies || []), ...(item.devDependencies || [])].find(isHeavyDependency);
       if (heavy) bad = `heavy dependency ${heavy}`;
+    }
+    if (!bad) {
+      try { registryStyles(item); } catch (err) { bad = `unsupported local styles: ${err.message}`; }
     }
     if (bad) { dropped.set(id, bad); return; }
     items.set(id, { id, source: s.id, kit, name: item.name, upstream: item, files, registryDependencies: [...item.registryDependencies] });
@@ -754,13 +763,8 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
         fs.cpSync(path.join(project, entry), path.join(staging, entry), { recursive: true });
       }
       fs.symlinkSync(path.join(project, 'node_modules'), path.join(staging, 'node_modules'));
-      const shadcn = path.join(project, 'node_modules', '.bin', 'shadcn');
       const ids = [...items.keys()].sort();
-      for (let i = 0; i < ids.length; i += 40) {
-        const chunk = ids.slice(i, i + 40).map(itemPath);
-        const r = spawnSync(shadcn, ['add', '-y', '-o', '-s', '-c', staging, ...chunk], { cwd: staging, encoding: 'utf8', env: { ...process.env, HOME: process.env.HOME || '/tmp', CI: '1' } });
-        if (r.status !== 0) throw new Error(`shadcn add failed in staging (round ${round}):\n${r.stdout}\n${r.stderr}`);
-      }
+      installRegistryItems({ catalogDir: outAbs, project: staging, registryFiles: ids.map(itemPath) });
       // every target the catalog claims must exist where it claims
       let missing = 0;
       for (const it of items.values()) for (const f of it.files) if (!fs.existsSync(path.join(staging, f.target))) { dropped.set(it.id, `CLI did not write ${f.target}`); items.delete(it.id); missing += 1; break; }
@@ -809,7 +813,7 @@ export async function buildCatalog({ out, project, cacheDir, concurrency = 8, va
       const s = byId.get(it.source);
       const main = mainFile(it.upstream, it.files);
       return {
-        id: it.id, source: it.source, name: it.name, type: it.upstream.type,
+        id: it.id, source: it.source, kit: it.kit, name: it.name, type: it.upstream.type,
         kind: wanted.includes(it.id) ? s.kind : 'support',
         category: categorize(it.upstream, s.kind),
         title: it.upstream.title || it.name, description: it.upstream.description || '',
@@ -837,6 +841,9 @@ export function renderCatalogMarkdown(catalog) {
   const lines = ['# DevShot design catalog', '', `Generated ${catalog.generatedAt} · shadcn style ${catalog.style}`, '',
     'Use `devshot-design list <query>` to search, `devshot-design show <id>` for details and',
     '`devshot-design add <id>` to copy a block into the project. Every item is MIT; see LICENSES/.', ''];
+  lines.push('Local fonts: `devshot-design fonts list`, `fonts show <id>`, `fonts add <id…>`.',
+    'Font assets and their SIL OFL licenses are baked under fonts/. No runtime download is needed.',
+    'A missing block id is explained by `devshot-design show <id>` with its bake exclusion reason.', '');
   const groups = new Map();
   for (const it of catalog.items) {
     if (it.kind === 'support') continue;
