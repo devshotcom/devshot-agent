@@ -1287,17 +1287,33 @@ STARTPAGE
 # can't be baked (it depends on the VM name) — start-studio exports
 # DEVSHOT_ASSET_PREFIX per-VM and `next dev` reads it at launch. Replace any
 # starter config so there's a single next.config Next will read.
+#
+# Since create-next-app 16.4 the starter has no postcss.config: Tailwind runs
+# as a Turbopack loader declared in the starter's next.config
+# (`turbopack.rules['*.css']` → @tailwindcss/turbopack). Replacing that config
+# without the rule leaves globals.css unprocessed — `@theme`/`@apply` unknown,
+# `@import "tw-animate-css"` unresolvable — and `next build` fails (the Studio
+# template stopped baking at v0.6.1044). Keep the rule whenever the loader is
+# installed; a starter that still uses PostCSS is left as it is.
 rm -f next.config.js next.config.mjs next.config.ts
 cat > next.config.mjs <<'NEXTCONFIG'
 // Managed by the DevShot Studio recipe — serves build assets under the per-VM
 // public-proxy path. DEVSHOT_ASSET_PREFIX is exported by start-studio from this
 // VM's xenstore vm-name; unset in a plain `next build`, so config stays default.
+import { existsSync } from 'node:fs';
+
 const assetPrefix = process.env.DEVSHOT_ASSET_PREFIX || undefined;
+// Tailwind CSS v4 runs as a Turbopack loader in this project (no PostCSS
+// config). Without this rule globals.css is not processed at all.
+const tailwindLoader = existsSync(new URL('./node_modules/@tailwindcss/turbopack/package.json', import.meta.url));
 
 /** @type {import('next').NextConfig} */
-const nextConfig = assetPrefix
-  ? { assetPrefix, images: { path: `${assetPrefix}/_next/image` } }
-  : {};
+const nextConfig = {
+  ...(tailwindLoader
+    ? { turbopack: { rules: { '*.css': { loaders: ['@tailwindcss/turbopack'], as: '*.css' } } } }
+    : {}),
+  ...(assetPrefix ? { assetPrefix, images: { path: `${assetPrefix}/_next/image` } } : {}),
+};
 
 export default nextConfig;
 NEXTCONFIG
