@@ -284,6 +284,14 @@ function main() {
   usage();
 }
 
-if (require.main === module) main();
+if (require.main === module) {
+  // A reader that stops early ("devshot-design list hero | head -n 3") closes
+  // the pipe; that is the reader's choice, not a failure of the listing.
+  process.stdout.on('error', (err) => {
+    if (err && err.code === 'EPIPE') process.exit(0);
+    throw err;
+  });
+  main();
+}
 
 module.exports = { findItem, importLine, visible, unavailableMessage, appendLicenseNote, LICENSE_NOTE };
