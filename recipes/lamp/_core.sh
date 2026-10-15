@@ -205,7 +205,11 @@ case "$console_command" in
             ;;
         esac
       done
-      if ! sudo -n true 2>/dev/null; then
+      # Probe the ONE command the drop-in grants. `sudo -n true` asks for a
+      # password under that scoped rule, so it refused every claimed VM even
+      # with the rule in place (2026-10-14, pool-joyful-booting-kernighan:
+      # every workspace restore died at database:migrate).
+      if ! sudo -n -l /usr/local/sbin/devshot-shopware-lowmem >/dev/null 2>&1; then
         echo "Shopware maintenance needs passwordless sudo for /usr/local/sbin/devshot-shopware-lowmem, and this VM has none." >&2
         echo "It stops php-fpm for the duration so the CLI has RAM; running without it is what used to OOM the machine." >&2
         echo "bin/console is intact — check /etc/sudoers.d/devshot-shopware-lowmem on this guest." >&2
