@@ -235,6 +235,12 @@ install_wordpress() {
     --admin_password="${LAMP_ADMIN_PASSWORD}" \
     --admin_email="${LAMP_ADMIN_EMAIL}" \
     --skip-email
+  # Elementor ships preinstalled and active, so a fresh WordPress VM opens
+  # straight into the page builder. Latest from wordpress.org at bake time —
+  # the nightly rebake keeps it current. A failed install fails the variant
+  # like a failed core download does: an image without it is not the image.
+  wp --allow-root plugin install elementor --activate \
+    || { echo "ERROR: elementor install failed for wp ${version}" >&2; exit 1; }
   # WP canonical_redirect kicks in any time the request Host doesn't
   # match the configured siteurl — that's exactly what happens when
   # the DevShot proxy forwards `Host: <vm>.local:80` and WP tries to
