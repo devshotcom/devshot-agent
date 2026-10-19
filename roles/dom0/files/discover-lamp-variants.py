@@ -57,6 +57,13 @@ SUPPORT_WINDOW_DAYS = 730  # 24 months
 import os
 WP_MAX_MAJORS = int(os.environ.get("WP_MAX_MAJORS", "5"))
 
+# Every WordPress image ships Elementor preinstalled and active, and the bake
+# fails a variant whose WordPress Elementor refuses. Elementor 4.3.5 requires
+# WordPress 6.8; on 2026-10-19 the wp-6.7 variant failed, and an incomplete
+# matrix publishes nothing, so no image at all was refreshed. Raise this
+# floor with Elementor's minimum. It applies to lock-file fallbacks too.
+WP_MIN_MAJOR = os.environ.get("WP_MIN_MAJOR", "6.8")
+
 HTTP_TIMEOUT_S = 15
 
 
@@ -384,6 +391,10 @@ def main(argv):
         matrix.extend(discovered[label] or [])
 
     matrix = [v for v in matrix if (v["app"], v["major_minor"]) not in DENY]
+    matrix = [
+        v for v in matrix
+        if v["app"] != "wordpress" or _version_tuple(v["major_minor"]) >= _version_tuple(WP_MIN_MAJOR)
+    ]
 
     lock_data = {
         "schema_version": 1,
