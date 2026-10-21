@@ -263,6 +263,12 @@ install_wordpress() {
 // siteurl/home follow whatever Host the proxy is forwarding.
 remove_filter('template_redirect', 'redirect_canonical');
 add_filter('redirect_canonical', '__return_false');
+// The proxy terminates TLS and talks plain HTTP to nginx, so without this
+// WordPress believes it is http:// and emits http:// absolute URLs
+// (home_url, REST, redirect_to) into an https document.
+if (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') {
+  $_SERVER['HTTPS'] = 'on';
+}
 $dynamic_url = function () {
   $scheme = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
   $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
