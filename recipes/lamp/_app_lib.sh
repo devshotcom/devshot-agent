@@ -14,7 +14,7 @@ install_lamp_launcher() {
   cat > /usr/local/bin/start-lamp <<'LAUNCHER'
 #!/bin/sh
 # Belt-and-suspenders nudge for the services OpenRC already boots. Only the
-# DEFAULT php-fpm (8.3) is touched — 8.2/8.4 start on demand via phpswitch, so
+# DEFAULT php-fpm (8.3) is touched — 8.4/8.5 start on demand via phpswitch, so
 # we don't pay 3x FPM startup + RAM here. Each start is retried once.
 for svc in mariadb php-fpm83 nginx openvscode-server; do
   rc-service "$svc" status >/dev/null 2>&1 && continue
@@ -28,7 +28,7 @@ while [ "$i" -lt 20 ]; do
   i=$((i + 1)); sleep 0.5
 done
 echo "lamp stack ready"
-echo "PHP versions available: 8.2, 8.3, 8.4 (default 8.3; switch with phpswitch)"
+echo "PHP versions available: 8.3, 8.4, 8.5 (default 8.3; switch with phpswitch)"
 LAUNCHER
   chmod 0755 /usr/local/bin/start-lamp
 }
@@ -90,7 +90,7 @@ JSON
     {
       "label": "DevShot: open terminal",
       "type": "shell",
-      "command": "echo 'Welcome — you are in $1. PHP versions: 8.2 / 8.3 (default) / 8.4. Switch with phpswitch.'",
+      "command": "echo 'Welcome — you are in $1. PHP versions: 8.3 (default) / 8.4 / 8.5. Switch with phpswitch.'",
       "presentation": {
         "reveal": "always",
         "panel": "shared",

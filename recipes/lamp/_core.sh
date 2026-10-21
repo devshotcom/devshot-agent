@@ -1,5 +1,5 @@
 #!/bin/sh
-# Recipe: LAMP _core (intermediate) — nginx + multi-PHP (8.2/8.3/8.4) +
+# Recipe: LAMP _core (intermediate) — nginx + multi-PHP (8.3/8.4/8.5) +
 # mariadb, NO app installed.
 #
 # This is Stage 1 of the spec-058 backing chain: produces lamp-shared.qcow2
@@ -18,13 +18,26 @@ set -eux
 # shellcheck disable=SC1091
 . /tmp/recipe.d/_app_lib.sh
 
-# --- Pin Alpine to v3.22 ---------------------------------------------
-# Alpine 3.23's community repo dropped php82 (it ships php83/84/85). We
-# want all three of 8.2/8.3/8.4 side-by-side, and v3.22 is the most
-# recent branch that still ships every one of them.
-sed -i 's|/alpine/v3\.[0-9]\+|/alpine/v3.22|g' /etc/apk/repositories
+# --- Pin Alpine to the branch that tracks PHP security releases --------
+# The pin used to be v3.22 so PHP 8.2 stayed available. That branch stopped
+# rebuilding php83/php84 in December 2025 (8.3.29 / 8.4.16), so every image
+# baked from it missed ten months of PHP security releases, up to and
+# including the 2026-10-21 php2shell fixes (CVE-2026-109618/109619). v3.24
+# rebuilt 8.3.35 / 8.4.26 / 8.5.11 one day after php.net published them.
+# PHP 8.2 is EOL on 2026-12-31 and no current Alpine branch ships it, so
+# the side-by-side set is now 8.3 (default) / 8.4 / 8.5.
+#
+# Keep this on the NEWEST stable Alpine branch: the php.net guard below
+# fails the bake once the pinned branch falls behind upstream, and the
+# answer to that failure is to move this pin forward, never to relax it.
+# `--available` re-installs packages whose build changed between branches
+# (the guest base is a different Alpine release than this pin).
+ALPINE_BRANCH=v3.24
+PHP_VERSIONS="83 84 85"
+PHP_DEFAULT=83
+sed -i "s|/alpine/v3\.[0-9]\+|/alpine/${ALPINE_BRANCH}|g" /etc/apk/repositories
 apk update
-apk upgrade --no-cache
+apk upgrade --no-cache --available
 
 # --- Packages --------------------------------------------------------
 # Same extension set for each PHP version so any app can run on any
@@ -37,13 +50,53 @@ tokenizer session ctype bcmath exif sodium sockets"
 # ripgrep backs the project MCP's search_files (spec 451); file backs its MIME
 # types. Both are small.
 PKGS="nginx mariadb mariadb-client composer git wget tar gzip unzip ca-certificates openssl openrc util-linux ripgrep file"
-for ver in 82 83 84; do
+for ver in $PHP_VERSIONS; do
   PKGS="$PKGS php${ver}"
   for ext in $PHP_EXTS; do
+    # php85 ships Zend OPcache inside the base package; there is no
+    # php85-opcache. The -m check below proves it is loaded anyway.
+    [ "${ver}${ext}" = "85opcache" ] && continue
     PKGS="$PKGS php${ver}-${ext}"
   done
 done
 apk add --no-cache $PKGS
+for ver in $PHP_VERSIONS; do
+  php${ver} -m | grep -q 'Zend OPcache' \
+    || { echo "ERROR: php${ver} has no OPcache" >&2; php${ver} -m; exit 1; }
+done
+
+# --- PHP must track php.net's security releases ----------------------
+# php.net's release feed is the source of truth for "is this PHP current".
+# Alpine's newest stable branch rebuilds within a day or two; the bake
+# tolerates PHP_RELEASE_GRACE_DAYS of lag and then FAILS rather than
+# publishing a template that ships a known-vulnerable interpreter (which is
+# exactly what the v3.22 pin did, silently, for ten months). A failing
+# nightly rebake is the alarm; the fix is to move ALPINE_BRANCH forward.
+# No network / unparsable answer only warns: an offline bake must still
+# work, and php.net being down is not a PHP vulnerability.
+PHP_RELEASE_GRACE_DAYS=7
+php_release_guard() {
+  ver=$1
+  minor="8.${ver#8}"
+  feed=$(wget -qO- --timeout=20 "https://www.php.net/releases/index.php?json&version=${minor}" || true)
+  if [ -z "$feed" ]; then
+    echo "WARN: php.net unreachable, cannot verify php${ver} is current" >&2
+    return 0
+  fi
+  php${ver} -d display_errors=stderr -r '
+    [$feed, $grace] = [$argv[1], (int) $argv[2]];
+    $r = json_decode($feed, true);
+    if (!is_array($r) || empty($r["version"])) { fwrite(STDERR, "WARN: php.net answer unparsable, skipping currency check\n"); exit(0); }
+    $latest = $r["version"]; $installed = PHP_VERSION;
+    if (version_compare($installed, $latest, ">=")) { echo "php $installed is current (php.net: $latest)\n"; exit(0); }
+    $released = isset($r["date"]) ? strtotime($r["date"]) : false;
+    $age = $released ? (int) floor((time() - $released) / 86400) : PHP_INT_MAX;
+    if ($age <= $grace) { echo "WARN: php $installed is behind php.net $latest ($age d old, within the $grace d grace)\n"; exit(0); }
+    fwrite(STDERR, "ERROR: php $installed is behind php.net $latest, released " . ($r["date"] ?? "?") . " ($age days ago). The pinned Alpine branch no longer tracks PHP security releases: move ALPINE_BRANCH forward.\n");
+    exit(1);
+  ' "$feed" "$PHP_RELEASE_GRACE_DAYS"
+}
+for ver in $PHP_VERSIONS; do php_release_guard "$ver"; done
 
 # --- Guest memory pressure safety -----------------------------------
 # LAMP matrix images are built by build-lamp-matrix.sh, outside the Go Baker
@@ -91,11 +144,11 @@ printf 'vm.swappiness=10\n' > /etc/sysctl.d/60-devshot-swap.conf
 # under the same UID prevents VS Code save failures in /var/www.
 id -u devshot >/dev/null 2>&1 || adduser -D -s /bin/bash devshot
 
-# composer's apk wrapper depends on php84 and installs /usr/bin/php as
-# a symlink there. We want `php` to land on php83 because php83 is what
-# each app's FPM pool also uses by default — same engine across CLI
-# install and the live web request.
-ln -sf /usr/bin/php83 /usr/bin/php
+# composer's apk wrapper depends on the newest php (php85 on v3.24) and
+# installs /usr/bin/php as a symlink there. We want `php` to land on
+# php83 because php83 is what each app's FPM pool also uses by default —
+# same engine across CLI install and the live web request.
+ln -sf /usr/bin/php${PHP_DEFAULT} /usr/bin/php
 php -m | grep -qi mysqli || { echo "ERROR: mysqli not loaded on /usr/bin/php" >&2; php -m; exit 1; }
 
 # Keep Shopware maintenance inside the 1536 MiB guest contract. Every ordinary
@@ -128,7 +181,7 @@ trap 'exit 129' 1
 trap 'exit 130' 2
 trap 'exit 143' 15
 
-for svc in php-fpm82 php-fpm83 php-fpm84; do
+for svc in php-fpm83 php-fpm84 php-fpm85; do
   if rc-service "$svc" status >/dev/null 2>&1; then
     active_fpm="$active_fpm $svc"
     rc-service "$svc" stop >/dev/null
@@ -227,7 +280,7 @@ PHPWRAP
 chmod 0755 /usr/local/bin/php
 
 # --- Per-version FPM pools + php.ini ---------------------------------
-for ver in 82 83 84; do
+for ver in $PHP_VERSIONS; do
   mkdir -p /run/php-fpm${ver}
   POOL=/etc/php${ver}/php-fpm.d/www.conf
   sed -i \
@@ -254,6 +307,33 @@ for ver in 82 83 84; do
     -e 's|^;*post_max_size = .*|post_max_size = 64M|' \
     -e 's|^;*max_execution_time = .*|max_execution_time = 300|' \
     "$PHPINI"
+
+  # --- CVE-2026-109618 / CVE-2026-109619 ("php2shell", 2026-10-21) ------
+  # Two unauthenticated RCEs in PHP's request-body parsing, fixed upstream in
+  # 8.3.36 / 8.4.27 / 8.5.12. The package guard above keeps the interpreter
+  # current; this is the defence in depth php.net asks to keep even on a
+  # patched PHP. The confirmed
+  # CVE-2026-109619 paths run through session.upload_progress, so every
+  # version turns it off at the server level: the conf.d drop-in covers CLI
+  # and FPM, the pool php_admin_flag can't be re-enabled by an app's
+  # .user.ini or ini_set(). Strict session ids are the second setting the
+  # advisories ask for. The bake fails if either setting is not effective.
+  mkdir -p /etc/php${ver}/conf.d
+  cat > /etc/php${ver}/conf.d/zz-devshot-security.ini <<'INI'
+; devshot lamp _core: CVE-2026-109618 / CVE-2026-109619 mitigation.
+; Keep off even on a patched PHP (php.net, 2026-10-21).
+session.upload_progress.enabled = 0
+session.use_strict_mode = 1
+INI
+  # php.net's extra recommendation for 8.5: the fatal-error backtrace is the
+  # path behind its strongest confirmed exploit. The directive is 8.5-only.
+  [ "$ver" = 85 ] && printf 'fatal_error_backtraces = 0\n' >> /etc/php${ver}/conf.d/zz-devshot-security.ini
+  grep -q '^php_admin_flag\[session.upload_progress.enabled\] = ' "$POOL" \
+    || printf 'php_admin_flag[session.upload_progress.enabled] = off\nphp_admin_flag[session.use_strict_mode] = on\n' >> "$POOL"
+  php${ver} -i | grep -q '^session.upload_progress.enabled => Off' \
+    || { echo "ERROR: php${ver} still has session.upload_progress enabled" >&2; exit 1; }
+  php${ver} -i | grep -q '^session.use_strict_mode => On' \
+    || { echo "ERROR: php${ver} has session.use_strict_mode off" >&2; exit 1; }
 done
 
 # --- MariaDB: enable TCP on loopback ---------------------------------
@@ -316,10 +396,10 @@ chown devshot:devshot /var/www
 cat > /usr/local/bin/phpswitch <<'SWITCH'
 #!/bin/sh
 set -eu
-usage() { echo "usage: phpswitch <app> <82|83|84>" >&2; exit 2; }
+usage() { echo "usage: phpswitch <app> <83|84|85>" >&2; exit 2; }
 [ $# -eq 2 ] || usage
 app=$1; ver=$2
-case "$ver" in 82|83|84) ;; *) usage;; esac
+case "$ver" in 83|84|85) ;; *) usage;; esac
 conf=/etc/nginx/http.d/$app.conf
 [ -f "$conf" ] || { echo "no vhost for app '$app'" >&2; exit 3; }
 rc-service "php-fpm$ver" status >/dev/null 2>&1 || rc-service "php-fpm$ver" start
@@ -594,7 +674,7 @@ chown -R devshot:devshot /home/devshot
 # Only the DEFAULT php-fpm (8.3) boots — running all three pools spins up
 # 3× the FPM masters/workers, which on a small VM both slows the boot (more
 # services to start before the app answers HTTP) and burns RAM that the app
-# itself needs. 8.2/8.4 are installed and start on demand via `phpswitch`.
+# itself needs. 8.4/8.5 are installed and start on demand via `phpswitch`.
 rc-update add mariadb default
 rc-update add php-fpm83 default
 rc-update add nginx default
@@ -641,5 +721,5 @@ rm -rf /var/cache/apk/*
 
 echo "=== LAMP _core recipe complete ==="
 df -h /var
-for ver in 82 83 84; do echo "php${ver}: $(php${ver} --version | head -1)"; done
+for ver in $PHP_VERSIONS; do echo "php${ver}: $(php${ver} --version | head -1)"; done
 sync

@@ -108,8 +108,13 @@ depend() {
 }
 start() {
   ebegin "Growing Blank root filesystem"
-  /usr/sbin/resize2fs /dev/vda
-  eend $?
+  # The root device is /dev/vda under QEMU and /dev/xvda under Xen; /proc/mounts
+  # may only say /dev/root. A template baked at full size has nothing to grow,
+  # and a failed grow is never a boot failure (spec 452 follow-up).
+  dev=$(awk '$2 == "/" { print $1 }' /proc/mounts | tail -n 1)
+  case "$dev" in /dev/vd*|/dev/xvd*|/dev/sd*|/dev/nvme*) ;; *) dev=""; for d in /dev/vda /dev/xvda /dev/sda; do [ -b "$d" ] && dev="$d" && break; done ;; esac
+  [ -n "$dev" ] && /usr/sbin/resize2fs "$dev" >/dev/null 2>&1
+  eend 0
 }
 GROWROOT
 chmod +x /etc/init.d/devshot-grow-root
