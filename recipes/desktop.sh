@@ -35,6 +35,7 @@
 # this and overrides the per-pool default when spawning from a template
 # that declares it.
 # devshot:memory_mb=1024
+# devshot:disk_gb=6
 set -eux
 
 # ── 1. Packages ─────────────────────────────────────────────────────────
@@ -69,7 +70,15 @@ apk add --no-cache \
     greybird-themes-gtk2 greybird-themes-gtk3 numix-themes-openbox \
     adwaita-icon-theme papirus-icon-theme \
     font-noto font-noto-emoji \
-    feh
+    feh \
+    ripgrep file nodejs npm
+
+# Spec 451 — the project MCP's screenshot tool drives the apk Chromium through
+# puppeteer-core at this fixed path (as studio.sh / lamp / blank / expo do), so
+# Desktop reports console errors and broken images too. puppeteer-core ships
+# no browser of its own.
+install -d /opt/devshot-e2e
+( cd /opt/devshot-e2e && npm init -y >/dev/null 2>&1 && PUPPETEER_SKIP_DOWNLOAD=1 npm install --no-audit --no-fund --omit=dev puppeteer-core )
 
 # Desktop tools and Studio onboarding run as the unprivileged devshot user.
 # Keep the qcow2 recipe's privilege contract identical to the standalone
@@ -431,6 +440,28 @@ status() {
 }
 INITD
 chmod +x /etc/init.d/devshot-desktop
+# Spec 451 — room for installed software and files in the home directory: the template disk is disk_gb above.
+# build-templates.sh bakes it at that size; the Go baker only grows the qcow2,
+# so this one-shot service grows the filesystem at boot before any workspace
+# service starts (idempotent; the cordis.sh pattern).
+apk add --no-cache e2fsprogs-extra
+cat > /etc/init.d/devshot-grow-root <<'GROWROOT'
+#!/sbin/openrc-run
+name="devshot-grow-root"
+description="Grow the Desktop root filesystem to the template disk size"
+depend() {
+  need localmount
+  before devshot-desktop
+}
+start() {
+  ebegin "Growing Desktop root filesystem"
+  /usr/sbin/resize2fs /dev/vda
+  eend $?
+}
+GROWROOT
+chmod +x /etc/init.d/devshot-grow-root
+rc-update add devshot-grow-root default
+
 rc-update add devshot-desktop default
 
 echo "=== desktop recipe complete ==="

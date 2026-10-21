@@ -34,7 +34,9 @@ PHP_EXTS="cli fpm opcache openssl pdo pdo_mysql mysqli curl gd mbstring \
 xml dom simplexml xmlreader xmlwriter iconv zip intl fileinfo phar \
 tokenizer session ctype bcmath exif sodium sockets"
 
-PKGS="nginx mariadb mariadb-client composer git wget tar gzip unzip ca-certificates openssl openrc util-linux"
+# ripgrep backs the project MCP's search_files (spec 451); file backs its MIME
+# types. Both are small.
+PKGS="nginx mariadb mariadb-client composer git wget tar gzip unzip ca-certificates openssl openrc util-linux ripgrep file"
 for ver in 82 83 84; do
   PKGS="$PKGS php${ver}"
   for ext in $PHP_EXTS; do

@@ -22,6 +22,7 @@
 # Spec 050 — declared listen ports auto-populate the per-VM forward allowlist:
 # devshot:exposed_ports=[{"port":3000,"name":"app","proto":"http"},{"port":8080,"name":"editor","proto":"http"}]
 # devshot:memory_mb=3072
+# devshot:disk_gb=12
 set -eux
 
 # --- Repos -----------------------------------------------------------
@@ -47,8 +48,9 @@ apk update || (sleep 5 && apk update)
 # wget/tar for the editor + ddev tarballs; curl is in the base, kept explicit.
 # docker + docker-cli + docker-cli-compose = the v2 engine + CLI + `docker
 # compose` plugin (all Alpine v3.23 community).
+# ripgrep backs the project MCP's search_files (spec 451).
 apk add --no-cache \
-  nodejs npm gcompat libstdc++ libc6-compat ca-certificates wget tar curl \
+  nodejs npm gcompat libstdc++ libc6-compat ca-certificates wget tar curl ripgrep file \
   docker docker-cli docker-cli-compose
 
 # --- E2E browser-verification harness (spec 270) ---------------------
@@ -90,6 +92,28 @@ cat > /etc/docker/daemon.json <<'DAEMONJSON'
   "cgroup-parent": "dockerd.slice"
 }
 DAEMONJSON
+
+# Spec 451 — room for Docker images and DDEV projects: the template disk is disk_gb above.
+# build-templates.sh bakes it at that size; the Go baker only grows the qcow2,
+# so this one-shot service grows the filesystem at boot before any workspace
+# service starts (idempotent; the cordis.sh pattern).
+apk add --no-cache e2fsprogs-extra
+cat > /etc/init.d/devshot-grow-root <<'GROWROOT'
+#!/sbin/openrc-run
+name="devshot-grow-root"
+description="Grow the Blank root filesystem to the template disk size"
+depend() {
+  need localmount
+  before docker openvscode-server
+}
+start() {
+  ebegin "Growing Blank root filesystem"
+  /usr/sbin/resize2fs /dev/vda
+  eend $?
+}
+GROWROOT
+chmod +x /etc/init.d/devshot-grow-root
+rc-update add devshot-grow-root default
 
 rc-update add cgroups boot
 rc-update add docker default

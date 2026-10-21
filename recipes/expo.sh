@@ -16,12 +16,13 @@
 # Run via: devshot-agent bake run --recipe=apps/agent/recipes/expo.sh --name=expo
 # devshot:exposed_ports=[{"port":8081,"name":"app","proto":"http"},{"port":8080,"name":"editor","proto":"http"}]
 # devshot:memory_mb=1536
+# devshot:disk_gb=8
 set -eux
 
 apk update
 apk add --no-cache \
   bash ca-certificates chromium chromium-swiftshader git gcompat nodejs npm \
-  sudo tar ttf-freefont wget
+  sudo tar ttf-freefont wget ripgrep file
 
 install -d -m 0750 /etc/sudoers.d
 printf 'devshot ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/devshot
@@ -188,6 +189,28 @@ depend() {
 }
 EXPO_SERVICE
 chmod 0755 /etc/init.d/devshot-expo
+# Spec 451 — room for node_modules, Metro caches and uploaded assets: the template disk is disk_gb above.
+# build-templates.sh bakes it at that size; the Go baker only grows the qcow2,
+# so this one-shot service grows the filesystem at boot before any workspace
+# service starts (idempotent; the cordis.sh pattern).
+apk add --no-cache e2fsprogs-extra
+cat > /etc/init.d/devshot-grow-root <<'GROWROOT'
+#!/sbin/openrc-run
+name="devshot-grow-root"
+description="Grow the Expo root filesystem to the template disk size"
+depend() {
+  need localmount
+  before devshot-perms devshot-expo openvscode-server
+}
+start() {
+  ebegin "Growing Expo root filesystem"
+  /usr/sbin/resize2fs /dev/vda
+  eend $?
+}
+GROWROOT
+chmod +x /etc/init.d/devshot-grow-root
+rc-update add devshot-grow-root default
+
 rc-update add devshot-expo default
 
 # Restore operations can change ownership. Repair only drifted entries before

@@ -16,7 +16,7 @@ set -eux
 apk update
 apk add --no-cache \
   git nodejs npm gcompat libstdc++ libc6-compat ca-certificates wget tar e2fsprogs-extra \
-  chromium chromium-swiftshader ttf-freefont
+  chromium chromium-swiftshader ttf-freefont ripgrep file
 
 # Runtime tools and the supervised services run as the unprivileged devshot user.
 install -d -m 0750 /etc/sudoers.d

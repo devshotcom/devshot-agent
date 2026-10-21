@@ -16,6 +16,7 @@
 # Spec 050 — declared listen ports auto-populate the per-VM forward allowlist:
 # devshot:exposed_ports=[{"port":3000,"name":"app","proto":"http"},{"port":8080,"name":"editor","proto":"http"}]
 # devshot:memory_mb=2048
+# devshot:disk_gb=8
 set -eux
 
 apk update
@@ -23,7 +24,8 @@ apk update
 # .node modules (watcher/spdlog/vsda) dlopen cleanly under musl; wget/tar
 # for the editor tarball. chromium (+swiftshader for GPU-less headless +
 # ttf-freefont) powers inspect_preview's real screenshot for the multimodal agent.
-apk add --no-cache git nodejs npm gcompat ca-certificates wget tar chromium chromium-swiftshader ttf-freefont
+# ripgrep: the project MCP's search_files (spec 451).
+apk add --no-cache git nodejs npm gcompat ca-certificates wget tar chromium chromium-swiftshader ttf-freefont ripgrep
 
 # Runtime tools and start-studio use sudo as the unprivileged devshot user.
 # Make that contract explicit in the flavored image instead of relying on the
@@ -1967,6 +1969,28 @@ depend() {
 }
 INITD
 chmod +x /etc/init.d/devshot-studio
+# Spec 451 — room for node_modules, .next builds, uploads and Chromium profiles: the template disk is disk_gb above.
+# build-templates.sh bakes it at that size; the Go baker only grows the qcow2,
+# so this one-shot service grows the filesystem at boot before any workspace
+# service starts (idempotent; the cordis.sh pattern).
+apk add --no-cache e2fsprogs-extra
+cat > /etc/init.d/devshot-grow-root <<'GROWROOT'
+#!/sbin/openrc-run
+name="devshot-grow-root"
+description="Grow the Studio root filesystem to the template disk size"
+depend() {
+  need localmount
+  before devshot-perms devshot-studio openvscode-server
+}
+start() {
+  ebegin "Growing Studio root filesystem"
+  /usr/sbin/resize2fs /dev/vda
+  eend $?
+}
+GROWROOT
+chmod +x /etc/init.d/devshot-grow-root
+rc-update add devshot-grow-root default
+
 rc-update add devshot-studio default
 
 # --- devshot-perms: webroot writable to devshot ON EVERY BOOT (spec 110) ----

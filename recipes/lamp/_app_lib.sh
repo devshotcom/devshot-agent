@@ -365,6 +365,12 @@ one definition file under vendor/shopware/core/<Area>; the storefront theme test
 fixtures at vendor/shopware/storefront/Resources (and, on dev checkouts,
 tests/unit/Storefront/Theme/fixtures) are good structural references.
 
+Tool names below (`shopware_check`, `run_e2e`, `inspect_preview`, `curate_images`)
+are DevShot Studio tools. Through the DevShot MCP (a project key), `shopware_check`
+and `run_e2e` exist under the same names, `screenshot` takes the place of
+`inspect_preview`, and `curate_images` is not offered: fetch photos with
+`download_url` or bring them from your own disk with `request_upload`.
+
 ## Theme (SCSS-only, no JS build)
 - Create every new theme with `bin/console theme:create <UpperCamelCaseName>` and
   edit that canonical scaffold. Its bootstrap MUST extend Plugin AND implement
@@ -414,8 +420,9 @@ tests/unit/Storefront/Theme/fixtures) are good structural references.
 - Seed ALL catalog/CMS data as CODE in the plugin install()/activate() lifecycle
   (where `$this->container->get('product.repository')->upsert(...)` works) — NEVER
   via admin API, raw SQL, or a MigrationStep (a MigrationStep has only a Doctrine
-  \Connection, no container). The DB is wiped on every fresh VM; only lifecycle code
-  re-seeds. Keep the implementation in `Setup/CatalogSeeder.php`. On FIRST install,
+  \Connection, no container). A fresh VM starts from the last workspace backup
+  (database dump included) or, without one, from the template database; only
+  lifecycle code re-seeds reliably. Keep the implementation in `Setup/CatalogSeeder.php`. On FIRST install,
   the plugin's own services.xml is not in the current compiled container yet: never
   call `$this->container->get(CatalogSeeder::class)` there. Instantiate the seeder
   with core repository/FileSaver services from `$this->container`; the exact core

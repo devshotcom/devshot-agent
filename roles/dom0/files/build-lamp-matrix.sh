@@ -141,7 +141,10 @@ apt-get update -qq >/dev/null 2>&1
 apt-get install -y -qq qemu-utils e2fsprogs >/dev/null 2>&1
 
 qemu-img convert -O raw /input/in.qcow2 /tmp/disk.raw
-truncate -s 6G /tmp/disk.raw
+# Spec 451 — 12 GB, not 6: a baked Shopware VM was 91 % full (537 MB free)
+# before the agent had uploaded one product photo. The qcow2 is compressed and
+# sparse, so the image does not grow; only what a VM writes lands on the host.
+truncate -s 12G /tmp/disk.raw
 e2fsck -fy /tmp/disk.raw 2>/dev/null || true
 resize2fs /tmp/disk.raw 2>/dev/null || true
 
