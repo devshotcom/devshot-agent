@@ -276,6 +276,15 @@ $dynamic_url = function () {
 };
 add_filter('option_siteurl', $dynamic_url);
 add_filter('option_home',    $dynamic_url);
+// WP_CONTENT_URL / WP_PLUGIN_URL are computed from the raw siteurl BEFORE
+// mu-plugins load, so content_url()/plugins_url() still carry the baked
+// http://localhost origin (https://localhost once is_ssl() is true), which the
+// proxy cannot map to this app port. Rebase them onto the forwarded origin.
+$rebase_origin = function ($url) use ($dynamic_url) {
+  return preg_replace('#^https?://(?:localhost|127\.0\.0\.1)(?::\d+)?#i', $dynamic_url(), (string) $url);
+};
+add_filter('content_url', $rebase_origin);
+add_filter('plugins_url', $rebase_origin);
 PHP
   set_editor_workspace /var/www/wordpress
 }
