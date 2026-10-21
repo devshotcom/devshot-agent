@@ -225,9 +225,37 @@ install_wordpress() {
   rm /tmp/wp.tar.gz
 
   cd /var/www/wordpress
+  # Spec 453 — WordPress behind a reverse proxy, the way the WordPress docs
+  # describe it ("Administration over SSL", reverse-proxy section): the proxy
+  # terminates TLS and speaks plain HTTP to nginx, so is_ssl() is read from
+  # X-Forwarded-Proto. WP_HOME/WP_SITEURL follow the request host only because
+  # the preview host changes with every claim generation; a site behind a fixed
+  # proxy would set them to constants. Defined here, in wp-config.php, they are
+  # in place before WP_CONTENT_URL/WP_PLUGIN_URL are derived from siteurl, so
+  # content_url()/plugins_url() need no filters. The proxy sends the public
+  # host as Host (spec 453), so canonical redirects have nothing to redirect
+  # and the old devshot-proxy.php mu-plugin is gone with them. WP-CLI runs
+  # without HTTP_HOST and keeps the baked http://localhost from the database.
+  cat > /tmp/wp-reverse-proxy.php <<'PHP'
+// Behind a TLS-terminating reverse proxy (X-Forwarded-Proto), as in the
+// WordPress documentation.
+if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
+  $_SERVER['HTTPS'] = 'on';
+}
+// The site's URL is the one it was reached on: the preview host changes with
+// every DevShot claim, so it cannot be a constant.
+if (!empty($_SERVER['HTTP_HOST'])) {
+  $devshot_request_origin = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http')
+    . '://' . $_SERVER['HTTP_HOST'];
+  define('WP_HOME', $devshot_request_origin);
+  define('WP_SITEURL', $devshot_request_origin);
+}
+PHP
   wp --allow-root config create \
     --dbname=wordpress --dbuser=wordpress --dbpass=wordpress \
-    --dbhost=127.0.0.1 --skip-check
+    --dbhost=127.0.0.1 --skip-check \
+    --extra-php < /tmp/wp-reverse-proxy.php
+  rm -f /tmp/wp-reverse-proxy.php
   wp --allow-root core install \
     --url=http://localhost \
     --title="DevShot WordPress ${version}" \
@@ -241,52 +269,8 @@ install_wordpress() {
   # like a failed core download does: an image without it is not the image.
   wp --allow-root plugin install elementor --activate \
     || { echo "ERROR: elementor install failed for wp ${version}" >&2; exit 1; }
-  # WP canonical_redirect kicks in any time the request Host doesn't
-  # match the configured siteurl — that's exactly what happens when
-  # the DevShot proxy forwards `Host: <vm>.local:80` and WP tries to
-  # send the browser back to `http://localhost/`. The redirect goes
-  # to a host the browser can't reach, surfacing as a blank iframe
-  # (the parent's CSP refuses to follow the cross-origin navigation).
-  #
-  # Install a must-use plugin that:
-  #   (1) removes WP's redirect_canonical filter outright, and
-  #   (2) rewrites HOME_URL / SITE_URL to the incoming request's
-  #       scheme+host so subdir asset URLs (wp-content/...) resolve
-  #       relative to whatever Host the proxy is sending today.
-  # Must-use plugins live in /wp-content/mu-plugins/ and auto-load
-  # without admin activation — perfect for opinionated baked-in
-  # fixes.
-  mkdir -p /var/www/wordpress/wp-content/mu-plugins
-  cat > /var/www/wordpress/wp-content/mu-plugins/devshot-proxy.php <<'PHP'
-<?php
-// Devshot proxy compatibility — drop canonical redirects and let
-// siteurl/home follow whatever Host the proxy is forwarding.
-remove_filter('template_redirect', 'redirect_canonical');
-add_filter('redirect_canonical', '__return_false');
-// The proxy terminates TLS and talks plain HTTP to nginx, so without this
-// WordPress believes it is http:// and emits http:// absolute URLs
-// (home_url, REST, redirect_to) into an https document.
-if (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') {
-  $_SERVER['HTTPS'] = 'on';
-}
-$dynamic_url = function () {
-  $scheme = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
-  $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-  return $scheme . '://' . $host;
-};
-add_filter('option_siteurl', $dynamic_url);
-add_filter('option_home',    $dynamic_url);
-// WP_CONTENT_URL / WP_PLUGIN_URL are computed from the raw siteurl BEFORE
-// mu-plugins load, so content_url()/plugins_url() still carry the baked
-// http://localhost origin (https://localhost once is_ssl() is true), which the
-// proxy cannot map to this app port. Rebase them onto the forwarded origin.
-$rebase_origin = function ($url) use ($dynamic_url) {
-  return preg_replace('#^https?://(?:localhost|127\.0\.0\.1)(?::\d+)?#i', $dynamic_url(), (string) $url);
-};
-add_filter('content_url', $rebase_origin);
-add_filter('plugins_url', $rebase_origin);
-PHP
   set_editor_workspace /var/www/wordpress
+
 }
 
 # install_shopware <version>
