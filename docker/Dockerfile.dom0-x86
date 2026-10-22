@@ -202,6 +202,12 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
         --set-val CONFIG_NFT_CHAIN_NAT y \
         --set-val CONFIG_NFT_CT y \
         --set-val CONFIG_NFT_REJECT y \
+        --set-val CONFIG_IPV6 y \
+        --set-val CONFIG_NF_TABLES_INET y \
+        --set-val CONFIG_NF_TABLES_IPV6 y \
+        --set-val CONFIG_NFT_REJECT_INET y \
+        --set-val CONFIG_NFT_LIMIT y \
+        --set-val CONFIG_NFT_LOG y \
         --set-val CONFIG_BRIDGE_NETFILTER y \
         --set-val CONFIG_IP_NF_IPTABLES y \
         --set-val CONFIG_IP_NF_FILTER y \
@@ -330,6 +336,7 @@ RUN apk add --no-cache \
 COPY --chmod=0755 recipes/lib/install-grok-speckit.sh /usr/local/libexec/devshot/install-grok-speckit.sh
 COPY --chmod=0755 recipes/lib/ensure-grok-speckit.sh /usr/local/libexec/devshot/ensure-grok-speckit.sh
 COPY --chmod=0755 recipes/lib/install-openvscode-service.sh /usr/local/libexec/devshot/install-openvscode-service.sh
+COPY --chmod=0755 recipes/lib/install-node.sh /usr/local/libexec/devshot/install-node.sh
 COPY --chmod=0755 recipes/lib/devshot-shopware-import.mjs /usr/local/bin/devshot-shopware-import
 
 COPY roles/dom0/files/verify-studio-runtime-prerequisites.sh /tmp/verify-studio-runtime-prerequisites.sh

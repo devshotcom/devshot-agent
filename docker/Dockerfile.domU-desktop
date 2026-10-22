@@ -72,6 +72,11 @@ COPY --chmod=0755 recipes/lib/install-grok-speckit.sh /usr/local/libexec/devshot
 COPY --chmod=0755 recipes/lib/ensure-grok-speckit.sh /usr/local/libexec/devshot/ensure-grok-speckit.sh
 RUN /usr/local/libexec/devshot/install-grok-speckit.sh
 
+# Alpine's nodejs trails nodejs.org security releases; run the
+# current Node LTS instead (recipes/lib/install-node.sh).
+COPY --chmod=0755 recipes/lib/install-node.sh /usr/local/libexec/devshot/install-node.sh
+RUN /usr/local/libexec/devshot/install-node.sh
+
 COPY roles/dom0/files/verify-studio-runtime-prerequisites.sh /tmp/verify-studio-runtime-prerequisites.sh
 RUN /bin/sh /tmp/verify-studio-runtime-prerequisites.sh && \
     rm -f /tmp/verify-studio-runtime-prerequisites.sh

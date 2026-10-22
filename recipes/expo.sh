@@ -24,6 +24,10 @@ apk add --no-cache \
   bash ca-certificates chromium chromium-swiftshader git gcompat nodejs npm \
   sudo tar ttf-freefont wget ripgrep file
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+/usr/local/libexec/devshot/install-node.sh
+
 install -d -m 0750 /etc/sudoers.d
 printf 'devshot ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/devshot
 chmod 0440 /etc/sudoers.d/devshot

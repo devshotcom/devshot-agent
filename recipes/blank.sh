@@ -53,6 +53,10 @@ apk add --no-cache \
   nodejs npm gcompat libstdc++ libc6-compat ca-certificates wget tar curl ripgrep file \
   docker docker-cli docker-cli-compose
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+/usr/local/libexec/devshot/install-node.sh
+
 # --- E2E browser-verification harness (spec 270) ---------------------
 # devshot-verify / devshot-army / the run_e2e tool drive a REAL headless
 # chromium via puppeteer-core from the fixed /opt path. Blank was the one

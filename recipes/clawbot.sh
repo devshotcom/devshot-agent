@@ -22,9 +22,13 @@ apk add --no-cache \
     build-base python3 \
     ca-certificates
 
-# OpenClaw requires Node 22.14+ or 24. Alpine 3.23 ships Node 24.x, so
-# the apk-installed nodejs already meets the floor — no extra version
-# pinning needed.
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+/usr/local/libexec/devshot/install-node.sh
+
+# OpenClaw requires Node 22.14+ or 24. install-node.sh above puts the
+# current Node 24 LTS in place, so the floor is met; the check stays as a
+# guard for offline bakes that keep Alpine's nodejs.
 node_major=$(node -p 'process.versions.node.split(".")[0]')
 if [ "$node_major" -lt 22 ]; then
     echo "ERROR: openclaw needs Node 22.14+ or 24, got $(node --version)" >&2

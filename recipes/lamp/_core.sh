@@ -442,6 +442,10 @@ rm -f /etc/nginx/http.d/default.conf
 # stubs Alpine needs to dlopen those modules cleanly.
 apk add --no-cache nodejs npm gcompat
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+/usr/local/libexec/devshot/install-node.sh
+
 # E2E browser-testing harness — parity with the studio recipe so EVERY LAMP-matrix
 # flavor (Shopware/WordPress/TYPO3/plain LAMP) can run the agent's run_e2e tool.
 # Without it, run_e2e fails on every Shopware build with "puppeteer-core not

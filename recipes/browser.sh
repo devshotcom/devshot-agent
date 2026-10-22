@@ -116,6 +116,10 @@ apk add --no-cache \
     xdotool scrot xclip \
     nodejs npm
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+/usr/local/libexec/devshot/install-node.sh
+
 # Playwright-core install. Pinned location so spec-056's automation
 # layer always finds it at the same path regardless of who started
 # Chromium. Using `playwright-core` (not full `playwright`) skips the

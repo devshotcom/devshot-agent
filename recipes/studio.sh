@@ -27,6 +27,10 @@ apk update
 # ripgrep: the project MCP's search_files (spec 451).
 apk add --no-cache git nodejs npm gcompat ca-certificates wget tar chromium chromium-swiftshader ttf-freefont ripgrep
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+/usr/local/libexec/devshot/install-node.sh
+
 # Runtime tools and start-studio use sudo as the unprivileged devshot user.
 # Make that contract explicit in the flavored image instead of relying on the
 # base template to carry the drop-in forever.

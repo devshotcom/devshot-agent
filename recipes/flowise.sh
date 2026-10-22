@@ -28,6 +28,11 @@ else
   apk add --no-cache nodejs npm git build-base python3 ca-certificates
 fi
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+# Offline 9p bakes keep the cached apk Node; the installer warns and goes on.
+/usr/local/libexec/devshot/install-node.sh
+
 # Flowise's tree includes some sqlite/native-bindings packages that
 # build via node-gyp during global install — build-base + python3 above
 # cover them. npm install over Mac dev's nested slirp NAT is slow

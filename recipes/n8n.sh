@@ -31,6 +31,11 @@ else
   apk add --no-cache nodejs npm git build-base python3 ca-certificates
 fi
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+# Offline 9p bakes keep the cached apk Node; the installer warns and goes on.
+/usr/local/libexec/devshot/install-node.sh
+
 # Global install — n8n's own postinstall hook handles compile of native
 # deps via node-gyp (build-base + python3 above are required for that).
 # npm install runs over the bake VM's slirp NAT to npmjs.org. Most

@@ -73,6 +73,10 @@ apk add --no-cache \
     feh \
     ripgrep file nodejs npm
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+/usr/local/libexec/devshot/install-node.sh
+
 # Spec 451 — the project MCP's screenshot tool drives the apk Chromium through
 # puppeteer-core at this fixed path (as studio.sh / lamp / blank / expo do), so
 # Desktop reports console errors and broken images too. puppeteer-core ships

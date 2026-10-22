@@ -18,6 +18,10 @@ set -eux
 apk update
 apk add --no-cache git nodejs npm ca-certificates
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh).
+/usr/local/libexec/devshot/install-node.sh
+
 # Latest Next.js starter. npx pulls create-next-app@latest from npm at
 # bake time, so every rebuild picks up whatever's current. --yes accepts
 # defaults (TypeScript + ESLint + Tailwind + App Router) and --use-npm

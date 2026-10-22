@@ -116,12 +116,16 @@ DEVSHOT_HMAC_SECRET=${DEVSHOT_HMAC_SECRET}
 DEVSHOT_TUNNEL_URL=${DEVSHOT_TUNNEL_URL}
 DEVSHOT_TLS_SKIP=${DEVSHOT_TLS_SKIP:-0}
 # POOL_SIZE intentionally NOT written: agent reads its target from
-# the console's `config` push (servers.pool_size). See
+# the console's config push (servers.pool_size). See
 # apps/agent/go/vmmanager.go.
 READY_TIMEOUT=${READY_TIMEOUT:-300000}
 LOG_LEVEL=${LOG_LEVEL:-info}
 LAMP_SYNC_INTERVAL=${LAMP_SYNC_INTERVAL:-5m}
 LAMP_SYNC_DOWNLOAD_TIMEOUT=${LAMP_SYNC_DOWNLOAD_TIMEOUT:-30m}
+# The Dom0 agent keeps disks and templates on the 9p-shared /xen (the
+# container's volumes). Without this it fell back to /var/lib/xen/guests,
+# which the Dom0 rootfs does not have, and refused to start.
+GUESTS_DIR=/xen/guests
 S3_ENDPOINT=${S3_ENDPOINT:-}
 S3_BUCKET=${S3_BUCKET:-}
 S3_ACCESS_KEY=${S3_ACCESS_KEY:-}

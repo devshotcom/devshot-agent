@@ -58,6 +58,7 @@ LAMP_DIR="$(cd "$LAMP_DIR_RAW" && pwd)"
 BASE_QCOW="$BUILD_DIR/devshot-guest-base.qcow2"
 SHARED_QCOW="$BUILD_DIR/devshot-guest-lamp-shared.qcow2"
 CORE_RECIPE="$LAMP_DIR/_core.sh"
+NODE_INSTALLER="$LAMP_DIR/../lib/install-node.sh"
 APP_LIB="$LAMP_DIR/_app_lib.sh"
 DISCOVERY="$SCRIPT_DIR/discover-lamp-variants.py"
 
@@ -159,6 +160,9 @@ ORIG_RESOLV="$(cat /mnt/etc/resolv.conf 2>/dev/null || true)"
 echo 'nameserver 1.1.1.1' > /mnt/etc/resolv.conf
 echo 'nameserver 8.8.8.8' >> /mnt/etc/resolv.conf
 
+# The recipes call the Node installer at its base-image path. A
+# base qcow2 baked before it existed would not have it, so mount it in.
+install -D -m 0755 /install-node.sh /mnt/usr/local/libexec/devshot/install-node.sh
 cp /recipe.sh /mnt/tmp/recipe.sh
 chmod +x /mnt/tmp/recipe.sh
 
@@ -287,6 +291,7 @@ else
     -e BASE_TEMPLATE="" \
     -v "$INNER_SCRIPT:/build.sh:ro" \
     -v "$RUNTIME_VERIFY_SCRIPT:/verify-studio-runtime-prerequisites.sh:ro" \
+    -v "$NODE_INSTALLER:/install-node.sh:ro" \
     -v "$BASE_QCOW:/input/in.qcow2:ro" \
     -v "$CORE_RECIPE:/recipe.sh:ro" \
     -v "$LAMP_DIR:/recipe.d:ro" \
@@ -361,6 +366,7 @@ RECIPE
     -e BASE_TEMPLATE=lamp-shared \
     -v "$INNER_SCRIPT:/build.sh:ro" \
     -v "$RUNTIME_VERIFY_SCRIPT:/verify-studio-runtime-prerequisites.sh:ro" \
+    -v "$NODE_INSTALLER:/install-node.sh:ro" \
     -v "$SHARED_QCOW:/input/in.qcow2:ro" \
     -v "$variant_recipe:/recipe.sh:ro" \
     -v "$LAMP_DIR:/recipe.d:ro" \

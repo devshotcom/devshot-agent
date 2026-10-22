@@ -60,6 +60,10 @@ else
     fi
 fi
 
+# Replace Alpine's lagging nodejs with the current LTS release
+# from nodejs.org (see recipes/lib/install-node.sh). Offline bakes keep apk's.
+/usr/local/libexec/devshot/install-node.sh
+
 # Single-file server. node-stdlib only so install is just `apk add
 # nodejs`. The same script also runs as a one-liner on any VM that
 # already has node:
