@@ -269,6 +269,13 @@ PHP
   # like a failed core download does: an image without it is not the image.
   wp --allow-root plugin install elementor --activate \
     || { echo "ERROR: elementor install failed for wp ${version}" >&2; exit 1; }
+  # Spec 459 — `wp devshot elementor` (dump/widget/patch/insert/remove/kit):
+  # the way Studio's agent changes Elementor pages, through Elementor's own
+  # Document::save() instead of raw _elementor_data. The bake fails when the
+  # command does not register.
+  install -D -m 0644 /tmp/recipe.d/devshot-elementor.php wp-content/mu-plugins/devshot-elementor.php
+  wp --allow-root devshot elementor widgets --search=heading >/dev/null \
+    || { echo "ERROR: wp devshot elementor does not run on wp ${version}" >&2; exit 1; }
   set_editor_workspace /var/www/wordpress
 
 }

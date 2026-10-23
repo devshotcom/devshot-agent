@@ -151,6 +151,23 @@ id -u devshot >/dev/null 2>&1 || adduser -D -s /bin/bash devshot
 ln -sf /usr/bin/php${PHP_DEFAULT} /usr/bin/php
 php -m | grep -qi mysqli || { echo "ERROR: mysqli not loaded on /usr/bin/php" >&2; php -m; exit 1; }
 
+# The same apk wrapper is `/usr/bin/composer`: a two-line sh script that runs
+# `/usr/bin/php85 /usr/bin/composer.phar`, hard-wired to the newest PHP, and
+# the symlink above does not reach it. Composer then resolves every
+# create-project against PHP 8.5 and writes a vendor/composer/platform_check.php
+# demanding it, while bin/console, wp-cli and FPM run on php83. The first bake
+# after the v3.24 pin died exactly there (agent run 39991474551, 2026-10-23):
+# "Your Composer dependencies require a PHP version >= 8.4.1. You are running
+# 8.3.36" — and no AMD64 image shipped. Rewrite the wrapper so Composer resolves
+# on the SAME interpreter the apps run on, and prove it before any app installs.
+cat > /usr/bin/composer <<COMPOSER
+#!/bin/sh
+exec /usr/bin/php${PHP_DEFAULT} /usr/bin/composer.phar "\$@"
+COMPOSER
+chmod 0755 /usr/bin/composer
+composer show --platform 2>/dev/null | grep -q "^php  *$(php${PHP_DEFAULT} -r 'echo PHP_VERSION;')" \
+  || { echo "ERROR: composer does not run on php${PHP_DEFAULT}" >&2; composer show --platform; exit 1; }
+
 # Keep Shopware maintenance inside the 1536 MiB guest contract. Every ordinary
 # CLI call still runs as the workload user, but commands that rebuild the
 # container/theme are serialized while FPM is quiesced. This removes the only
