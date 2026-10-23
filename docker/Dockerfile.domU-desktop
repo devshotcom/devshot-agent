@@ -59,7 +59,7 @@ RUN apk add --no-cache \
     # run without restarting Xvnc.
     nodejs npm xrandr \
     # GTK theme + icons
-    greybird-themes-gtk2 greybird-themes-gtk3 numix-themes-openbox \
+    greybird-themes-gtk3 numix-themes-openbox \
     adwaita-icon-theme papirus-icon-theme \
     # Fonts
     font-noto font-noto-emoji \

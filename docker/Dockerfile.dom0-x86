@@ -255,7 +255,7 @@ RUN chroot /rootfs bash -c ' \
         bridge-utils dnsmasq openssh-server tmux \
         sudo iproute2 net-tools iputils-ping \
         curl wget vim-tiny ca-certificates \
-        procps kmod udev systemd systemd-sysv \
+        procps kmod udev systemd systemd-sysv systemd-timesyncd \
         python3 qemu-utils nbd-client \
         libpixman-1-0 nftables conntrack \
         clamav clamav-daemon clamav-freshclam yara \
@@ -306,6 +306,7 @@ RUN set -eux && \
     chmod 440 "$ROOTFS/etc/sudoers.d/devshot" && \
     printf '[Unit]\nDescription=DevShot Agent (Dom0 orchestrator)\nAfter=xen-nat.service\nRequires=xen-nat.service\n\n[Service]\nEnvironmentFile=/xen/agent.env\nEnvironment=XS_REAL=1\nExecStart=/opt/devshot/agent\nRestart=always\nRestartSec=5\nStandardOutput=append:/xen/orchestrator.log\nStandardError=append:/xen/orchestrator.log\n\n[Install]\nWantedBy=multi-user.target\n' > "$ROOTFS/etc/systemd/system/devshot-agent.service" && \
     chroot "$ROOTFS" bash -c 'systemctl enable devshot-agent 2>/dev/null || true' && \
+    chroot "$ROOTFS" systemctl enable systemd-timesyncd && \
     mkdir -p "$ROOTFS/usr/libexec" "$ROOTFS/usr/lib/xen/bin" && \
     ln -sf /usr/bin/qemu-system-x86_64 "$ROOTFS/usr/libexec/xen-qemu-system-i386" && \
     ln -sf /usr/bin/qemu-system-x86_64 "$ROOTFS/usr/lib/xen/bin/qemu-system-i386" && \

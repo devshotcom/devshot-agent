@@ -256,7 +256,7 @@ RUN chroot /rootfs bash -c ' \
         bridge-utils dnsmasq openssh-server tmux \
         sudo iproute2 net-tools iputils-ping \
         curl wget vim-tiny ca-certificates \
-        procps kmod udev systemd systemd-sysv \
+        procps kmod udev systemd systemd-sysv systemd-timesyncd \
         python3 qemu-utils nbd-client \
         libpixman-1-0 \
     && rm -rf /var/lib/apt/lists/*'
@@ -297,6 +297,11 @@ RUN chroot /rootfs bash -c ' \
     chown -R clamav:clamav /var/lib/clamav && \
     sed -i "s/^Example/#Example/" /etc/clamav/clamd.conf && \
     systemctl enable clamav-daemon 2>/dev/null || true'
+
+# Keep the nested Dom0's clock on real time. The console rejects EDR heartbeats
+# older than 60 s; without NTP the Dom0 clock drifts behind and the console
+# keeps dropping its tunnel ("EDR sensor attestation failed").
+RUN chroot /rootfs systemctl enable systemd-timesyncd
 
 # YARA: deploy rules
 COPY yara_rules /rootfs/opt/devshot/yara_rules

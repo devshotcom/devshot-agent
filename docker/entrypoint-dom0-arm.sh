@@ -173,7 +173,7 @@ start_qemu() {
     -daemonize \
     -kernel /xen/xen \
     -append "dom0_mem=${DOM0_MEM}M,max:${DOM0_MEM}M loglvl=all guest_loglvl=all console=dtuart" \
-    -device guest-loader,addr=0x49000000,kernel=/xen/Image,bootargs="console=hvc0 root=/dev/vda rw earlyprintk=xenboot" \
+    -device guest-loader,addr=0x49000000,kernel=/xen/Image,bootargs="console=hvc0 root=/dev/vda rw earlyprintk=xenboot net.ifnames=0" \
     -drive file=/xen/dom0-rootfs-work.qcow2,format=qcow2,if=none,id=hd0 \
     -device virtio-blk-device,drive=hd0 \
     -netdev user,id=net0 \

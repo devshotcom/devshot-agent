@@ -67,7 +67,7 @@ apk add --no-cache \
     dbus dbus-x11 \
     xdotool scrot xclip \
     chromium chromium-swiftshader \
-    greybird-themes-gtk2 greybird-themes-gtk3 numix-themes-openbox \
+    greybird-themes-gtk3 numix-themes-openbox \
     adwaita-icon-theme papirus-icon-theme \
     font-noto font-noto-emoji \
     feh \

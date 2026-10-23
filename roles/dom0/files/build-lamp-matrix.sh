@@ -68,6 +68,7 @@ DISCOVERY="$SCRIPT_DIR/discover-lamp-variants.py"
 [ -f "$APP_LIB" ]     || { echo "ERROR: missing $APP_LIB" >&2; exit 1; }
 [ -f "$DISCOVERY" ]   || { echo "ERROR: missing $DISCOVERY" >&2; exit 1; }
 [ -f "$RUNTIME_VERIFY_SCRIPT" ] || { echo "ERROR: missing $RUNTIME_VERIFY_SCRIPT" >&2; exit 1; }
+[ -f "$NODE_INSTALLER" ] || { echo "ERROR: missing $NODE_INSTALLER (recipes/lib beside the lamp recipes dir)" >&2; exit 1; }
 
 RECIPES_ROOT="$(cd "$LAMP_DIR/.." && pwd)"
 DESKTOP_RECIPE="$RECIPES_ROOT/desktop.sh"
