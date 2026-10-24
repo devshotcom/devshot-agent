@@ -22,6 +22,9 @@
 #   DEVSHOT_BIN_DIR       Where to install the CLI (default: /usr/local/bin)
 #   DEVSHOT_API_BASE      Override the console URL the CLI bootstraps
 #                         against (default: https://console.devshot.com)
+#   DEVSHOT_SELFHEAL=0    Skip host self-healing (hardware watchdog, reboot on
+#                         kernel panic/lockup, persistent journal, kernel
+#                         updates held back). Default: on for Linux hosts.
 
 set -eu
 
@@ -216,6 +219,17 @@ fetch_cli() {
 }
 
 # ── Print the next-steps banner ─────────────────────────────────────────
+# ── Host self-healing (Linux): hardware watchdog, reboot on kernel panic or
+#    lockup, persistent journal, kernel updates held back. The CLI owns the
+#    step (`devshot selfheal`, also run by up / update / auto-update); this
+#    runs it once at install. Never fails the install. Opt out with
+#    DEVSHOT_SELFHEAL=0.
+run_selfheal() {
+  # The CLI records an opt-out so later `devshot up` / `update` keep it.
+  $SUDO env DEVSHOT_SELFHEAL="${DEVSHOT_SELFHEAL:-}" "$CLI_PATH" selfheal || warn "Host self-healing did not complete — re-run 'sudo devshot selfheal'"
+  return 0
+}
+
 print_next_steps() {
   cat <<EOF
 
@@ -244,6 +258,7 @@ main() {
   ensure_docker
   check_kvm
   install_cli
+  if [ "$PLATFORM" = "linux" ]; then run_selfheal; fi
   print_next_steps
 }
 

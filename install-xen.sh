@@ -8,6 +8,9 @@
 # Docker. The native Xen setup happens in:
 #
 #   sudo devshot up --auth-key=ds_<key> --target=linux-amd64-xen-baremetal
+#
+# DEVSHOT_SELFHEAL=0 skips host self-healing (hardware watchdog, reboot on
+# kernel panic/lockup, persistent journal, kernel updates held back).
 
 set -eu
 
@@ -98,6 +101,17 @@ install_cli() {
   ok "Installed: $CLI_PATH"
 }
 
+# ── Host self-healing (Linux): hardware watchdog, reboot on kernel panic or
+#    lockup, persistent journal, kernel updates held back. The CLI owns the
+#    step (`devshot selfheal`, also run by up / update / auto-update); this
+#    runs it once at install. Never fails the install. Opt out with
+#    DEVSHOT_SELFHEAL=0.
+run_selfheal() {
+  # The CLI records an opt-out so later `devshot up` / `update` keep it.
+  $SUDO env DEVSHOT_SELFHEAL="${DEVSHOT_SELFHEAL:-}" "$CLI_PATH" selfheal || warn "Host self-healing did not complete — re-run 'sudo devshot selfheal'"
+  return 0
+}
+
 print_next_steps() {
   cat <<EOF
 
@@ -118,6 +132,7 @@ main() {
   need_root
   warn "This installer intentionally does not install Docker."
   install_cli
+  run_selfheal
   print_next_steps
 }
 
