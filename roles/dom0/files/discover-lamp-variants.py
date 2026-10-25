@@ -37,6 +37,17 @@ DENY = {
     # Shopware 6.4 EOL Aug 2024; shopware/recovery composer.lock broken
     # post-EOL, post-install script fails. Needs custom install path.
     ("shopware", "6.4"),
+    # Shopware 6.5: its last release, 6.5.8.19, carries security advisories
+    # that will never be fixed (PKSA-qf56-zbmm-29m8, PKSA-y5sy-w7mt-r97k,
+    # PKSA-rnpb-7fbj-phyz, …), and Composer's audit refuses to load an
+    # advised package for create-project — "found shopware/core[v6.5.8.19]
+    # but these were not loaded, because they are affected by security
+    # advisories". Discovery still saw a patch inside the support window, so
+    # every nightly rebake from 2026-10-22 on baked nine variants and died in
+    # lamp-release-verify.py on "current bake is incomplete: missing
+    # lamp-sw-6.5". A template that cannot be installed without disabling the
+    # audit is not one to ship.
+    ("shopware", "6.5"),
     # TYPO3 v11 free support ended Oct 2024; `vendor/bin/typo3 setup`
     # is a v12+ CLI. v11 install needs LocalConfiguration.php + SQL
     # schema import, not modeled in _app_lib.sh.

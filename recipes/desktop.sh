@@ -353,11 +353,22 @@ su -s /bin/sh devshot -c "Xvnc :0 \
   -AcceptSetDesktopSize -pn -localhost=0 -UseBlacklist=0 \
   >/tmp/xvnc.log 2>&1 &"
 
-# Wait briefly for the X socket to appear before launching openbox.
-for _ in $(seq 1 20); do
-  [ -S /tmp/.X11-unix/X0 ] && break
-  sleep 0.1
+# Wait for the X server to ACCEPT connections before launching openbox. The
+# socket file appears before Xvnc answers on it; on a 2 GB pool VM that gap
+# outlived the old 2 s wait, openbox-session died with "Failed to open the
+# display" and the person got a VNC frame of a bare black root window
+# (spec 459, measured 2026-10-24 on the studio-desktop template). xdotool is
+# part of this image; a query that succeeds means the display is open.
+_x_ready=0
+for _ in $(seq 1 150); do
+  if [ -S /tmp/.X11-unix/X0 ] \
+    && su -s /bin/sh devshot -c "DISPLAY=:0 xdotool getdisplaygeometry" >/dev/null 2>&1; then
+    _x_ready=1
+    break
+  fi
+  sleep 0.2
 done
+[ "$_x_ready" = "1" ] || echo "start-desktop: X display :0 not answering after 30s — starting openbox anyway" >&2
 
 # Openbox window manager + autostart (compositor + wallpaper + dock).
 su -s /bin/sh devshot -c "DISPLAY=:0 HOME=/home/devshot openbox-session \
@@ -392,14 +403,35 @@ cat > /usr/local/bin/devshot-browser <<'BROWSER'
 #!/bin/sh
 set -eu
 export DISPLAY=:0
+PROFILE="${HOME:-/home/devshot}/.config/chromium"
 
-if pgrep chromium >/dev/null 2>&1; then
+# Is a Chromium already using this profile? Chromium's own lock names the
+# process that holds it (SingletonLock -> <host>-<pid>); a stale lock from a
+# hard stop names a dead pid. `pgrep chromium` alone missed the Alpine
+# launcher (chromium-launcher.sh) in its first second, so two instances
+# started 50 s apart and the profile lock ended one of them ("chromium is
+# always closing", spec 459, 2026-10-25).
+browser_running() {
+  lock="$(readlink "$PROFILE/SingletonLock" 2>/dev/null || true)"
+  pid="${lock##*-}"
+  if [ -n "$pid" ] && [ "$pid" != "$lock" ] && [ -d "/proc/$pid" ]; then return 0; fi
+  pgrep -f '/usr/lib/chromium/chromium|chromium-launcher|^chromium' >/dev/null 2>&1
+}
+
+if browser_running; then
   xdotool search --onlyvisible --class chromium windowactivate --sync >/dev/null 2>&1 || true
   exit 0
 fi
 
+# Nobody holds the profile: a lock left by a hard stop would make the new
+# instance hand its URL to a ghost and exit.
+rm -f "$PROFILE/SingletonLock" "$PROFILE/SingletonSocket" "$PROFILE/SingletonCookie" 2>/dev/null || true
+
+# --disable-gpu: Xvnc has no GPU; without the flag Chromium logs a failed
+# GpuControl.CreateCommandBuffer on every start before it falls back.
 nohup chromium \
   --no-sandbox \
+  --disable-gpu \
   --disable-features=Translate \
   --disable-dev-shm-usage \
   --start-maximized \
