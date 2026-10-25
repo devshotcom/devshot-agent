@@ -8,9 +8,9 @@
 #   - no app stack is baked in: the guest agent's Grok installs WordPress,
 #     Next.js or whatever the request needs, in the open, with internet on
 #     (the console's desktop stack declares it);
-#   - the agent's terminal is visible on the desktop: every studio-exec
-#     appends to /var/log/devshot/agent-terminal.log (studio_actions.go) and
-#     an xterm on :0 tails it;
+#   - the agent's terminal is one menu click away on the desktop: every
+#     studio-exec appends to /var/log/devshot/agent-terminal.log
+#     (studio_actions.go) and "Agent terminal" opens an xterm that tails it;
 #   - the agent's governed Chromium opens on :0 instead of headless
 #     (studio_browser.go studioBrowserDisplay), so the person watching the
 #     VNC desktop sees the page the agent reads;
@@ -65,7 +65,7 @@ su -s /bin/sh devshot -c "git config --global init.defaultBranch main && \
   git config --global user.email 'studio@devshot.com' && \
   git config --global --add safe.directory '*'"
 
-# ── 3. The agent's terminal, visible on the desktop ───────────────────────
+# ── 3. The agent's terminal, on demand on the desktop ─────────────────────
 # studio_actions.go appends every studio-exec (command, then the head of its
 # output) to this log when the directory exists. The agent runs as root and
 # the desktop session as devshot, so the file is group-writable and the
@@ -75,33 +75,42 @@ install -m 0664 -o devshot -g devshot /dev/null /var/log/devshot/agent-terminal.
 printf '# DevShot Studio — the agent'"'"'s terminal. Every command the agent runs lands here.\n' \
   > /var/log/devshot/agent-terminal.log
 
-# The xterm the person sees: bottom half of the 1280x800 desktop, tailing the
-# log. `-hold` keeps it up if tail ever dies; Openbox restarts nothing, so the
-# launcher re-opens it when it is gone (devshot-agent-terminal below).
+# The xterm: bottom half of the 1280x800 desktop, tailing the log. Operator
+# 2026-10-25: it runs from the moment the desktop starts, but in the
+# BACKGROUND — minimized into the taskbar (`--background`, xterm -iconic), so
+# it covers nothing; the taskbar entry or the menu item below brings it up.
 cat > /usr/local/bin/devshot-agent-terminal <<'TERMINAL'
 #!/bin/sh
 # Show (or raise) the xterm that tails the agent's terminal log on :0.
+# --background: start it minimized (the desktop's autostart), never raise it.
 export DISPLAY=:0
 LOG=/var/log/devshot/agent-terminal.log
+background=0
+[ "${1-}" = "--background" ] && background=1
 if xdotool search --name '^DevShot Agent$' >/dev/null 2>&1; then
+  [ "$background" = "1" ] && exit 0
   xdotool search --name '^DevShot Agent$' windowactivate --sync >/dev/null 2>&1 || true
   exit 0
 fi
-exec xterm -T 'DevShot Agent' -fa 'Noto Sans Mono' -fs 10 \
+iconic=""
+[ "$background" = "1" ] && iconic="-iconic"
+exec xterm $iconic -T 'DevShot Agent' -fa 'Noto Sans Mono' -fs 10 \
   -bg '#101114' -fg '#d7d8dc' -geometry 158x20+0-0 \
   -e sh -c "tail -n 60 -F $LOG"
 TERMINAL
 chmod 0755 /usr/local/bin/devshot-agent-terminal
 
-# Openbox autostart (desktop.sh wrote compositor, wallpaper, dock): add the
-# agent terminal after the panel so it stacks above the wallpaper.
+# Openbox autostart (desktop.sh wrote compositor, wallpaper, dock): the agent
+# terminal starts with the desktop, minimized. An earlier bake opened it in
+# front; that line is replaced.
 AUTOSTART="$DEVSHOT_HOME/.config/openbox/autostart"
-grep -q devshot-agent-terminal "$AUTOSTART" 2>/dev/null || cat >> "$AUTOSTART" <<'AUTOSTART_ADD'
-# Spec 459 — the agent's terminal, open on the desktop.
-(sleep 2; /usr/local/bin/devshot-agent-terminal) >/dev/null 2>&1 &
+if [ -f "$AUTOSTART" ]; then
+  sed -i '/the agent.s terminal/d; /devshot-agent-terminal/d' "$AUTOSTART"
+  cat >> "$AUTOSTART" <<'AUTOSTART_ADD'
+# Spec 459 — the agent's terminal, running in the background (minimized).
+(sleep 2; /usr/local/bin/devshot-agent-terminal --background) >/dev/null 2>&1 &
 AUTOSTART_ADD
-chown devshot:devshot "$AUTOSTART"
-chmod +x "$AUTOSTART"
+fi
 
 # Openbox menu entry next to the desktop's own Terminal item.
 RCXML="$DEVSHOT_HOME/.config/openbox/rc.xml"
@@ -217,7 +226,12 @@ grep -q 'browser-open' /usr/local/bin/devshot-browser
 browser_open_status=0
 /opt/devshot/agent browser-open --socket=/nonexistent/devshot-desktop-browser.sock 2>/dev/null || browser_open_status=$?
 test "$browser_open_status" -eq 75
-grep -q devshot-agent-terminal "$AUTOSTART"
+# The agent terminal starts with the desktop, minimized — never in front.
+grep -q 'devshot-agent-terminal --background' "$AUTOSTART"
+if grep devshot-agent-terminal "$AUTOSTART" | grep -qv -- '--background'; then
+  echo "ERROR: the agent terminal opens in front at login" >&2; exit 1
+fi
+grep -q -- '-iconic' /usr/local/bin/devshot-agent-terminal
 # The guest agent in this image must know the subcommand: an older binary
 # would start the role-based agent instead of answering, so the bake fails
 # here rather than shipping a wrapper that misbehaves.
