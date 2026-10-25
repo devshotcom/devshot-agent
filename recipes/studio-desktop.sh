@@ -176,11 +176,33 @@ if [ -f "$TINT2RC" ]; then
   sed -i 's|^launcher_item_app = /usr/share/applications/chromium.desktop|launcher_item_app = /usr/local/share/applications/chromium.desktop|' "$TINT2RC"
 fi
 
+# ── 4b. The desktop starts on demand ─────────────────────────────────────
+# Operator 2026-10-25: the machine does not boot into a desktop. Until the
+# agent needs a screen (a desktop app, computer_use, a look at the page in a
+# real window) the terminal and the app's port are enough, and a website
+# build never pays for Xvnc, Openbox and a compositor. desktop.sh enabled the
+# service for the public desktop demo; this image takes it out of the
+# runlevel. Every devshot-desktop action starts it first when it is off
+# (go/desktop_start.go), and the agent's shell can run `devshot-desktop
+# start`. The agent runs as devshot, and the claim drops its general sudo
+# rule on other stacks, so exactly this one command gets its own rule.
+rc-update del devshot-desktop default 2>/dev/null || true
+cat > /etc/sudoers.d/devshot-desktop-start <<'SUDOERS'
+devshot ALL=(root) NOPASSWD: /usr/local/bin/start-desktop -d
+SUDOERS
+chmod 0440 /etc/sudoers.d/devshot-desktop-start
+
 # ── 5. Verify ─────────────────────────────────────────────────────────────
 for binary in curl jq unzip rsync bash python3 gcc; do
   command -v "$binary" >/dev/null 2>&1 || { echo "ERROR: studio-desktop is missing $binary" >&2; exit 1; }
 done
 test -x /usr/local/bin/devshot-agent-terminal
+# The desktop is off at boot and starts on demand.
+if rc-update show default 2>/dev/null | grep -q devshot-desktop; then
+  echo "ERROR: the desktop still starts at boot" >&2; exit 1
+fi
+visudo -c -f /etc/sudoers.d/devshot-desktop-start >/dev/null
+/usr/local/bin/devshot-desktop help | grep -q 'start the desktop if it is off'
 # Every launcher ends at the agent's browser: no Exec of the package binary
 # left in the shadowing entry, the dock pointing at it, `chromium` the wrapper.
 if grep -q '^Exec=/usr/bin/chromium' /usr/local/share/applications/chromium.desktop; then
