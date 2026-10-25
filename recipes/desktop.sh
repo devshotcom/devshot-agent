@@ -405,6 +405,16 @@ set -eu
 export DISPLAY=:0
 PROFILE="${HOME:-/home/devshot}/.config/chromium"
 
+# Spec 459 — on a Studio Desktop the desktop's one browser is the agent's
+# (go/studio_browser_desktop.go): it opens the URL in the tab the person and
+# the agent share, or shows that browser. Only when no agent answers (exit
+# 75) does this launcher start a Chromium of its own.
+if [ -S /run/devshot-desktop-browser.sock ] && [ -x /opt/devshot/agent ]; then
+  status=0
+  /opt/devshot/agent browser-open "$@" || status=$?
+  [ "$status" -eq 75 ] || exit "$status"
+fi
+
 # Is a Chromium already using this profile? Chromium's own lock names the
 # process that holds it (SingletonLock -> <host>-<pid>); a stale lock from a
 # hard stop names a dead pid. `pgrep chromium` alone missed the Alpine
@@ -429,7 +439,9 @@ rm -f "$PROFILE/SingletonLock" "$PROFILE/SingletonSocket" "$PROFILE/SingletonCoo
 
 # --disable-gpu: Xvnc has no GPU; without the flag Chromium logs a failed
 # GpuControl.CreateCommandBuffer on every start before it falls back.
-nohup chromium \
+# The package's launcher by its full path: `chromium` on PATH may be the
+# Studio Desktop's wrapper, which comes back here.
+nohup /usr/bin/chromium-browser \
   --no-sandbox \
   --disable-gpu \
   --disable-features=Translate \

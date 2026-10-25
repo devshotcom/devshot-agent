@@ -120,6 +120,13 @@ fi
 # the agent's terminal log above. The binary is the guest agent already in
 # this image, so nothing is copied: the wrapper only names the subcommand.
 test -x /opt/devshot/agent || { echo "ERROR: studio-desktop needs the guest agent at /opt/devshot/agent" >&2; exit 1; }
+# The guest image locks /opt/devshot to root (0700, Dockerfile.dom0-*), so
+# the workspace user — Grok at its shell, the person at the desktop — got
+# "Permission denied" from every wrapper below that execs the agent
+# (devshot-desktop since round three, devshot-browser's browser-open). 0711
+# lets them run the agent's CLI and nothing more: they still cannot list or
+# write the directory, and the agent binary was 0755 already.
+chmod 0711 /opt/devshot
 cat > /usr/local/bin/devshot-desktop <<'DESKTOP'
 #!/bin/sh
 # See and drive the desktop on :0 — `devshot-desktop help` lists the actions.
@@ -134,21 +141,67 @@ chmod 0755 /usr/local/bin/devshot-desktop
 install -d -m 1777 /tmp/devshot-desktop
 
 # ── 4. The agent's browser on this display ────────────────────────────────
-# Nothing to configure: studio_browser.go opens Chromium on :0 when
-# /tmp/.X11-unix/X0 exists at launch (studioBrowserDisplay). The desktop's
-# own `devshot-browser` launcher stays for a person at the VNC desktop.
+# studio_browser.go opens Chromium on :0 when /tmp/.X11-unix/X0 exists at
+# launch (studioBrowserDisplay), and that browser is the desktop's ONE
+# browser (go/studio_browser_desktop.go): the agent listens on
+# /run/devshot-desktop-browser.sock and `devshot-browser` hands every launch
+# to it. Here every other way to start Chromium on this desktop is routed
+# through `devshot-browser` too — Grok's own `chromium <url>` at its shell
+# (PATH has /usr/local/bin first), the tint2 dock icon and xdg-open (a
+# chromium.desktop in /usr/local/share shadows the package's). Before
+# (2026-10-25) each started its own instance on its own profile beside the
+# agent's, and the agent never knew a window was already open.
+# Headless and scripted runs (screenshots, --dump-dom, a debugging port, an
+# explicit profile) are not a window anyone shares: they keep the real binary.
+for name in chromium chromium-browser; do
+  cat > "/usr/local/bin/$name" <<'CHROMIUM'
+#!/bin/sh
+# Spec 459 — Chromium on the desktop machine is the agent's one browser.
+for arg in "$@"; do
+  case "$arg" in
+    --headless*|--dump-dom|--screenshot*|--print-to-pdf*|--remote-debugging-*|--user-data-dir*|--version|--help|-h)
+      exec /usr/bin/chromium-browser "$@" ;;
+  esac
+done
+exec /usr/local/bin/devshot-browser "$@"
+CHROMIUM
+  chmod 0755 "/usr/local/bin/$name"
+done
+install -d -m 0755 /usr/local/share/applications
+sed -e 's|^Exec=/usr/bin/chromium-browser --incognito.*|Exec=/usr/local/bin/devshot-browser|' \
+    -e 's|^Exec=/usr/bin/chromium-browser|Exec=/usr/local/bin/devshot-browser|' \
+    /usr/share/applications/chromium.desktop > /usr/local/share/applications/chromium.desktop
+TINT2RC="$DEVSHOT_HOME/.config/tint2/tint2rc"
+if [ -f "$TINT2RC" ]; then
+  sed -i 's|^launcher_item_app = /usr/share/applications/chromium.desktop|launcher_item_app = /usr/local/share/applications/chromium.desktop|' "$TINT2RC"
+fi
 
 # ── 5. Verify ─────────────────────────────────────────────────────────────
 for binary in curl jq unzip rsync bash python3 gcc; do
   command -v "$binary" >/dev/null 2>&1 || { echo "ERROR: studio-desktop is missing $binary" >&2; exit 1; }
 done
 test -x /usr/local/bin/devshot-agent-terminal
+# Every launcher ends at the agent's browser: no Exec of the package binary
+# left in the shadowing entry, the dock pointing at it, `chromium` the wrapper.
+if grep -q '^Exec=/usr/bin/chromium' /usr/local/share/applications/chromium.desktop; then
+  echo "ERROR: the desktop entry still starts Chromium beside the agent's browser" >&2; exit 1
+fi
+grep -q '^Exec=/usr/local/bin/devshot-browser' /usr/local/share/applications/chromium.desktop
+grep -q 'launcher_item_app = /usr/local/share/applications/chromium.desktop' "$TINT2RC"
+su -s /bin/sh devshot -c 'command -v chromium' | grep -qx /usr/local/bin/chromium
+grep -q 'browser-open' /usr/local/bin/devshot-browser
+# The guest agent must know browser-open (an older one would start the
+# role-based agent): with no socket it answers 75, the launcher's fallback.
+browser_open_status=0
+/opt/devshot/agent browser-open --socket=/nonexistent/devshot-desktop-browser.sock 2>/dev/null || browser_open_status=$?
+test "$browser_open_status" -eq 75
 grep -q devshot-agent-terminal "$AUTOSTART"
 # The guest agent in this image must know the subcommand: an older binary
 # would start the role-based agent instead of answering, so the bake fails
 # here rather than shipping a wrapper that misbehaves.
 test -x /usr/local/bin/devshot-desktop
 /usr/local/bin/devshot-desktop actions | grep -q '"left_click"'
+su -s /bin/sh devshot -c '/usr/local/bin/devshot-desktop actions' | grep -q '"left_click"'
 /usr/local/bin/devshot-desktop help | grep -q 'until two frames'
 su -s /bin/sh devshot -c 'test -w /tmp/devshot-desktop'
 # A screenshot cannot run at bake time (no X server yet): the CLI refuses a
