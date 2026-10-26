@@ -206,7 +206,7 @@ STAGED_MANIFEST="/output/.devshot-guest-${OUTPUT_NAME}.json.tmp"
 rm -f "$STAGED_QCOW" "$STAGED_MANIFEST"
 
 if [ "$STAGE" = "core" ] || [ -z "$BASE_TEMPLATE" ]; then
-  qemu-img convert -f raw -O qcow2 -c /tmp/disk.raw "$STAGED_QCOW"
+  qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/disk.raw "$STAGED_QCOW"
 else
   # Compressed qcow2 with destination backing — see build-lamp-matrix.sh
   # for the full rationale. cd /output so the relative -B path resolves
@@ -214,7 +214,7 @@ else
   # (qemu walking the chain on dom0).
   (
     cd /output
-    qemu-img convert -f raw -O qcow2 -c \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W \
       -B "devshot-guest-${BASE_TEMPLATE}.qcow2" \
       -F qcow2 \
       /tmp/disk.raw "./.devshot-guest-${OUTPUT_NAME}.qcow2.tmp"

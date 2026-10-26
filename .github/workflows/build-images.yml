@@ -175,9 +175,11 @@ jobs:
           name: ${{ env.BUILDER_NAME }}
           driver: docker-container
           cleanup: false
+          # Three independent stages at once (kernel, Xen, the guest rootfs
+          # chain); the Dockerfiles halve each compile's -j to fit the RAM.
           buildkitd-config-inline: |
             [worker.oci]
-              max-parallelism = 1
+              max-parallelism = 3
 
       - name: Reuse exact immutable AMD64 Dom0 image on retry
         id: reuse_dom0_amd64
@@ -347,9 +349,11 @@ jobs:
           name: ${{ env.BUILDER_NAME }}
           driver: docker-container
           cleanup: false
+          # Three independent stages at once (kernel, Xen, the guest rootfs
+          # chain); the Dockerfiles halve each compile's -j to fit the RAM.
           buildkitd-config-inline: |
             [worker.oci]
-              max-parallelism = 1
+              max-parallelism = 3
 
       - name: Reuse exact immutable AMD64 KVM image on retry
         id: reuse_kvm_amd64
@@ -382,38 +386,6 @@ jobs:
             fi
             echo 'reused=false' >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Bake public LAMP Studio templates
-        if: steps.reuse_kvm_amd64.outputs.reused != 'true'
-        working-directory: ${{ env.CHECKOUT_DIR }}
-        run: |
-          set -euo pipefail
-
-          rm -rf .build/lamp templates/lamp
-          mkdir -p .build/lamp templates/lamp
-
-          source roles/dom0/files/bounded-docker-run.sh
-          trap bounded_docker_cleanup EXIT
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-          bounded_docker_extract_file \
-            anticipatercom/devshot:amd64-${{ github.sha }} \
-            /xen/devshot-guest-base.qcow2 \
-            .build/lamp/devshot-guest-base.qcow2
-
-          MATRIX_FILTER='^(wp-6\.9|sw-6\.7)$' \
-            bash roles/dom0/files/build-lamp-matrix.sh .build/lamp recipes/lamp
-
-          cp .build/lamp/devshot-guest-lamp-shared.qcow2 templates/lamp/
-          cp .build/lamp/devshot-guest-lamp-shared.json templates/lamp/
-          cp .build/lamp/devshot-guest-lamp-wp-6.9.qcow2 templates/lamp/
-          cp .build/lamp/devshot-guest-lamp-wp-6.9.json templates/lamp/
-          cp .build/lamp/devshot-guest-lamp-sw-6.7.qcow2 templates/lamp/
-          cp .build/lamp/devshot-guest-lamp-sw-6.7.json templates/lamp/
-          cp .build/lamp/lamp-matrix.lock.json templates/lamp/
-
-          echo "Public LAMP Studio templates:"
-          ls -lh templates/lamp/
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         id: build_vmm
@@ -616,9 +588,11 @@ jobs:
           name: ${{ env.BUILDER_NAME }}
           driver: docker-container
           cleanup: false
+          # Three independent stages at once (kernel, Xen, the guest rootfs
+          # chain); the Dockerfiles halve each compile's -j to fit the RAM.
           buildkitd-config-inline: |
             [worker.oci]
-              max-parallelism = 1
+              max-parallelism = 3
 
       - name: Reuse exact immutable ARM64 Dom0 image on retry
         id: reuse_dom0_arm64
@@ -972,9 +946,11 @@ jobs:
           name: ${{ env.BUILDER_NAME }}
           driver: docker-container
           cleanup: false
+          # Three independent stages at once (kernel, Xen, the guest rootfs
+          # chain); the Dockerfiles halve each compile's -j to fit the RAM.
           buildkitd-config-inline: |
             [worker.oci]
-              max-parallelism = 1
+              max-parallelism = 3
 
       - name: Reuse exact immutable ARM64 KVM image on retry
         id: reuse_kvm_arm64

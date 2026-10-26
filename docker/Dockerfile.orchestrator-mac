@@ -274,7 +274,7 @@ RUN mkdir -p /orch/rootfs && \
     echo 'nameserver 10.0.2.3' > /orch/rootfs/etc/resolv.conf && \
     mkdir -p /orch/rootfs/tmp /orch/rootfs/proc /orch/rootfs/sys /orch/rootfs/dev && \
     mke2fs -t ext4 -d /orch/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/orch-disk.raw 8G && \
-    qemu-img convert -f raw -O qcow2 -c /tmp/orch-disk.raw /tmp/orchestrator-mac.qcow2 && \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/orch-disk.raw /tmp/orchestrator-mac.qcow2 && \
     rm -rf /tmp/orch-disk.raw /orch/rootfs
 
 # ─── Stage 3: Export just the qcow2 file ───────────────────────────────────

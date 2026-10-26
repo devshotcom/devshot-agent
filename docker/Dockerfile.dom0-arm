@@ -28,6 +28,9 @@ ARG DEVSHOT_DOM0_PLATFORM=linux/arm64
 
 # ─── Stage 1: Build Xen hypervisor + tools/libs ────────────────────────────
 FROM debian:bookworm AS xen-builder
+# BuildKit runs up to 3 stages at once (build-images.yml max-parallelism);
+# at most two of them compile, so each make -j gets half the RAM budget.
+ARG DEVSHOT_BUILD_PARALLELISM=2
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -53,7 +56,7 @@ WORKDIR /build
 # by the edit, finds the old source tree still mounted, and skips the clone.
 # Ask WHICH release is checked out, not whether one is.
 RUN --mount=type=cache,target=/build/xen,id=xen-src \
-    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/786432)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
+    J=$(nproc) && M=$(awk -v p="${DEVSHOT_BUILD_PARALLELISM:-2}" '/MemTotal/{print int($2/786432/p)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ "$(cat /build/xen/.devshot-pin 2>/dev/null)" != "$XEN_RELEASE" ]; then \
         find /build/xen -mindepth 1 -delete 2>/dev/null || true; \
         git clone --depth 1 --branch "$XEN_RELEASE" \
@@ -73,10 +76,13 @@ RUN --mount=type=cache,target=/build/xen,id=xen-src \
     mkdir -p /tmp/xen-firmware && \
     (cp -a /usr/local/lib/xen/boot/* /tmp/xen-firmware/ 2>/dev/null || true) && \
     find /usr/local/include /usr/local/lib -name 'xen*' -o -name 'libxen*' -o -name '_libxl*' | \
-        tar czf /tmp/xen-dev.tar.gz -T -
+        tar cf /tmp/xen-dev.tar -T -
 
 # ─── Stage 2: Build QEMU with Xen device model ─────────────────────────────
 FROM debian:bookworm AS qemu-xen-builder
+# BuildKit runs up to 3 stages at once (build-images.yml max-parallelism);
+# at most two of them compile, so each make -j gets half the RAM budget.
+ARG DEVSHOT_BUILD_PARALLELISM=2
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -90,11 +96,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 WORKDIR /build
 
-COPY --from=xen-builder /tmp/xen-dev.tar.gz /tmp/xen-dev.tar.gz
-RUN tar xzf /tmp/xen-dev.tar.gz -C / && ldconfig && rm /tmp/xen-dev.tar.gz
+COPY --from=xen-builder /tmp/xen-dev.tar /tmp/xen-dev.tar
+RUN tar xf /tmp/xen-dev.tar -C / && ldconfig && rm /tmp/xen-dev.tar
 
 RUN --mount=type=cache,target=/build/qemu-xen,id=qemu-xen-src \
-    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/786432)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
+    J=$(nproc) && M=$(awk -v p="${DEVSHOT_BUILD_PARALLELISM:-2}" '/MemTotal/{print int($2/786432/p)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/qemu-xen/.git ]; then \
         git clone --depth 1 --branch stable-4.17 \
             https://xenbits.xen.org/git-http/qemu-xen.git /build/qemu-xen; \
@@ -139,6 +145,9 @@ RUN --mount=type=cache,target=/build/qemu-xen,id=qemu-xen-src \
 
 # ─── Stage 3: Build Linux kernel (Dom0) ────────────────────────────────────
 FROM debian:bookworm AS kernel-builder
+# BuildKit runs up to 3 stages at once (build-images.yml max-parallelism);
+# at most two of them compile, so each make -j gets half the RAM budget.
+ARG DEVSHOT_BUILD_PARALLELISM=2
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -153,7 +162,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /build
 
 RUN --mount=type=cache,target=/build/linux,id=linux-src \
-    J=$(nproc) && M=$(awk '/MemTotal/{print int($2/786432)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
+    J=$(nproc) && M=$(awk -v p="${DEVSHOT_BUILD_PARALLELISM:-2}" '/MemTotal/{print int($2/786432/p)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/linux/.git ]; then \
         git clone --depth 1 --branch linux-6.1.y \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /build/linux; \
@@ -264,10 +273,10 @@ RUN chroot /rootfs bash -c ' \
 COPY --from=qemu-xen-builder /tmp/qemu-system-aarch64-xen /rootfs/usr/bin/qemu-system-aarch64
 RUN chmod +x /rootfs/usr/bin/qemu-system-aarch64
 
-COPY --from=xen-builder /tmp/xen-dev.tar.gz /tmp/xen-dev.tar.gz
-RUN tar xzf /tmp/xen-dev.tar.gz -C /rootfs && \
+COPY --from=xen-builder /tmp/xen-dev.tar /tmp/xen-dev.tar
+RUN tar xf /tmp/xen-dev.tar -C /rootfs && \
     chroot /rootfs ldconfig && \
-    rm /tmp/xen-dev.tar.gz
+    rm /tmp/xen-dev.tar
 
 COPY --from=xen-builder /tmp/xen-firmware/ /tmp/xen-firmware/
 RUN mkdir -p /rootfs/usr/lib/xen/boot /rootfs/usr/local/lib/xen/boot && \
@@ -310,7 +319,7 @@ COPY yara_rules /rootfs/opt/devshot/yara_rules
 RUN cd /rootfs && tar czf /build/dom0-rootfs.tar.gz . && \
     apt-get update && apt-get install -y qemu-utils && \
     mke2fs -t ext4 -d /rootfs -r 1 -N 0 -m 5 -L '' -O ^64bit /tmp/disk.raw 4G && \
-    qemu-img convert -f raw -O qcow2 -c /tmp/disk.raw /tmp/dom0-rootfs.qcow2 && \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/disk.raw /tmp/dom0-rootfs.qcow2 && \
     rm /tmp/disk.raw
 
 # (No Go builder stage — agent is pre-compiled into bin/devshot-agent-linux-arm64
@@ -393,7 +402,7 @@ RUN chmod 755 /opt/devshot/agent /opt/devshot/start-agent.sh && \
     ln -sf /etc/init.d/devshot-agent /etc/runlevels/default/devshot-agent
 
 # Export rootfs as tarball (exclude Docker-managed pseudo-filesystems)
-RUN tar czf /tmp/domu-rootfs.tar.gz --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' -C / .
+RUN tar cf /tmp/domu-rootfs.tar --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' -C / .
 
 # ─── Stage 5c: Convert DomU rootfs to qcow2 (on x86, no emulation needed) ─
 FROM debian:bookworm AS domu-converter
@@ -401,18 +410,18 @@ FROM debian:bookworm AS domu-converter
 RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=domu-rootfs /tmp/domu-rootfs.tar.gz /tmp/domu-rootfs.tar.gz
+COPY --from=domu-rootfs /tmp/domu-rootfs.tar /tmp/domu-rootfs.tar
 
 # Extract rootfs, patch Docker-managed files, then create qcow2 disk image
 RUN mkdir -p /domu/rootfs && \
-    tar xzf /tmp/domu-rootfs.tar.gz -C /domu/rootfs && \
-    rm /tmp/domu-rootfs.tar.gz && \
+    tar xf /tmp/domu-rootfs.tar -C /domu/rootfs && \
+    rm /tmp/domu-rootfs.tar && \
     echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
     echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
     echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
     mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
     mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/domu-disk.raw 2G && \
-    qemu-img convert -f raw -O qcow2 -c /tmp/domu-disk.raw /tmp/devshot-guest-base.qcow2 && \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/domu-disk.raw /tmp/devshot-guest-base.qcow2 && \
     rm -rf /tmp/domu-disk.raw /domu/rootfs
 
 # ─── Stage 5d: Hello template — extends domu-rootfs with starter app ──────
@@ -420,9 +429,9 @@ FROM domu-rootfs AS hello-rootfs
 
 COPY recipes/hello.sh /tmp/hello.sh
 RUN DEVSHOT_RECIPE_DOCKER_BUILD=1 /bin/sh /tmp/hello.sh && \
-    rm -f /tmp/hello.sh /tmp/domu-rootfs.tar.gz
+    rm -f /tmp/hello.sh /tmp/domu-rootfs.tar
 
-RUN tar czf /tmp/hello-rootfs.tar.gz \
+RUN tar cf /tmp/hello-rootfs.tar \
     --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
     -C / .
 
@@ -432,18 +441,18 @@ FROM debian:bookworm AS hello-converter
 RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=hello-rootfs /tmp/hello-rootfs.tar.gz /tmp/hello-rootfs.tar.gz
+COPY --from=hello-rootfs /tmp/hello-rootfs.tar /tmp/hello-rootfs.tar
 COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
 
 RUN mkdir -p /domu/rootfs && \
-    tar xzf /tmp/hello-rootfs.tar.gz -C /domu/rootfs && \
-    rm /tmp/hello-rootfs.tar.gz && \
+    tar xf /tmp/hello-rootfs.tar -C /domu/rootfs && \
+    rm /tmp/hello-rootfs.tar && \
     echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
     echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
     echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
     mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
     mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/hello-disk.raw 2G && \
-    qemu-img convert -f raw -O qcow2 -c /tmp/hello-disk.raw /tmp/devshot-guest-hello.qcow2 && \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/hello-disk.raw /tmp/devshot-guest-hello.qcow2 && \
     rm -rf /tmp/hello-disk.raw /domu/rootfs
 
 RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
@@ -464,9 +473,9 @@ FROM domu-rootfs AS desktop-rootfs
 
 COPY recipes/desktop.sh /tmp/desktop.sh
 RUN /bin/sh /tmp/desktop.sh && \
-    rm -f /tmp/desktop.sh /tmp/domu-rootfs.tar.gz
+    rm -f /tmp/desktop.sh /tmp/domu-rootfs.tar
 
-RUN tar czf /tmp/desktop-rootfs.tar.gz \
+RUN tar cf /tmp/desktop-rootfs.tar \
     --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
     -C / .
 
@@ -476,18 +485,18 @@ FROM debian:bookworm AS desktop-converter
 RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=desktop-rootfs /tmp/desktop-rootfs.tar.gz /tmp/desktop-rootfs.tar.gz
+COPY --from=desktop-rootfs /tmp/desktop-rootfs.tar /tmp/desktop-rootfs.tar
 COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
 
 RUN mkdir -p /domu/rootfs && \
-    tar xzf /tmp/desktop-rootfs.tar.gz -C /domu/rootfs && \
-    rm /tmp/desktop-rootfs.tar.gz && \
+    tar xf /tmp/desktop-rootfs.tar -C /domu/rootfs && \
+    rm /tmp/desktop-rootfs.tar && \
     echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
     echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
     echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
     mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
     mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/desktop-disk.raw 4G && \
-    qemu-img convert -f raw -O qcow2 -c /tmp/desktop-disk.raw /tmp/devshot-guest-desktop.qcow2 && \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/desktop-disk.raw /tmp/devshot-guest-desktop.qcow2 && \
     rm -rf /tmp/desktop-disk.raw /domu/rootfs
 
 RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
@@ -503,9 +512,9 @@ FROM desktop-rootfs AS studio-desktop-rootfs
 
 COPY recipes/studio-desktop.sh /tmp/studio-desktop.sh
 RUN /bin/sh /tmp/studio-desktop.sh && \
-    rm -f /tmp/studio-desktop.sh /tmp/desktop-rootfs.tar.gz
+    rm -f /tmp/studio-desktop.sh /tmp/desktop-rootfs.tar
 
-RUN tar czf /tmp/studio-desktop-rootfs.tar.gz \
+RUN tar cf /tmp/studio-desktop-rootfs.tar \
     --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
     -C / .
 
@@ -515,18 +524,18 @@ FROM debian:bookworm AS studio-desktop-converter
 RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=studio-desktop-rootfs /tmp/studio-desktop-rootfs.tar.gz /tmp/studio-desktop-rootfs.tar.gz
+COPY --from=studio-desktop-rootfs /tmp/studio-desktop-rootfs.tar /tmp/studio-desktop-rootfs.tar
 COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
 
 RUN mkdir -p /domu/rootfs && \
-    tar xzf /tmp/studio-desktop-rootfs.tar.gz -C /domu/rootfs && \
-    rm /tmp/studio-desktop-rootfs.tar.gz && \
+    tar xf /tmp/studio-desktop-rootfs.tar -C /domu/rootfs && \
+    rm /tmp/studio-desktop-rootfs.tar && \
     echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
     echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
     echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
     mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
     mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/studio-desktop-disk.raw 8G && \
-    qemu-img convert -f raw -O qcow2 -c /tmp/studio-desktop-disk.raw /tmp/devshot-guest-studio-desktop.qcow2 && \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/studio-desktop-disk.raw /tmp/devshot-guest-studio-desktop.qcow2 && \
     rm -rf /tmp/studio-desktop-disk.raw /domu/rootfs
 
 RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
@@ -546,9 +555,9 @@ FROM domu-rootfs AS android-rootfs
 
 COPY recipes/android.sh /tmp/android.sh
 RUN /bin/sh /tmp/android.sh && \
-    rm -f /tmp/android.sh /tmp/domu-rootfs.tar.gz
+    rm -f /tmp/android.sh /tmp/domu-rootfs.tar
 
-RUN tar czf /tmp/android-rootfs.tar.gz \
+RUN tar cf /tmp/android-rootfs.tar \
     --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
     -C / .
 
@@ -558,21 +567,21 @@ FROM debian:bookworm AS android-converter
 RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=android-rootfs /tmp/android-rootfs.tar.gz /tmp/android-rootfs.tar.gz
+COPY --from=android-rootfs /tmp/android-rootfs.tar /tmp/android-rootfs.tar
 COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
 
 # Android-x86 ISO + extracted kernel/initrd + the qemu+adb host stack pile
 # ~1.1 GiB on top of the universal base. 6 GiB matches the x86 sibling so
 # the data partition has scratch room for Play Store apk unpacks.
 RUN mkdir -p /domu/rootfs && \
-    tar xzf /tmp/android-rootfs.tar.gz -C /domu/rootfs && \
-    rm /tmp/android-rootfs.tar.gz && \
+    tar xf /tmp/android-rootfs.tar -C /domu/rootfs && \
+    rm /tmp/android-rootfs.tar && \
     echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
     echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
     echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
     mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
     mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/android-disk.raw 6G && \
-    qemu-img convert -f raw -O qcow2 -c /tmp/android-disk.raw /tmp/devshot-guest-android.qcow2 && \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/android-disk.raw /tmp/devshot-guest-android.qcow2 && \
     rm -rf /tmp/android-disk.raw /domu/rootfs
 
 # Manifest mirrors x86: VNC for the console's WebRTC pipe, noVNC for the
@@ -594,9 +603,9 @@ FROM domu-rootfs AS browser-rootfs
 
 COPY recipes/browser.sh /tmp/browser.sh
 RUN /bin/sh /tmp/browser.sh && \
-    rm -f /tmp/browser.sh /tmp/domu-rootfs.tar.gz
+    rm -f /tmp/browser.sh /tmp/domu-rootfs.tar
 
-RUN tar czf /tmp/browser-rootfs.tar.gz \
+RUN tar cf /tmp/browser-rootfs.tar \
     --exclude='./tmp' --exclude='./proc' --exclude='./sys' --exclude='./dev' \
     -C / .
 
@@ -606,20 +615,20 @@ FROM debian:bookworm AS browser-converter
 RUN apt-get update && apt-get install -y --no-install-recommends qemu-utils e2fsprogs && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=browser-rootfs /tmp/browser-rootfs.tar.gz /tmp/browser-rootfs.tar.gz
+COPY --from=browser-rootfs /tmp/browser-rootfs.tar /tmp/browser-rootfs.tar
 COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
 
 # Chromium (~250 MiB) + swiftshader fallback + Alpine fonts (~80 MiB) on
 # top of the universal base — same 5 GiB envelope as the x86 sibling.
 RUN mkdir -p /domu/rootfs && \
-    tar xzf /tmp/browser-rootfs.tar.gz -C /domu/rootfs && \
-    rm /tmp/browser-rootfs.tar.gz && \
+    tar xf /tmp/browser-rootfs.tar -C /domu/rootfs && \
+    rm /tmp/browser-rootfs.tar && \
     echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
     echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
     echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
     mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
     mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/browser-disk.raw 5G && \
-    qemu-img convert -f raw -O qcow2 -c /tmp/browser-disk.raw /tmp/devshot-guest-browser.qcow2 && \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/browser-disk.raw /tmp/devshot-guest-browser.qcow2 && \
     rm -rf /tmp/browser-disk.raw /domu/rootfs
 
 # Manifest mirrors x86: VNC (raw RFB → console framebuffer) and Chrome
@@ -658,16 +667,12 @@ COPY --from=rootfs-builder   /tmp/dom0-rootfs.qcow2            /xen/dom0-rootfs.
 COPY --from=domu-converter   /tmp/devshot-guest-base.qcow2     /xen/devshot-guest-base.qcow2
 # Pre-baked flavor templates — see Dockerfile.dom0-x86 for design notes.
 RUN mkdir -p /xen/guests/templates /opt/devshot/templates
-COPY --from=desktop-converter /tmp/devshot-guest-desktop.qcow2 /opt/devshot/templates/devshot-guest-desktop.qcow2
-COPY --from=desktop-converter /tmp/devshot-guest-desktop.json  /opt/devshot/templates/devshot-guest-desktop.json
+# Desktop only (operator 2026-10-26: "we are using the desktop from now on"):
+# studio-desktop is the one shipped template. The desktop/hello/browser/android
+# stages stay defined for local builds, but nothing copies them into the image,
+# so BuildKit never builds them.
 COPY --from=studio-desktop-converter /tmp/devshot-guest-studio-desktop.qcow2 /opt/devshot/templates/devshot-guest-studio-desktop.qcow2
 COPY --from=studio-desktop-converter /tmp/devshot-guest-studio-desktop.json  /opt/devshot/templates/devshot-guest-studio-desktop.json
-COPY --from=hello-converter   /tmp/devshot-guest-hello.qcow2   /opt/devshot/templates/devshot-guest-hello.qcow2
-COPY --from=hello-converter   /tmp/devshot-guest-hello.json    /opt/devshot/templates/devshot-guest-hello.json
-COPY --from=android-converter /tmp/devshot-guest-android.qcow2 /opt/devshot/templates/devshot-guest-android.qcow2
-COPY --from=android-converter /tmp/devshot-guest-android.json  /opt/devshot/templates/devshot-guest-android.json
-COPY --from=browser-converter /tmp/devshot-guest-browser.qcow2 /opt/devshot/templates/devshot-guest-browser.qcow2
-COPY --from=browser-converter /tmp/devshot-guest-browser.json  /opt/devshot/templates/devshot-guest-browser.json
 RUN cp -a /opt/devshot/templates/. /xen/guests/templates/
 COPY                         roles/dom0/files/boot-xen.sh      /xen/boot-xen.sh
 RUN chmod +x /xen/boot-xen.sh
