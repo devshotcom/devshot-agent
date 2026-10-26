@@ -203,6 +203,7 @@ printf "DEVSHOT_QEMU_SANDBOX_HOST_OK uid=%s gid=%s pid=%s\n" "$(id -u)" "$(id -g
       /usr/local/bin/devshot-userns-run --uid=20001 --gid=108 --net -- \
         /usr/local/bin/devshot-sandbox-init \
           --chroot=/workspace/root --uid=20001 --gid=108 \
+          --dev=/dev/null \
           --apparmor="$DEVSHOT_APPARMOR_PROFILE" -- \
           /bin/sh -eu -c "$DEVSHOT_SANDBOX_PROBE"
       test "$(cat /workspace/root/run/devshot/guest-marker)" = guest-visible
