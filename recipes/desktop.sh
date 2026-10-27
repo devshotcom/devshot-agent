@@ -67,11 +67,26 @@ apk add --no-cache \
     dbus dbus-x11 \
     xdotool scrot xclip \
     chromium chromium-swiftshader \
-    greybird-themes-gtk3 numix-themes-openbox \
+    greybird-themes-gtk3 \
     adwaita-icon-theme papirus-icon-theme \
     font-noto font-noto-emoji \
     feh \
     ripgrep file nodejs npm
+
+# GTK3 theme Arc-Dark (matches the Arc-Dark-OSX Openbox theme below). Alpine
+# ships it only in edge/testing; it is theme data without dependencies, so the
+# one package comes from there without adding the repo for anything else. If
+# edge/testing drops or breaks it, the desktop keeps Greybird-dark instead of
+# failing the bake.
+GTK3_THEME=Greybird-dark
+if apk add --no-cache \
+     --repository https://dl-cdn.alpinelinux.org/alpine/edge/testing \
+     arc-dark-gtk3 \
+   && [ -f /usr/share/themes/Arc-Dark/gtk-3.0/gtk.css ]; then
+  GTK3_THEME=Arc-Dark
+else
+  echo "WARN: arc-dark-gtk3 from edge/testing unavailable, GTK stays Greybird-dark" >&2
+fi
 
 # Replace Alpine's lagging nodejs with the current LTS release
 # from nodejs.org (see recipes/lib/install-node.sh).
@@ -116,32 +131,192 @@ mkdir -p "$DEVSHOT_HOME/.config/openbox" \
          "$DEVSHOT_HOME/.config/gtk-3.0" \
          "$DEVSHOT_HOME/.vnc"
 
-# GTK3 — dark Greybird theme, Papirus icons, Noto sans
-cat > "$DEVSHOT_HOME/.config/gtk-3.0/settings.ini" <<'GTK3'
+# GTK3 — Arc-Dark (or the Greybird-dark fallback, see section 1), Papirus
+# icons, Noto sans
+cat > "$DEVSHOT_HOME/.config/gtk-3.0/settings.ini" <<GTK3
 [Settings]
-gtk-theme-name=Greybird-dark
+gtk-theme-name=$GTK3_THEME
 gtk-icon-theme-name=Papirus-Dark
 gtk-font-name=Noto Sans 10
 gtk-decoration-layout=close,minimize,maximize:
 gtk-application-prefer-dark-theme=true
 GTK3
 
-# GTK2 fallback (some legacy apps still read this)
+# GTK2 fallback (some legacy apps still read this; Alpine's Arc has no GTK2)
 cat > "$DEVSHOT_HOME/.gtkrc-2.0" <<'GTK2'
 gtk-theme-name="Greybird-dark"
 gtk-icon-theme-name="Papirus-Dark"
 gtk-font-name="Noto Sans 10"
 GTK2
 
-# Openbox window manager — clean window decorations, CLIMD title layout
-# (close/max/min on the LEFT like macOS), 8 px corner radius, smart
+# Openbox theme Arc-Dark-OSX — Arc-Dark colours with macOS traffic-light
+# buttons. Not packaged by Alpine, so the four files are written here:
+# github.com/Dr-Noob/Arc-Dark-OSX @ 3b5d1f21 (GPL-3.0, from dglava's Arc
+# Openbox theme). Two fixes against upstream: its close colour key had a
+# double dot ("button..close"), so the close button never turned red; and
+# inactive buttons had no colour (Openbox drew them white), now macOS grey.
+ARC_OB=/usr/share/themes/Arc-Dark-OSX/openbox-3
+mkdir -p "$ARC_OB"
+cat > "$ARC_OB/themerc" <<'ARCTHEMERC'
+# Arc Openbox theme
+# Copyright (C) 2015 Dino Duratović <dinomol at mail dot com>
+#
+# Inspired by and made for horst3180's Arc GTK theme
+# https://github.com/horst3180/Arc-theme
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+### WINDOW
+border.width: 1
+
+window.client.padding.width: 0
+window.client.padding.height: 0
+window.handle.width: 0
+
+padding.width: 4
+padding.height: 4
+
+window.active.border.color: #2d3036
+window.inactive.border.color: #2d3036
+window.active.title.separator.color: #2f343f
+window.inactive.title.separator.color: #2f343f
+window.active.client.color: #2d3036
+window.inactive.client.color: #2d3036
+
+window.active.label.text.color: #D3DAE3
+window.inactive.label.text.color: #7F8388
+
+window.active.button.unpressed.image.color: #D3DAE3
+window.active.button.pressed.image.color: #5294E2
+window.active.button.disabled.image.color: #dbdfe3
+window.active.button.iconify.unpressed.image.color: #f9bc2d
+window.active.button.max.unpressed.image.color: #2bcc46
+window.active.button.close.unpressed.image.color: #f95f57
+window.active.button.iconify.hover.image.color: #df9e07
+window.active.button.max.hover.image.color: #24a83a
+window.active.button.close.hover.image.color: #dd1308
+window.active.button.toggled.unpressed.image.color: #24a83a
+
+window.inactive.button.unpressed.image.color: #5c616c
+window.inactive.button.pressed.image.color: #5294E2
+window.inactive.button.disabled.image.color: #dddee2
+window.inactive.button.hover.image.color: #afb8c5
+window.inactive.button.toggled.unpressed.image.color: #dddee2
+window.inactive.button.toggled.pressed.image.color: #5294E2
+window.inactive.button.toggled.hover.image.color: #afb8c5
+
+window.active.title.bg: flat solid
+window.active.title.bg.color: #2f343f
+window.active.label.bg: flat solid
+window.active.label.bg.color: #2f343f
+#window.active.handle.bg: texture
+#window.active.grip.bg: texture
+window.inactive.title.bg: flat solid
+window.inactive.title.bg.color: #2f343f
+window.inactive.label.bg: flat solid
+window.inactive.label.bg.color: #2f343f
+#window.inactive.handle.bg: texture
+#window.inactive.grip.bg: texture
+
+window.active.button.unpressed.bg: parentrelative
+window.active.button.pressed.bg: parentrelative
+window.active.button.hover.bg: parentrelative
+window.active.button.disabled.bg: parentrelative
+window.active.button.toggled.unpressed.bg: parentrelative
+window.active.button.toggled.pressed.bg: parentrelative
+window.active.button.toggled.hover.bg: parentrelative
+window.inactive.button.unpressed.bg: parentrelative
+window.inactive.button.pressed.bg: parentrelative
+window.inactive.button.hover.bg: parentrelative
+window.inactive.button.disabled.bg: parentrelative
+window.inactive.button.toggled.unpressed.bg: parentrelative
+window.inactive.button.toggled.pressed.bg: parentrelative
+window.inactive.button.toggled.hover.bg: parentrelative
+
+window.label.text.justify: center
+
+#window.active.label.text.font: text shadow
+#window.inactive.label.text.font: text shadow
+
+### MENU
+menu.border.width: 0
+menu.separator.width: 1
+menu.separator.padding.width: 10
+menu.separator.padding.height: 2
+
+menu.overlap.x: 0
+menu.overlap.y: 0
+
+menu.border.color: #aeb0b6
+menu.separator.color: #a8adb5
+
+menu.title.text.color: #D3DAE3
+menu.items.text.color: #a8adb5
+menu.items.disabled.text.color: #76797F
+menu.items.active.text.color: #ffffff
+menu.items.active.disabled.text.color: #aeb0b6
+
+menu.items.bg: flat solid
+menu.items.bg.color: #454a54
+menu.items.active.bg: flat solid
+menu.items.active.bg.color: #5294E2
+menu.title.bg: flat solid
+menu.title.bg.color: #2d3036
+
+menu.title.text.justify: center
+
+#menu.items.font: text shadow
+#menu.title.text.font: text shadow
+
+### OSD
+osd.border.width: 1
+
+osd.border.color: #2d3036
+
+osd.label.text.color: #D3DAE3
+
+osd.bg: flat solid
+osd.bg.color: #2f343f
+osd.label.bg: flat solid
+osd.label.bg.color: #2f343f
+osd.hilight.bg: flat solid
+osd.hilight.bg.color: #5294E2
+osd.unhilight.bg: flat solid
+osd.unhilight.bg.color: #000000
+
+#osd.label.text.font: text shadow
+ARCTHEMERC
+# close / iconify / max share one 10x10 filled circle; the theme colours them.
+for button in close iconify max; do
+  cat > "$ARC_OB/$button.xbm" <<ARCXBM
+#define ${button}_width 10
+#define ${button}_height 10
+static unsigned char ${button}_bits[] = {
+   0x7c, 0x00, 0xfe, 0x00, 0xff, 0x01, 0xff, 0x01, 0xff, 0x01, 0xff, 0x01,
+   0xff, 0x01, 0xfe, 0x00, 0x7c, 0x00, 0x00, 0x00 };
+ARCXBM
+done
+
+# Openbox window manager — Arc-Dark-OSX decorations, CIML title layout
+# (close/min/max on the LEFT like macOS), 8 px corner radius, smart
 # placement, alt-drag to move, alt-right to resize.
 cat > "$DEVSHOT_HOME/.config/openbox/rc.xml" <<'OPENBOXRC'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc">
   <theme>
-    <name>Numix</name>
-    <titleLayout>CLIMD</titleLayout>
+    <name>Arc-Dark-OSX</name>
+    <titleLayout>CIML</titleLayout>
     <cornerRadius>8</cornerRadius>
     <font place="ActiveWindow"><name>Noto Sans</name><size>10</size><weight>Bold</weight></font>
     <font place="InactiveWindow"><name>Noto Sans</name><size>9</size><weight>Normal</weight></font>

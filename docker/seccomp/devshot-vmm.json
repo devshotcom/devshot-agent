@@ -1,5 +1,5 @@
 {
-  "comment": "Seccomp BPF filter for QEMU/KVM and Firecracker backend VMs. Spec 038 FR-015.6. Allowlist approach: only the syscalls QEMU actually needs are permitted; everything else is rejected with EPERM. Derived from upstream QEMU's recommended seccomp config + devshot-specific hardening. This file is loaded by vmm_sandbox_linux.go via setpriv --seccomp or the equivalent pre-exec hook.",
+  "comment": "Seccomp BPF filter for QEMU/KVM and Firecracker backend VMs. Spec 038 FR-015.6. Allowlist approach: only the syscalls QEMU actually needs are permitted; everything else is rejected with EPERM. Derived from upstream QEMU's recommended seccomp config + devshot-specific hardening. devshot-sandbox-init compiles it to classic BPF (cmd/sandbox-init/seccomp.go) and installs it right before it execs QEMU; QEMU then stacks its own -sandbox filter on top (spawn/elevateprivileges/obsolete/resourcecontrol denied), which is why seccomp(2) itself is allowed: a stacked filter can only narrow this one.",
   "defaultAction": "SCMP_ACT_ERRNO",
   "defaultErrnoRet": 1,
   "archMap": [
@@ -16,7 +16,7 @@
     {
       "comment": "Core process lifecycle",
       "names": [
-        "exit", "exit_group", "clone", "clone3", "fork", "vfork",
+        "exit", "exit_group", "fork", "vfork",
         "execve", "setsid",
         "wait4", "waitid", "getpid", "getppid", "gettid",
         "set_tid_address", "sched_yield", "nanosleep",
@@ -56,7 +56,7 @@
     {
       "comment": "Network (QEMU tap + QMP sockets)",
       "names": [
-        "socket", "bind", "listen", "accept", "accept4",
+        "bind", "listen", "accept", "accept4",
         "connect", "sendto", "recvfrom", "sendmsg", "recvmsg",
         "sendmmsg", "recvmmsg",
         "shutdown", "setsockopt", "getsockopt",
@@ -109,8 +109,62 @@
       "names": [
         "chdir", "fchdir", "umask", "setrlimit", "getrlimit",
         "prlimit64", "setitimer", "getitimer",
-        "personality", "capget", "capset"
+        "capget", "capset"
       ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Threads only: clone without any namespace flag (CLONE_NEWNS|NEWCGROUP|NEWUTS|NEWIPC|NEWUSER|NEWPID|NEWNET = 0x7e020000). A compromised QEMU must not open a fresh user namespace (the gateway to most unprivileged kernel LPEs) or any other namespace. Both shipped architectures pass the flags in args[0].",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 2114060288, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}]
+    },
+    {
+      "comment": "clone3 passes its flags in a struct seccomp cannot read, so it answers ENOSYS and glibc falls back to the filtered clone above (the same move as Docker's default profile).",
+      "names": ["clone3"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38
+    },
+    {
+      "comment": "Sockets of AF_UNIX (QMP/QGA/console), AF_INET/AF_INET6 and AF_NETLINK only; AF_ALG, AF_VSOCK, AF_PACKET, AF_XDP, AF_KEY, AF_TIPC, AF_RDS and the rest stay closed. Rules for one syscall are ORed.",
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 1, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 2, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 10, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 16, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "comment": "personality: only the plain Linux personas and the query (Docker's default set). READ_IMPLIES_EXEC and ADDR_NO_RANDOMIZE stay closed.",
+      "names": ["personality"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 0, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "names": ["personality"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 8, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "names": ["personality"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 4294967295, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "comment": "QEMU's own -sandbox filter (and libseccomp's probe for it). Stacked seccomp filters can only narrow what this profile allows.",
+      "names": ["seccomp"],
       "action": "SCMP_ACT_ALLOW"
     },
     {
@@ -125,5 +179,5 @@
       "action": "SCMP_ACT_ALLOW"
     }
   ],
-  "comment_blocked": "The following syscalls are EXPLICITLY BLOCKED (they hit defaultAction=ERRNO): ptrace, mount, umount2, pivot_root, reboot, kexec_load, init_module, finit_module, delete_module, setns, unshare, add_key, request_key, keyctl, create_module, nfsservctl, io_uring_enter, io_uring_setup, io_uring_register, process_vm_readv, process_vm_writev, kcmp, bpf, userfaultfd, perf_event_open, seccomp (we do NOT allow the sandboxed child to load further filters), mknod, mknodat, swapon, swapoff, acct."
+  "comment_blocked": "The following syscalls are EXPLICITLY BLOCKED (they hit defaultAction=ERRNO): ptrace, mount, umount2, pivot_root, reboot, kexec_load, init_module, finit_module, delete_module, setns, unshare, add_key, request_key, keyctl, create_module, nfsservctl, io_uring_enter, io_uring_setup, io_uring_register, process_vm_readv, process_vm_writev, kcmp, bpf, userfaultfd, perf_event_open, mknod, mknodat, swapon, swapoff, acct; clone/clone3 with any namespace flag, sockets outside AF_UNIX/AF_INET/AF_INET6/AF_NETLINK, personality outside PER_LINUX/PER_LINUX32."
 }

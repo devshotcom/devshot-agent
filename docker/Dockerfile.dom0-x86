@@ -150,6 +150,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 WORKDIR /build
 
+# Pool guests boot this kernel too. Elastic Studio VMs (agent vm_memory.go)
+# grow through virtio-balloon (QEMU) or Xen balloon + memory hotplug, and the
+# 256 MB chat phase keeps a zram swap (lz4) as headroom.
 RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
     J=$(nproc) && M=$(awk -v p="${DEVSHOT_BUILD_PARALLELISM:-2}" '/MemTotal/{print int($2/786432/p)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/linux/.git ]; then \
@@ -171,6 +174,12 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
         --enable CONFIG_XEN_NETDEV_FRONTEND \
         --enable CONFIG_XEN_PCIDEV_BACKEND \
         --enable CONFIG_XEN_BALLOON \
+        --enable CONFIG_MEMORY_HOTPLUG \
+        --enable CONFIG_XEN_BALLOON_MEMORY_HOTPLUG \
+        --enable CONFIG_VIRTIO_BALLOON \
+        --enable CONFIG_ZSMALLOC \
+        --enable CONFIG_ZRAM \
+        --enable CONFIG_CRYPTO_LZ4 \
         --enable CONFIG_XEN_GNTDEV \
         --enable CONFIG_XEN_GRANT_DEV_ALLOC \
         --enable CONFIG_SWIOTLB_XEN \
@@ -554,10 +563,12 @@ RUN mkdir -p /domu/rootfs && \
 # Sidecar manifest (BakeManifest in apps/agent/go/bakery.go). memory_mb and
 # disk_gb repeat the recipe's headers: createVM honours them over the pool
 # default, which is what keeps Xvnc + Chromium + Grok + a dev server alive.
+# boot_memory_mb repeats devshot:boot_memory_mb: the VM boots with 256 MB and
+# its agent asks for more when Grok or the desktop start (agent vm_memory.go).
 RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
     SIZE=$(stat -c%s /tmp/devshot-guest-studio-desktop.qcow2) && \
     BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
-    printf '{\n  "name": "studio-desktop",\n  "image": "devshot-guest-studio-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"}\n  ],\n  "memory_mb": 2048,\n  "disk_gb": 8\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-studio-desktop.json && \
+    printf '{\n  "name": "studio-desktop",\n  "image": "devshot-guest-studio-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"}\n  ],\n  "memory_mb": 2048,\n  "boot_memory_mb": 256,\n  "disk_gb": 8\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-studio-desktop.json && \
     rm /tmp/devshot-guest-base.qcow2
 
 # ─── Stage 4g: Browser template — extends domu-rootfs with kiosk Chromium ──

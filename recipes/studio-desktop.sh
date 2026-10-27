@@ -28,6 +28,9 @@
 # devshot:exposed_ports=[{"port":5900,"name":"vnc","proto":"tcp"}]
 # Xvnc + Openbox + Chromium on screen + Grok + a dev server the agent starts:
 # devshot:memory_mb=2048
+# Operator 2026-10-27: it boots with only what the machine needs; the agent
+# asks for 1024 MB when Grok runs and 2048 MB for the desktop (go/vm_memory.go):
+# devshot:boot_memory_mb=256
 # devshot:disk_gb=8
 set -eux
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -200,6 +203,59 @@ cat > /etc/sudoers.d/devshot-desktop-start <<'SUDOERS'
 devshot ALL=(root) NOPASSWD: /usr/local/bin/start-desktop -d
 SUDOERS
 chmod 0440 /etc/sudoers.d/devshot-desktop-start
+# The desktop needs 2048 MB: start-desktop (root through the rule above) asks
+# dom0 for it before Xvnc starts, so the RAM is there first. On a host that
+# does not resize this returns at once.
+if ! grep -q 'devshot-agent-memory' /usr/local/bin/start-desktop; then
+  sed -i '1a /opt/devshot/agent memory request 2048 desktop >/dev/null 2>\&1 || true # devshot-agent-memory' /usr/local/bin/start-desktop
+fi
+
+# ── 4c. A machine that boots with 256 MB ─────────────────────────────────
+# The chat phase runs only the machine itself (operator 2026-10-27). A zram
+# swap (lz4, half of the boot RAM) absorbs the restore and backup peaks until
+# the agent has asked for more; swappiness 100 and page-cluster 0 are the
+# usual settings for swap that lives in RAM. rc.log records each service's
+# start so the boot can be measured on a real VM.
+cat > /etc/init.d/devshot-zram <<'ZRAM'
+#!/sbin/openrc-run
+description="zram swap for the 256 MB chat phase"
+
+depend() {
+    after localmount
+}
+
+start() {
+    # The image may not run the sysctl service at boot.
+    sysctl -q -p /etc/sysctl.d/90-devshot-low-memory.conf 2>/dev/null || true
+    [ -e /sys/block/zram0 ] || modprobe zram 2>/dev/null || true
+    if [ ! -e /sys/block/zram0 ]; then
+        ewarn "this kernel has no zram; no swap"
+        return 0
+    fi
+    grep -q '^/dev/zram0 ' /proc/swaps && return 0
+    size_mb=$(awk '/^MemTotal:/ { print int($2 / 2048) }' /proc/meminfo)
+    ebegin "Starting zram swap (${size_mb} MB, lz4)"
+    echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+    echo "${size_mb}M" > /sys/block/zram0/disksize &&
+        mkswap /dev/zram0 >/dev/null &&
+        swapon -p 100 /dev/zram0
+    eend $?
+}
+
+stop() {
+    grep -q '^/dev/zram0 ' /proc/swaps || return 0
+    swapoff /dev/zram0
+    echo 1 > /sys/block/zram0/reset
+}
+ZRAM
+chmod 0755 /etc/init.d/devshot-zram
+rc-update add devshot-zram boot
+cat > /etc/sysctl.d/90-devshot-low-memory.conf <<'SYSCTL'
+vm.swappiness = 100
+vm.page-cluster = 0
+SYSCTL
+sed -i 's/^#\?rc_logger=.*/rc_logger="YES"/' /etc/rc.conf
+grep -q '^rc_logger="YES"' /etc/rc.conf || echo 'rc_logger="YES"' >> /etc/rc.conf
 
 # ── 5. Verify ─────────────────────────────────────────────────────────────
 for binary in curl jq unzip rsync bash python3 gcc; do
@@ -211,6 +267,8 @@ if rc-update show default 2>/dev/null | grep -q devshot-desktop; then
   echo "ERROR: the desktop still starts at boot" >&2; exit 1
 fi
 visudo -c -f /etc/sudoers.d/devshot-desktop-start >/dev/null
+grep -q 'memory request 2048 desktop' /usr/local/bin/start-desktop
+rc-update show boot 2>/dev/null | grep -q devshot-zram
 /usr/local/bin/devshot-desktop help | grep -q 'start the desktop if it is off'
 # Every launcher ends at the agent's browser: no Exec of the package binary
 # left in the shadowing entry, the dock pointing at it, `chromium` the wrapper.
