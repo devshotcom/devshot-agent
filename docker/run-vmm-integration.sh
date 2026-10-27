@@ -281,7 +281,10 @@ if [ "$backend" = qemu ]; then
       -test.v -test.count=1 -test.timeout="$test_timeout" -test.run "$selector"
 else
   container_started=1
-  list_output="$($timeout_bin --foreground --signal=TERM --kill-after=5s 30s \
+  # A cold `docker run` of the freshly imported multi-GB candidate on a loaded
+  # runner took longer than 30 s (2026-10-27: exit 124, no output) and failed
+  # the release gate before Firecracker ever ran. Listing is not the gate.
+  list_output="$($timeout_bin --foreground --signal=TERM --kill-after=10s 180s \
     "$docker_bin" run --rm --name "$container_name" \
       --privileged --device "$kvm_device:/dev/kvm" --device "$tun_device:/dev/net/tun" --network=none \
       "${common_env[@]}" "${common_mounts[@]}" \
