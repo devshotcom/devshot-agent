@@ -128,6 +128,7 @@ run_profile_parser -r
 profile_loaded=1
 
 probe='\
+set -x
 test "$(id -u)" = 20001
 test "$(id -g)" = 108
 cap_eff=
@@ -166,14 +167,18 @@ socket_server_pid=$!
 socket_ready=0
 # The production profile intentionally grants no signal mediation, so readiness
 # must be observed through the confined socket pathname rather than kill(2).
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+# Python start-up on a busy runner took over the old 1 s budget (2026-10-27,
+# run 40395049753 attempt 2 exited 1 here without a word), so wait up to 10 s.
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+  attempt=$((attempt + 1))
   if test -S /run/devshot/probe.sock; then
     socket_ready=1
     break
   fi
   sleep 0.1
 done
-test "$socket_ready" = 1
+test "$socket_ready" = 1 || { echo "ERROR: probe socket server did not listen within 10 s" >&2; exit 1; }
 socket_response="$(python3 -c "import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(\"/run/devshot/probe.sock\"); s.sendall(b\"unix-socket-ok\"); data=s.recv(64); s.close(); print(data.decode(), end=\"\")")"
 test "$socket_response" = unix-socket-ok
 wait "$socket_server_pid"
