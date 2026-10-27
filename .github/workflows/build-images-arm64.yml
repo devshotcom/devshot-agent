@@ -10,7 +10,32 @@ permissions:
   contents: read
 
 jobs:
+  release-mode:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read exact mirror release mode
+        id: mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema == 1
+            and .repository == "devshotcom/devshot"
+            and (.release_tag | test("^(backend-)?v[0-9]+[.][0-9]+[.][0-9]+$"))
+            and (.source_sha | test("^[0-9a-f]{40}$"))
+            and (.release_mode == "regular" or .release_mode == "full")
+          ' release-source.json >/dev/null
+          mode="$(jq -r '.release_mode' release-source.json)"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
   build-arm64:
+    needs: release-mode
+    if: ${{ needs.release-mode.outputs.mode == 'full' }}
     uses: ./.github/workflows/build-images.yml
     with:
       image_family: arm64
