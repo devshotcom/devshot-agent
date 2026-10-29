@@ -21,17 +21,7 @@ jobs:
       - name: Read exact mirror release mode
         id: mode
         shell: bash
-        run: |
-          set -euo pipefail
-          jq -e '
-            .schema == 1
-            and .repository == "devshotcom/devshot"
-            and (.release_tag | test("^(backend-)?v[0-9]+[.][0-9]+[.][0-9]+$"))
-            and (.source_sha | test("^[0-9a-f]{40}$"))
-            and (.release_mode == "regular" or .release_mode == "full")
-          ' release-source.json >/dev/null
-          mode="$(jq -r '.release_mode' release-source.json)"
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+        run: bash docker/read-release-mode.sh >> "$GITHUB_OUTPUT"
 
   build-arm64:
     needs: release-mode
@@ -39,4 +29,5 @@ jobs:
     uses: ./.github/workflows/build-images.yml
     with:
       image_family: arm64
+      release_mode: full
     secrets: inherit

@@ -46,6 +46,10 @@ on:
         description: Exact architecture family to build
         required: true
         type: string
+      release_mode:
+        description: Exact release scope from release-source.json
+        required: true
+        type: string
 
 concurrency:
   group: build-images-${{ inputs.image_family }}-${{ github.ref }}
@@ -85,6 +89,17 @@ jobs:
     env:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-family-recovery
     steps:
+      - name: Validate architecture and release mode
+        shell: bash
+        env:
+          IMAGE_FAMILY: ${{ inputs.image_family }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+        run: |
+          case "$IMAGE_FAMILY:$RELEASE_MODE" in
+            amd64:regular|amd64:full|arm64:full) ;;
+            *) echo "ERROR: unsupported architecture release mode: $IMAGE_FAMILY:$RELEASE_MODE" >&2; exit 64 ;;
+          esac
+
       - name: Reclaim self-hosted runner workspace
         shell: bash
         run: |
@@ -285,6 +300,8 @@ jobs:
       labels: [self-hosted, Linux, X64, devshot-runner]
     timeout-minutes: 330
     env:
+      RELEASE_MODE: ${{ inputs.release_mode }}
+      IMAGE_FAMILY_SCHEMA: ${{ inputs.release_mode == 'regular' && '3' || '2' }}
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-kvm
       BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-kvm
       CANDIDATE_IMAGE: devshot-amd64-candidate:${{ github.run_id }}-${{ github.run_attempt }}-kvm
@@ -372,6 +389,7 @@ jobs:
           fi
 
       - name: Reuse exact immutable AMD64 Firecracker image on retry
+        if: ${{ inputs.release_mode == 'full' }}
         id: reuse_fc_amd64
         working-directory: ${{ env.CHECKOUT_DIR }}
         run: |
@@ -402,6 +420,7 @@ jobs:
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
+            IMAGE_FAMILY_SCHEMA=${{ env.IMAGE_FAMILY_SCHEMA }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           tags: ${{ env.CANDIDATE_IMAGE }}
       # Retry once on a transient BuildKit / Docker Hub flake. The bake step
@@ -419,6 +438,7 @@ jobs:
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
+            IMAGE_FAMILY_SCHEMA=${{ env.IMAGE_FAMILY_SCHEMA }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           tags: ${{ env.CANDIDATE_IMAGE }}
 
@@ -436,6 +456,7 @@ jobs:
           build-args: |
             BASE_IMAGE=anticipatercom/devshot:amd64-${{ github.sha }}
             SOURCE_SHA=${{ github.sha }}
+            IMAGE_FAMILY_SCHEMA=${{ env.IMAGE_FAMILY_SCHEMA }}
           cache-from: type=registry,ref=anticipatercom/devshot:buildcache-vmm-qemu-amd64
           tags: ${{ env.CANDIDATE_IMAGE }}
 
@@ -455,7 +476,7 @@ jobs:
           bash docker/run-vmm-integration.sh qemu "$CANDIDATE_IMAGE" TestIntegrationEscape
 
       - name: Build exact AMD64 Firecracker validation candidate
-        if: steps.reuse_fc_amd64.outputs.reused != 'true'
+        if: ${{ inputs.release_mode == 'full' && steps.reuse_fc_amd64.outputs.reused != 'true' }}
         working-directory: ${{ env.CHECKOUT_DIR }}
         run: |
           timeout --foreground --signal=TERM --kill-after=30s 2700s \
@@ -468,6 +489,7 @@ jobs:
               --tag "$FC_CANDIDATE_IMAGE" .
 
       - name: Prove real AMD64 Firecracker lifecycle and isolation
+        if: ${{ inputs.release_mode == 'full' }}
         working-directory: ${{ env.CHECKOUT_DIR }}
         run: |
           [ "$(docker image inspect --format '{{.Architecture}}' "$FC_CANDIDATE_IMAGE")" = amd64 ]
@@ -476,7 +498,7 @@ jobs:
           bash docker/run-vmm-integration.sh firecracker "$FC_CANDIDATE_IMAGE" TestIntegrationEscape
 
       - name: Publish validated immutable AMD64 Firecracker tag
-        if: steps.reuse_fc_amd64.outputs.reused != 'true'
+        if: ${{ inputs.release_mode == 'full' && steps.reuse_fc_amd64.outputs.reused != 'true' }}
         working-directory: ${{ env.CHECKOUT_DIR }}
         run: bash docker/publish-validated-image.sh push-immutable amd64-fc "$FC_CANDIDATE_IMAGE" "${{ github.sha }}"
 
@@ -488,12 +510,18 @@ jobs:
         if: always()
         working-directory: ${{ env.CHECKOUT_DIR }}
         run: |
-          bash docker/self-hosted-builder.sh cleanup \
-            "$CANDIDATE_IMAGE" \
-            "$FC_CANDIDATE_IMAGE" \
-            anticipatercom/devshot:amd64-${{ github.sha }} \
-            anticipatercom/devshot:amd64-fc-${{ github.sha }} \
+          cleanup_images=(
+            "$CANDIDATE_IMAGE"
+            anticipatercom/devshot:amd64-${{ github.sha }}
             anticipatercom/devshot:amd64-kvm-${{ github.sha }}
+          )
+          if [ "$RELEASE_MODE" = full ]; then
+            cleanup_images+=(
+              "$FC_CANDIDATE_IMAGE"
+              anticipatercom/devshot:amd64-fc-${{ github.sha }}
+            )
+          fi
+          bash docker/self-hosted-builder.sh cleanup "${cleanup_images[@]}"
 
       - name: Promote validated AMD64 family to rolling tags
         if: success()
@@ -501,7 +529,12 @@ jobs:
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: bash docker/publish-validated-image.sh promote-amd64-family "${{ github.sha }}"
+        run: |
+          case "$RELEASE_MODE" in
+            regular) bash docker/publish-validated-image.sh promote-amd64-regular "${{ github.sha }}" ;;
+            full) bash docker/publish-validated-image.sh promote-amd64-family "${{ github.sha }}" ;;
+            *) echo "ERROR: unsupported AMD64 release mode: $RELEASE_MODE" >&2; exit 64 ;;
+          esac
 
   # ═══════════════════════════════════════════════════════════════════════
   # Group 2 — arm64 (active)

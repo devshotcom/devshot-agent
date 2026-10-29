@@ -26,12 +26,14 @@
 #
 # Spec 050 — declared listen ports auto-populate the per-VM forward allowlist:
 # devshot:exposed_ports=[{"port":5900,"name":"vnc","proto":"tcp"}]
-# Xvnc + Openbox + Chromium on screen + Grok + a dev server the agent starts:
-# devshot:memory_mb=2048
+# Shared Workspace: host-admitted growth for the desktop and independent
+# project cgroups. Two projects request 4096 MB in this same VM.
+# devshot:memory_mb=8192
 # Operator 2026-10-27: it boots with only what the machine needs; the agent
 # asks for 1024 MB when Grok runs and 2048 MB for the desktop (go/vm_memory.go):
-# devshot:boot_memory_mb=256
-# devshot:disk_gb=8
+# devshot:boot_memory_mb=512
+# Space for verified OS activation, immutable staging and sparse project disks.
+# devshot:disk_gb=64
 set -eux
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -54,7 +56,23 @@ apk add --no-cache \
     curl jq unzip rsync bash \
     build-base python3 \
     openssh-client \
-    mandoc less
+    mandoc less \
+    bubblewrap slirp4netns nftables e2fsprogs e2fsprogs-extra util-linux-misc
+
+# Workspace projects share this VM but receive private mount/PID/network/user
+# namespaces and cgroup-v2 resource controls. The marker is a versioned restore
+# ABI; the agent advertises workspace-v1 only on this prepared image.
+mkdir -p /etc/devshot /workspace/projects /workspace/shared
+printf '%s\n' studio-desktop-workspace-v1 > /etc/devshot/workspace-base
+chmod 0711 /workspace/projects
+chmod 0700 /workspace/shared
+# A single unified hierarchy is required by clone3/cgroup.freeze/cgroup.kill.
+printf '\nrc_cgroup_mode="unified"\n' >> /etc/rc.conf
+rc-update add cgroups boot
+
+for binary in bwrap slirp4netns nft mkfs.ext4 mount umount; do
+    command -v "$binary" >/dev/null
+done
 
 # ── 2. The workspace: /home/devshot is the project ─────────────────────────
 # The console's desktop stack names /home/devshot as the project directory
@@ -78,47 +96,47 @@ install -m 0664 -o devshot -g devshot /dev/null /var/log/devshot/agent-terminal.
 printf '# DevShot Studio — the agent'"'"'s terminal. Every command the agent runs lands here.\n' \
   > /var/log/devshot/agent-terminal.log
 
-# The xterm: bottom half of the 1280x800 desktop, tailing the log. Operator
-# 2026-10-25: it runs from the moment the desktop starts, but in the
-# BACKGROUND — minimized into the taskbar (`--background`, xterm -iconic), so
-# it covers nothing; the taskbar entry or the menu item below brings it up.
+# The log is always available, but its window opens only on explicit request.
+# Chat shows execution output; an idle desktop needs no agent taskbar entry.
 cat > /usr/local/bin/devshot-agent-terminal <<'TERMINAL'
 #!/bin/sh
-# Show (or raise) the xterm that tails the agent's terminal log on :0.
-# --background: start it minimized (the desktop's autostart), never raise it.
+# Keep the agent log in the background. Only --show opens it for the user.
 export DISPLAY=:0
 LOG=/var/log/devshot/agent-terminal.log
-background=0
-[ "${1-}" = "--background" ] && background=1
+background=1
+case "${1-}" in
+  ""|--background) ;;
+  --show) background=0 ;;
+  *) printf 'usage: devshot-agent-terminal [--background|--show]\n' >&2; exit 2 ;;
+esac
 if xdotool search --name '^DevShot Agent$' >/dev/null 2>&1; then
-  [ "$background" = "1" ] && exit 0
+  if [ "$background" = "1" ]; then
+    xdotool search --name '^DevShot Agent$' windowminimize >/dev/null 2>&1
+    exit $?
+  fi
   xdotool search --name '^DevShot Agent$' windowactivate --sync >/dev/null 2>&1 || true
   exit 0
 fi
-iconic=""
-[ "$background" = "1" ] && iconic="-iconic"
-exec xterm $iconic -T 'DevShot Agent' -fa 'Noto Sans Mono' -fs 10 \
+[ "$background" = "1" ] && exit 0
+exec xterm -T 'DevShot Agent' -fa 'Noto Sans Mono' -fs 10 \
   -bg '#101114' -fg '#d7d8dc' -geometry 158x20+0-0 \
   -e sh -c "tail -n 60 -F $LOG"
 TERMINAL
 chmod 0755 /usr/local/bin/devshot-agent-terminal
 
-# Openbox autostart (desktop.sh wrote compositor, wallpaper, dock): the agent
-# terminal starts with the desktop, minimized. An earlier bake opened it in
-# front; that line is replaced.
+# Remove the old background terminal from existing desktop configurations.
 AUTOSTART="$DEVSHOT_HOME/.config/openbox/autostart"
 if [ -f "$AUTOSTART" ]; then
   sed -i '/the agent.s terminal/d; /devshot-agent-terminal/d' "$AUTOSTART"
-  cat >> "$AUTOSTART" <<'AUTOSTART_ADD'
-# Spec 459 — the agent's terminal, running in the background (minimized).
-(sleep 2; /usr/local/bin/devshot-agent-terminal --background) >/dev/null 2>&1 &
-AUTOSTART_ADD
 fi
 
 # Openbox menu entry next to the desktop's own Terminal item.
 RCXML="$DEVSHOT_HOME/.config/openbox/rc.xml"
+if [ -f "$RCXML" ]; then
+  sed -i 's|devshot-agent-terminal</execute>|devshot-agent-terminal --show</execute>|g' "$RCXML"
+fi
 if [ -f "$RCXML" ] && ! grep -q devshot-agent-terminal "$RCXML"; then
-  sed -i 's|<item label="Terminal">|<item label="Agent terminal"><action name="Execute"><execute>/usr/local/bin/devshot-agent-terminal</execute></action></item>\n    <item label="Terminal">|' "$RCXML"
+  sed -i 's|<item label="Terminal">|<item label="Agent terminal"><action name="Execute"><execute>/usr/local/bin/devshot-agent-terminal --show</execute></action></item>\n    <item label="Terminal">|' "$RCXML"
 fi
 
 # ── 3b. The desktop CLI: devshot-desktop (spec 459, round three) ──────────
@@ -210,7 +228,7 @@ if ! grep -q 'devshot-agent-memory' /usr/local/bin/start-desktop; then
   sed -i '1a /opt/devshot/agent memory request 2048 desktop >/dev/null 2>\&1 || true # devshot-agent-memory' /usr/local/bin/start-desktop
 fi
 
-# ── 4c. A machine that boots with 256 MB ─────────────────────────────────
+# ── 4c. A machine that boots with 512 MB ─────────────────────────────────
 # The chat phase runs only the machine itself (operator 2026-10-27). A zram
 # swap (lz4, half of the boot RAM) absorbs the restore and backup peaks until
 # the agent has asked for more; swappiness 100 and page-cluster 0 are the
@@ -218,7 +236,7 @@ fi
 # start so the boot can be measured on a real VM.
 cat > /etc/init.d/devshot-zram <<'ZRAM'
 #!/sbin/openrc-run
-description="zram swap for the 256 MB chat phase"
+description="zram swap for the 512 MB chat phase"
 
 depend() {
     after localmount

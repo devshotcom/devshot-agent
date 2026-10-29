@@ -196,6 +196,22 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src-x86 \
         --enable CONFIG_DEVTMPFS \
         --enable CONFIG_DEVTMPFS_MOUNT \
         --enable CONFIG_CGROUPS \
+        --enable CONFIG_NAMESPACES \
+        --enable CONFIG_USER_NS \
+        --enable CONFIG_PID_NS \
+        --enable CONFIG_NET_NS \
+        --enable CONFIG_IPC_NS \
+        --enable CONFIG_UTS_NS \
+        --enable CONFIG_SYSVIPC \
+        --enable CONFIG_BLK_DEV_LOOP \
+        --enable CONFIG_MEMCG \
+        --enable CONFIG_CGROUP_PIDS \
+        --enable CONFIG_CGROUP_SCHED \
+        --enable CONFIG_FAIR_GROUP_SCHED \
+        --enable CONFIG_CFS_BANDWIDTH \
+        --enable CONFIG_FREEZER \
+        --enable CONFIG_NFT_META \
+        --enable CONFIG_NFT_PAYLOAD \
         --enable CONFIG_OVERLAY_FS \
         --enable CONFIG_NFSD \
         --enable CONFIG_KVM \
@@ -274,7 +290,7 @@ RUN chroot /rootfs bash -c ' \
         sudo iproute2 net-tools iputils-ping \
         curl wget vim-tiny ca-certificates \
         procps kmod udev systemd systemd-sysv systemd-timesyncd \
-        python3 qemu-utils nbd-client \
+        python3 qemu-utils nbd-client libguestfs-tools linux-image-amd64 \
         libpixman-1-0 nftables conntrack \
         clamav clamav-daemon clamav-freshclam yara \
     && rm -rf /var/lib/apt/lists/*'
@@ -549,16 +565,15 @@ COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base
 # 8 GiB: the recipe's `devshot:disk_gb=8` — room for an agent-installed stack
 # (node_modules, a database, Chromium profiles). qcow2 is compressed and
 # sparse, so the unused space costs nothing on disk.
-RUN mkdir -p /domu/rootfs && \
+RUN --mount=type=tmpfs,target=/domu mkdir -p /domu/rootfs && \
     tar xf /tmp/studio-desktop-rootfs.tar -C /domu/rootfs && \
     rm /tmp/studio-desktop-rootfs.tar && \
     echo 'devshot-guest' > /domu/rootfs/etc/hostname && \
     echo '127.0.0.1 localhost devshot-guest' > /domu/rootfs/etc/hosts && \
     echo 'nameserver 10.10.0.1' > /domu/rootfs/etc/resolv.conf && \
     mkdir -p /domu/rootfs/tmp /domu/rootfs/proc /domu/rootfs/sys /domu/rootfs/dev && \
-    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /tmp/studio-desktop-disk.raw 8G && \
-    qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/studio-desktop-disk.raw /tmp/devshot-guest-studio-desktop.qcow2 && \
-    rm -rf /tmp/studio-desktop-disk.raw /domu/rootfs
+    mke2fs -t ext4 -d /domu/rootfs -r 1 -N 0 -m 5 -L rootfs -O ^64bit /domu/studio-desktop-disk.raw 8G && \
+    qemu-img convert -f raw -O qcow2 -c -m 8 -W /domu/studio-desktop-disk.raw /tmp/devshot-guest-studio-desktop.qcow2
 
 # Sidecar manifest (BakeManifest in apps/agent/go/bakery.go). memory_mb and
 # disk_gb repeat the recipe's headers: createVM honours them over the pool
@@ -568,7 +583,7 @@ RUN mkdir -p /domu/rootfs && \
 RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
     SIZE=$(stat -c%s /tmp/devshot-guest-studio-desktop.qcow2) && \
     BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
-    printf '{\n  "name": "studio-desktop",\n  "image": "devshot-guest-studio-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"}\n  ],\n  "memory_mb": 2048,\n  "boot_memory_mb": 256,\n  "disk_gb": 8\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-studio-desktop.json && \
+    printf '{\n  "name": "studio-desktop",\n  "image": "devshot-guest-studio-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"}\n  ],\n  "memory_mb": 8192,\n  "boot_memory_mb": 512,\n  "disk_gb": 64\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-studio-desktop.json && \
     rm /tmp/devshot-guest-base.qcow2
 
 # ─── Stage 4g: Browser template — extends domu-rootfs with kiosk Chromium ──
@@ -684,7 +699,7 @@ FROM --platform=${DEVSHOT_DOM0_PLATFORM} debian:bookworm-slim
 # privileged container, so the CI runner never needs passwordless sudo.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     qemu-system-x86 qemu-utils \
-    socat netcat-openbsd tmux \
+    socat netcat-openbsd tmux libguestfs-tools linux-image-amd64 \
     curl ca-certificates bash tini openssl apparmor-utils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 

@@ -10,8 +10,23 @@ permissions:
   contents: read
 
 jobs:
+  release-mode:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read exact mirror release mode
+        id: mode
+        shell: bash
+        run: bash docker/read-release-mode.sh >> "$GITHUB_OUTPUT"
+
   build-amd64:
+    needs: release-mode
     uses: ./.github/workflows/build-images.yml
     with:
       image_family: amd64
+      release_mode: ${{ needs.release-mode.outputs.mode }}
     secrets: inherit

@@ -15,8 +15,10 @@ FROM --platform=${DEVSHOT_QEMU_PLATFORM} debian:bookworm-slim
 # source-unique even when all copied runtime payloads happen to be identical.
 ARG SOURCE_SHA
 RUN printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+ARG IMAGE_FAMILY_SCHEMA=2
+RUN test "$IMAGE_FAMILY_SCHEMA" = 2 || test "$IMAGE_FAMILY_SCHEMA" = 3
 LABEL org.opencontainers.image.revision="$SOURCE_SHA" \
-      io.devshot.image-family.schema="2"
+      io.devshot.image-family.schema="$IMAGE_FAMILY_SCHEMA"
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   qemu-system-x86 \

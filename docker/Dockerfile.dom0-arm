@@ -201,6 +201,22 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src \
         --enable CONFIG_DEVTMPFS \
         --enable CONFIG_DEVTMPFS_MOUNT \
         --enable CONFIG_CGROUPS \
+        --enable CONFIG_NAMESPACES \
+        --enable CONFIG_USER_NS \
+        --enable CONFIG_PID_NS \
+        --enable CONFIG_NET_NS \
+        --enable CONFIG_IPC_NS \
+        --enable CONFIG_UTS_NS \
+        --enable CONFIG_SYSVIPC \
+        --enable CONFIG_BLK_DEV_LOOP \
+        --enable CONFIG_MEMCG \
+        --enable CONFIG_CGROUP_PIDS \
+        --enable CONFIG_CGROUP_SCHED \
+        --enable CONFIG_FAIR_GROUP_SCHED \
+        --enable CONFIG_CFS_BANDWIDTH \
+        --enable CONFIG_FREEZER \
+        --enable CONFIG_NFT_META \
+        --enable CONFIG_NFT_PAYLOAD \
         --enable CONFIG_OVERLAY_FS \
         --enable CONFIG_NFSD \
         && \
@@ -275,7 +291,7 @@ RUN chroot /rootfs bash -c ' \
         sudo iproute2 net-tools iputils-ping \
         curl wget vim-tiny ca-certificates \
         procps kmod udev systemd systemd-sysv systemd-timesyncd \
-        python3 qemu-utils nbd-client \
+        python3 qemu-utils nbd-client libguestfs-tools linux-image-arm64 \
         libpixman-1-0 \
     && rm -rf /var/lib/apt/lists/*'
 
@@ -550,8 +566,14 @@ RUN mkdir -p /domu/rootfs && \
 RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
     SIZE=$(stat -c%s /tmp/devshot-guest-studio-desktop.qcow2) && \
     BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
-    printf '{\n  "name": "studio-desktop",\n  "image": "devshot-guest-studio-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"}\n  ],\n  "memory_mb": 2048,\n  "boot_memory_mb": 256,\n  "disk_gb": 8\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-studio-desktop.json && \
+    printf '{\n  "name": "studio-desktop",\n  "image": "devshot-guest-studio-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"}\n  ],\n  "memory_mb": 8192,\n  "boot_memory_mb": 512,\n  "disk_gb": 64\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-studio-desktop.json && \
     rm /tmp/devshot-guest-base.qcow2
+
+# Export only the local Studio template artifacts. The converter itself is a
+# Debian rootfs; exporting it directly copies the whole build filesystem.
+FROM scratch AS studio-desktop-local-export
+COPY --from=studio-desktop-converter /tmp/devshot-guest-studio-desktop.qcow2 /
+COPY --from=studio-desktop-converter /tmp/devshot-guest-studio-desktop.json /
 
 # ─── Stage 5f: Android template — extends domu-rootfs with QEMU+Android-x86 ──
 # Parity with Dockerfile.dom0-x86 stage 4e. The recipe pulls
@@ -655,7 +677,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     qemu-system-arm qemu-efi-aarch64 qemu-utils \
-    socat netcat-openbsd tmux \
+    socat netcat-openbsd tmux libguestfs-tools linux-image-arm64 \
     curl ca-certificates bash tini \
     # Spec 038 FR-015 sandbox toolchain — util-linux gives us `unshare` and
     # `setpriv`; systemd-container provides `systemd-run --user --scope` for

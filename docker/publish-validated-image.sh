@@ -13,7 +13,7 @@ readonly REGISTRY_PUSH_VMM_TIMEOUT_SECONDS=7200
 PROMOTION_AUTH_DIR=''
 
 usage() {
-  echo "usage: $0 reuse-immutable <arm64-dom0|arm64-fc|arm64-kvm|amd64-dom0|amd64-fc|amd64-kvm> <local-candidate> <40-char-sha> | push-immutable <arm64-dom0|arm64-fc|arm64-kvm|amd64-dom0|amd64-fc|amd64-kvm> <local-candidate> <40-char-sha> | promote-arm64-family <40-char-sha> | promote-amd64-family <40-char-sha>" >&2
+  echo "usage: $0 reuse-immutable <arm64-dom0|arm64-fc|arm64-kvm|amd64-dom0|amd64-fc|amd64-kvm> <local-candidate> <40-char-sha> | push-immutable <arm64-dom0|arm64-fc|arm64-kvm|amd64-dom0|amd64-fc|amd64-kvm> <local-candidate> <40-char-sha> | promote-arm64-family <40-char-sha> | promote-amd64-family <40-char-sha> | promote-amd64-regular <40-char-sha>" >&2
   exit 64
 }
 
@@ -92,8 +92,22 @@ registry_revision() {
 registry_family_schema() {
   local reference="$1" image schema
   image="$(bounded_docker 180 buildx imagetools inspect "$reference" --format '{{json .Image}}')" || return 1
-  schema="$(jq -er '.config.Labels["io.devshot.image-family.schema"] | select(. == "2")' <<< "$image")" || return 1
+  schema="$(jq -er '.config.Labels["io.devshot.image-family.schema"] | select(. == "2" or . == "3")' <<< "$image")" || return 1
   printf '%s\n' "$schema"
+}
+
+required_family_schema() {
+  case "$1" in
+    arm64-kvm) printf '%s\n' 2 ;;
+    amd64-kvm)
+      case "${RELEASE_MODE:-}" in
+        full) printf '%s\n' 2 ;;
+        regular) printf '%s\n' 3 ;;
+        *) echo "ERROR: AMD64 KVM requires an exact release mode" >&2; return 1 ;;
+      esac
+      ;;
+    *) echo "ERROR: image variant has no family schema: $1" >&2; return 1 ;;
+  esac
 }
 
 registry_digest_or_missing() {
@@ -286,7 +300,7 @@ immutable_references() {
 }
 
 require_local_vmm_identity() {
-  local variant="$1" image="$2" source_sha="$3" revision
+  local variant="$1" image="$2" source_sha="$3" revision expected_schema
   case "$variant" in
     arm64-kvm|amd64-kvm|arm64-fc|amd64-fc) ;;
     *) return 0 ;;
@@ -300,10 +314,11 @@ require_local_vmm_identity() {
   }
   case "$variant" in
     arm64-kvm|amd64-kvm)
+      expected_schema="$(required_family_schema "$variant")" || return 1
       [ "$(bounded_docker 60 image inspect \
           --format '{{ index .Config.Labels "io.devshot.image-family.schema" }}' \
-          "$image")" = 2 ] || {
-        echo "ERROR: KVM image is missing required image-family schema 2" >&2
+          "$image")" = "$expected_schema" ] || {
+        echo "ERROR: KVM image is missing required image-family schema $expected_schema" >&2
         return 1
       }
       ;;
@@ -421,8 +436,8 @@ push_immutable() {
     return 1
   fi
   if [[ "$variant" == *-kvm ]] \
-    && [ "$(registry_family_schema "$registry_candidate")" != 2 ]; then
-    echo "ERROR: published KVM image is missing required image-family schema 2" >&2
+    && [ "$(registry_family_schema "$registry_candidate")" != "$(required_family_schema "$variant")" ]; then
+    echo "ERROR: published KVM image has the wrong image-family schema" >&2
     return 1
   fi
   bounded_docker 120 image rm "$registry_candidate" >/dev/null
@@ -434,9 +449,14 @@ push_immutable() {
 }
 
 promote_amd64_family() {
-  local source_sha="${1:-}" auth_dir curl_config dom0_digest fc_digest kvm_digest
+  local source_sha="${1:-}" mode="${2:-}" auth_dir curl_config dom0_digest fc_digest kvm_digest expected_schema
   local old_dom0 old_fc old_kvm actual promotion_started=0 promotion_failed=0 rollback_failed=0
   require_sha "$source_sha"
+  case "$mode:${RELEASE_MODE:-}" in
+    full:full) expected_schema=2 ;;
+    regular:regular) expected_schema=3 ;;
+    *) echo "ERROR: AMD64 promotion command does not match the exact release mode" >&2; exit 64 ;;
+  esac
   : "${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME is required}"
   : "${DOCKERHUB_TOKEN:?DOCKERHUB_TOKEN is required}"
   : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
@@ -508,13 +528,22 @@ promote_amd64_family() {
     rollback_failed=0
     auth_docker 600 buildx imagetools create --prefer-index=false \
       --tag "$REPOSITORY:amd64" "$REPOSITORY@$old_dom0" || rollback_failed=1
-    restore_fc || rollback_failed=1
+    if [ "$mode" = full ]; then
+      restore_fc || rollback_failed=1
+    fi
     auth_docker 600 buildx imagetools create --prefer-index=false \
       --tag "$REPOSITORY:amd64-kvm" "$REPOSITORY@$old_kvm" || rollback_failed=1
     actual="$(auth_digest "$REPOSITORY:amd64" 2>/dev/null || true)"
     [ "$actual" = "$old_dom0" ] || rollback_failed=1
     actual="$(auth_digest "$REPOSITORY:amd64-kvm" 2>/dev/null || true)"
     [ "$actual" = "$old_kvm" ] || rollback_failed=1
+    if [ "$mode" = regular ]; then
+      actual="$(auth_digest_or_missing "$REPOSITORY:amd64-fc" 2>/dev/null || true)"
+      if [ "$actual" != "$old_fc" ]; then
+        echo "ERROR: Firecracker rolling digest changed during regular AMD64 rollback" >&2
+        rollback_failed=1
+      fi
+    fi
     [ "$rollback_failed" -eq 0 ] || {
       echo "ERROR: AMD64 rolling-tag rollback did not restore the previous family" >&2
       return 1
@@ -535,18 +564,20 @@ promote_amd64_family() {
           --username "$DOCKERHUB_USERNAME" --password-stdin
 
   dom0_digest="$(auth_digest "$REPOSITORY:amd64-$source_sha")"
-  fc_digest="$(auth_digest "$REPOSITORY:amd64-fc-$source_sha")"
   kvm_digest="$(auth_digest "$REPOSITORY:amd64-kvm-$source_sha")"
-  [ "$(registry_revision "$REPOSITORY:amd64-fc-$source_sha")" = "$source_sha" ] || {
-    echo "ERROR: AMD64 Firecracker immutable revision does not match promotion source" >&2
-    exit 1
-  }
+  if [ "$mode" = full ]; then
+    fc_digest="$(auth_digest "$REPOSITORY:amd64-fc-$source_sha")"
+    [ "$(registry_revision "$REPOSITORY:amd64-fc-$source_sha")" = "$source_sha" ] || {
+      echo "ERROR: AMD64 Firecracker immutable revision does not match promotion source" >&2
+      exit 1
+    }
+  fi
   [ "$(registry_revision "$REPOSITORY:amd64-kvm-$source_sha")" = "$source_sha" ] || {
     echo "ERROR: AMD64 KVM immutable revision does not match promotion source" >&2
     exit 1
   }
-  [ "$(registry_family_schema "$REPOSITORY:amd64-kvm-$source_sha")" = 2 ] || {
-    echo "ERROR: AMD64 KVM immutable does not require the complete Firecracker family" >&2
+  [ "$(registry_family_schema "$REPOSITORY:amd64-kvm-$source_sha")" = "$expected_schema" ] || {
+    echo "ERROR: AMD64 KVM immutable has the wrong image-family schema" >&2
     exit 1
   }
   old_dom0="$(auth_digest "$REPOSITORY:amd64")"
@@ -559,17 +590,26 @@ promote_amd64_family() {
   if ! auth_docker 600 buildx imagetools create --prefer-index=false \
       --tag "$REPOSITORY:amd64" "$REPOSITORY@$dom0_digest"; then
     promotion_failed=1
-  elif ! auth_docker 600 buildx imagetools create --prefer-index=false \
-      --tag "$REPOSITORY:amd64-fc" "$REPOSITORY@$fc_digest"; then
-    promotion_failed=1
-  elif ! auth_docker 600 buildx imagetools create --prefer-index=false \
-      --tag "$REPOSITORY:amd64-kvm" "$REPOSITORY@$kvm_digest"; then
+  elif [ "$mode" = full ]; then
+    if ! auth_docker 600 buildx imagetools create --prefer-index=false \
+        --tag "$REPOSITORY:amd64-fc" "$REPOSITORY@$fc_digest"; then
+      promotion_failed=1
+    fi
+  fi
+  if [ "$promotion_failed" -eq 0 ] \
+      && ! auth_docker 600 buildx imagetools create --prefer-index=false \
+        --tag "$REPOSITORY:amd64-kvm" "$REPOSITORY@$kvm_digest"; then
     promotion_failed=1
   fi
   actual="$(auth_digest "$REPOSITORY:amd64" 2>/dev/null || true)"
   [ "$actual" = "$dom0_digest" ] || { echo "ERROR: promoted AMD64 Dom0 digest did not verify" >&2; promotion_failed=1; }
-  actual="$(auth_digest "$REPOSITORY:amd64-fc" 2>/dev/null || true)"
-  [ "$actual" = "$fc_digest" ] || { echo "ERROR: promoted AMD64 Firecracker digest did not verify" >&2; promotion_failed=1; }
+  if [ "$mode" = full ]; then
+    actual="$(auth_digest "$REPOSITORY:amd64-fc" 2>/dev/null || true)"
+    [ "$actual" = "$fc_digest" ] || { echo "ERROR: promoted AMD64 Firecracker digest did not verify" >&2; promotion_failed=1; }
+  else
+    actual="$(auth_digest_or_missing "$REPOSITORY:amd64-fc")"
+    [ "$actual" = "$old_fc" ] || { echo "ERROR: regular AMD64 promotion changed the Firecracker rolling digest" >&2; promotion_failed=1; }
+  fi
   actual="$(auth_digest "$REPOSITORY:amd64-kvm" 2>/dev/null || true)"
   [ "$actual" = "$kvm_digest" ] || { echo "ERROR: promoted AMD64 KVM commit marker did not verify" >&2; promotion_failed=1; }
   if [ "$promotion_failed" -ne 0 ]; then
@@ -579,7 +619,11 @@ promote_amd64_family() {
   promotion_started=0
   rm -rf -- "$auth_dir"
   trap - EXIT INT TERM
-  echo "Promoted validated AMD64 family: dom0=$dom0_digest fc=$fc_digest kvm=$kvm_digest"
+  if [ "$mode" = full ]; then
+    echo "Promoted validated AMD64 family: dom0=$dom0_digest fc=$fc_digest kvm=$kvm_digest"
+  else
+    echo "Promoted validated regular AMD64 family: dom0=$dom0_digest fc=unchanged kvm=$kvm_digest"
+  fi
 }
 
 promote_arm64_family() {
@@ -1115,7 +1159,11 @@ case "${1:-}" in
     ;;
   promote-amd64-family)
     [ "$#" -eq 2 ] || usage
-    promote_amd64_family "$2"
+    promote_amd64_family "$2" full
+    ;;
+  promote-amd64-regular)
+    [ "$#" -eq 2 ] || usage
+    promote_amd64_family "$2" regular
     ;;
   *) usage ;;
 esac

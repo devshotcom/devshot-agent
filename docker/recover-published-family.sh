@@ -176,6 +176,8 @@ registry_family_schema_or_legacy() {
     printf '%s\n' legacy
   elif [ "$schema" = 2 ]; then
     printf '%s\n' 2
+  elif [ "$schema" = 3 ] && [ "$family" = amd64 ]; then
+    printf '%s\n' 3
   else
     echo "ERROR: KVM image has an unsupported image-family schema: $reference" >&2
     return 1
@@ -450,6 +452,8 @@ for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_
       echo "ERROR: immutable ${family} Firecracker revision does not match committed SHA $source_sha" >&2
       exit 1
     }
+  elif [ "$family_schema" = 3 ]; then
+    fc_digest='unchanged'
   fi
 
   if [ "$(registry_digest "$kvm_rolling_ref")" != "$kvm_commit_digest" ]; then
@@ -491,20 +495,26 @@ for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_
     if [ "$(registry_digest "$kvm_rolling_ref")" != "$kvm_commit_digest" ]; then
       marker_changed=1
     else
-      rolling_fc_ref="$REPOSITORY:$FC_ROLLING_TAG"
-      rolling_fc_digest="$(registry_digest_or_missing "$rolling_fc_ref")"
-      if [ "$family_schema" = 2 ]; then
-        if [ "$rolling_fc_digest" != "$fc_digest" ]; then
-          if [ "$verify_only" -eq 1 ]; then
-            echo "ERROR: ${family} Firecracker rolling tag is not coherent at committed SHA $source_sha" >&2
-            exit 1
+      if [ "$family_schema" = 3 ]; then
+        # Regular AMD64 commits only Dom0 and KVM. Firecracker remains at its
+        # previous full-release digest and is outside this recovery transaction.
+        :
+      else
+        rolling_fc_ref="$REPOSITORY:$FC_ROLLING_TAG"
+        rolling_fc_digest="$(registry_digest_or_missing "$rolling_fc_ref")"
+        if [ "$family_schema" = 2 ]; then
+          if [ "$rolling_fc_digest" != "$fc_digest" ]; then
+            if [ "$verify_only" -eq 1 ]; then
+              echo "ERROR: ${family} Firecracker rolling tag is not coherent at committed SHA $source_sha" >&2
+              exit 1
+            fi
+            create_family_tag "$rolling_fc_ref" "$fc_digest"
+            repaired=1
           fi
-          create_family_tag "$rolling_fc_ref" "$fc_digest"
+        elif [ "$rolling_fc_digest" != missing ]; then
+          delete_rolling_fc_tag
           repaired=1
         fi
-      elif [ "$rolling_fc_digest" != missing ]; then
-        delete_rolling_fc_tag
-        repaired=1
       fi
       if [ "$(registry_digest "$kvm_rolling_ref")" != "$kvm_commit_digest" ]; then
         marker_changed=1
@@ -533,7 +543,7 @@ for ((recovery_attempt = 1; recovery_attempt <= MAX_RECOVERY_ATTEMPTS; recovery_
     done
   fi
 
-  if [ "$marker_changed" -eq 0 ]; then
+  if [ "$marker_changed" -eq 0 ] && [ "$family_schema" != 3 ]; then
     if [ "$(registry_digest "$kvm_rolling_ref")" != "$kvm_commit_digest" ]; then
       marker_changed=1
     else
