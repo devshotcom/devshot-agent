@@ -302,12 +302,11 @@ grep -q 'browser-open' /usr/local/bin/devshot-browser
 browser_open_status=0
 /opt/devshot/agent browser-open --socket=/nonexistent/devshot-desktop-browser.sock 2>/dev/null || browser_open_status=$?
 test "$browser_open_status" -eq 75
-# The agent terminal starts with the desktop, minimized — never in front.
-grep -q 'devshot-agent-terminal --background' "$AUTOSTART"
-if grep devshot-agent-terminal "$AUTOSTART" | grep -qv -- '--background'; then
-  echo "ERROR: the agent terminal opens in front at login" >&2; exit 1
+# No terminal taskbar entry is created at login; --show opens it explicitly.
+if [ -f "$AUTOSTART" ] && grep -q 'devshot-agent-terminal' "$AUTOSTART"; then
+  echo "ERROR: the agent terminal is still started at login" >&2; exit 1
 fi
-grep -q -- '-iconic' /usr/local/bin/devshot-agent-terminal
+grep -q -- '--show' /usr/local/bin/devshot-agent-terminal
 # The guest agent in this image must know the subcommand: an older binary
 # would start the role-based agent instead of answering, so the bake fails
 # here rather than shipping a wrapper that misbehaves.
