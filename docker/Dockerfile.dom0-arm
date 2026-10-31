@@ -187,6 +187,7 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src \
         --enable CONFIG_ZSMALLOC \
         --enable CONFIG_ZRAM \
         --enable CONFIG_CRYPTO_LZ4 \
+        --enable CONFIG_PSI \
         --enable CONFIG_XEN_GNTDEV \
         --enable CONFIG_XEN_GRANT_DEV_ALLOC \
         --enable CONFIG_VIRTIO_BLK \

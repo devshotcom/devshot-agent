@@ -30,7 +30,9 @@
 # project cgroups. Two projects request 4096 MB in this same VM.
 # devshot:memory_mb=8192
 # Operator 2026-10-27: it boots with only what the machine needs; the agent
-# asks for 1024 MB when Grok runs and 2048 MB for the desktop (go/vm_memory.go):
+# asks for 1024 MB when Grok starts and 2048 MB for the desktop, and since
+# 2026-10-31 sizes the machine up and down from measured need
+# (go/guest_memory.go, go/vm_memory.go):
 # devshot:boot_memory_mb=512
 # Space for verified OS activation, immutable staging and sparse project disks.
 # devshot:disk_gb=64
@@ -125,19 +127,23 @@ TERMINAL
 chmod 0755 /usr/local/bin/devshot-agent-terminal
 
 # Remove the old background terminal from existing desktop configurations.
-AUTOSTART="$DEVSHOT_HOME/.config/openbox/autostart"
-if [ -f "$AUTOSTART" ]; then
-  sed -i '/the agent.s terminal/d; /devshot-agent-terminal/d' "$AUTOSTART"
-fi
+# Each edit below goes to the image's home and to the system copy every
+# other home falls back to (desktop.sh 3b).
+for AUTOSTART in "$DEVSHOT_HOME/.config/openbox/autostart" /etc/xdg/openbox/autostart; do
+  if [ -f "$AUTOSTART" ]; then
+    sed -i '/the agent.s terminal/d; /devshot-agent-terminal/d' "$AUTOSTART"
+  fi
+done
 
 # Openbox menu entry next to the desktop's own Terminal item.
-RCXML="$DEVSHOT_HOME/.config/openbox/rc.xml"
-if [ -f "$RCXML" ]; then
-  sed -i 's|devshot-agent-terminal</execute>|devshot-agent-terminal --show</execute>|g' "$RCXML"
-fi
-if [ -f "$RCXML" ] && ! grep -q devshot-agent-terminal "$RCXML"; then
-  sed -i 's|<item label="Terminal">|<item label="Agent terminal"><action name="Execute"><execute>/usr/local/bin/devshot-agent-terminal --show</execute></action></item>\n    <item label="Terminal">|' "$RCXML"
-fi
+for RCXML in "$DEVSHOT_HOME/.config/openbox/menu.xml" "$DEVSHOT_HOME/.config/openbox/rc.xml" /etc/xdg/openbox/menu.xml; do
+  if [ -f "$RCXML" ]; then
+    sed -i 's|devshot-agent-terminal</execute>|devshot-agent-terminal --show</execute>|g' "$RCXML"
+  fi
+  if [ -f "$RCXML" ] && grep -q '<item label="Terminal">' "$RCXML" && ! grep -q devshot-agent-terminal "$RCXML"; then
+    sed -i 's|<item label="Terminal">|<item label="Agent terminal"><action name="Execute"><execute>/usr/local/bin/devshot-agent-terminal --show</execute></action></item>\n    <item label="Terminal">|' "$RCXML"
+  fi
+done
 
 # ── 3b. The desktop CLI: devshot-desktop (spec 459, round three) ──────────
 # `devshot-agent desktop <action>` (go/desktop_actions.go) performs the typed
@@ -201,10 +207,11 @@ install -d -m 0755 /usr/local/share/applications
 sed -e 's|^Exec=/usr/bin/chromium-browser --incognito.*|Exec=/usr/local/bin/devshot-browser|' \
     -e 's|^Exec=/usr/bin/chromium-browser|Exec=/usr/local/bin/devshot-browser|' \
     /usr/share/applications/chromium.desktop > /usr/local/share/applications/chromium.desktop
-TINT2RC="$DEVSHOT_HOME/.config/tint2/tint2rc"
-if [ -f "$TINT2RC" ]; then
-  sed -i 's|^launcher_item_app = /usr/share/applications/chromium.desktop|launcher_item_app = /usr/local/share/applications/chromium.desktop|' "$TINT2RC"
-fi
+for TINT2RC in "$DEVSHOT_HOME/.config/tint2/tint2rc" /etc/xdg/tint2/tint2rc; do
+  if [ -f "$TINT2RC" ]; then
+    sed -i 's|^launcher_item_app = /usr/share/applications/chromium.desktop|launcher_item_app = /usr/local/share/applications/chromium.desktop|' "$TINT2RC"
+  fi
+done
 
 # ── 4b. The desktop starts on demand ─────────────────────────────────────
 # Operator 2026-10-25: the machine does not boot into a desktop. Until the
@@ -302,6 +309,13 @@ grep -q 'browser-open' /usr/local/bin/devshot-browser
 browser_open_status=0
 /opt/devshot/agent browser-open --socket=/nonexistent/devshot-desktop-browser.sock 2>/dev/null || browser_open_status=$?
 test "$browser_open_status" -eq 75
+# A Workspace's own home has no desktop config: it gets the system copies
+# (desktop.sh 3b) — Arc-Dark-OSX, one desktop (operator 2026-10-31), DevShot's dock.
+grep -q '<name>Arc-Dark-OSX</name>' /etc/xdg/openbox/rc.xml
+grep -q '<desktops><number>1</number>' /etc/xdg/openbox/rc.xml
+grep -q 'tint2 -c /etc/xdg/tint2/tint2rc' /etc/xdg/openbox/autostart
+test -s /usr/share/devshot/wallpaper.png
+test -s /etc/gtk-3.0/settings.ini
 # No terminal taskbar entry is created at login; --show opens it explicitly.
 if [ -f "$AUTOSTART" ] && grep -q 'devshot-agent-terminal' "$AUTOSTART"; then
   echo "ERROR: the agent terminal is still started at login" >&2; exit 1

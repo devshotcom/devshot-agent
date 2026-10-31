@@ -8,7 +8,7 @@ set -eux
 # Python's venv bootstrap work the same in an interactive shell and a bake VM.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-GROK_VERSION=1.0.0
+GROK_VERSION=1.0.70
 SPEC_KIT_VERSION=0.12.17
 SPEC_KIT_COMMIT=284e9a6a80106457129addeddedaf1641a374771
 
@@ -16,11 +16,11 @@ ARCH=$(uname -m)
 case "$ARCH" in
   x86_64|amd64)
     GROK_ARCH=x86_64
-    GROK_SHA256=28dbc967a5843dae2374b6834dadbab95354e685c7e5c8dc750b92a4e5fc7c3e
+    GROK_SHA256=22d281c5964c5444147328096ba2a221f3f0874c6858e27c825656a80f6e58e9
     ;;
   aarch64|arm64)
     GROK_ARCH=aarch64
-    GROK_SHA256=bb7c51116564a2219f6a49850815060f416918ac407f1f2ba82c53c0b0d4383f
+    GROK_SHA256=3aa36883574b263088e5addffe241f55430e8daaee1a0c4934b02180007a9761
     ;;
   *)
     echo "ERROR: unsupported architecture $ARCH for Grok Build" >&2

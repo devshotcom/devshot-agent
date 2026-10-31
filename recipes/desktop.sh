@@ -323,7 +323,8 @@ cat > "$DEVSHOT_HOME/.config/openbox/rc.xml" <<'OPENBOXRC'
     <font place="MenuHeader"><name>Noto Sans</name><size>10</size><weight>Bold</weight></font>
     <font place="MenuItem"><name>Noto Sans</name><size>10</size><weight>Normal</weight></font>
   </theme>
-  <desktops><number>2</number><names><name>Desktop</name><name>Work</name></names></desktops>
+  <!-- Operator 2026-10-31: one desktop by default; the agent adds more when the work needs them. -->
+  <desktops><number>1</number><names><name>Desktop</name></names></desktops>
   <resize><drawContents>yes</drawContents></resize>
   <placement><policy>Smart</policy><center>yes</center></placement>
   <mouse>
@@ -476,14 +477,32 @@ cat > "$DEVSHOT_HOME/.config/openbox/autostart" <<'AUTOSTART'
 picom --backend xrender --shadow --shadow-radius=12 --shadow-opacity=0.4 \
   --shadow-offset-x=-8 --shadow-offset-y=-8 --no-fading-openclose \
   --inactive-opacity=0.95 -b 2>/dev/null &
-# Wallpaper
-feh --bg-fill /home/devshot/.wallpaper.png &
-# tint2 dock panel
-tint2 &
+# Wallpaper (the system copy: a Workspace's private home has none, see 3b)
+feh --bg-fill /usr/share/devshot/wallpaper.png &
+# tint2 dock panel — DevShot's dock, not a stock tint2rc tint2 once copied
+# into the home
+tint2 -c /etc/xdg/tint2/tint2rc &
 AUTOSTART
 chmod +x "$DEVSHOT_HOME/.config/openbox/autostart"
 
 chown -R devshot:devshot "$DEVSHOT_HOME"
+
+# ── 3b. The same desktop for every home ───────────────────────────────
+# A Workspace runs the desktop as uid 1000 in its private domain, where
+# /home/devshot is the workspace's own home, not this image's
+# (go/desktop_start.go privateDesktopStartCommand). Openbox, its autostart,
+# tint2 and GTK fall back to /etc/xdg, /etc/gtk-3.0 and /etc/gtk-2.0 when the
+# home has no config of its own, so the look lives there too (2026-10-30: a
+# Workspace desktop showed stock Openbox — four "desktop N" desktops, no
+# Arc-Dark-OSX, a grey tint2 bar). studio-desktop.sh edits both copies.
+install -d -m 0755 /etc/xdg/openbox /etc/xdg/tint2 /etc/gtk-3.0 /etc/gtk-2.0 /usr/share/devshot
+install -m 0644 "$DEVSHOT_HOME/.config/openbox/rc.xml" /etc/xdg/openbox/rc.xml
+install -m 0644 "$DEVSHOT_HOME/.config/openbox/menu.xml" /etc/xdg/openbox/menu.xml
+install -m 0755 "$DEVSHOT_HOME/.config/openbox/autostart" /etc/xdg/openbox/autostart
+install -m 0644 "$DEVSHOT_HOME/.config/tint2/tint2rc" /etc/xdg/tint2/tint2rc
+install -m 0644 "$DEVSHOT_HOME/.config/gtk-3.0/settings.ini" /etc/gtk-3.0/settings.ini
+install -m 0644 "$DEVSHOT_HOME/.gtkrc-2.0" /etc/gtk-2.0/gtkrc
+install -m 0644 "$DEVSHOT_HOME/.wallpaper.png" /usr/share/devshot/wallpaper.png
 
 # ── 4. /usr/local/bin launchers ────────────────────────────────────────
 # start-desktop  → bring up Xvnc :0 + openbox (foreground or -d).
