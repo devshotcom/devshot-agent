@@ -126,11 +126,6 @@ LAMP_SYNC_DOWNLOAD_TIMEOUT=${LAMP_SYNC_DOWNLOAD_TIMEOUT:-30m}
 # container's volumes). Without this it fell back to /var/lib/xen/guests,
 # which the Dom0 rootfs does not have, and refused to start.
 GUESTS_DIR=/xen/guests
-S3_ENDPOINT=${S3_ENDPOINT:-}
-S3_BUCKET=${S3_BUCKET:-}
-S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
-S3_SECRET_KEY=${S3_SECRET_KEY:-}
-S3_REGION=${S3_REGION:-us-east-1}
 ENV
 
 echo "[1/3] Agent env written to /xen/agent.env (mode 0600)"
