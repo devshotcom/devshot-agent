@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // sync-into-recipe.mjs — spec 386. The studio recipe is the only file that
 // reaches the template chroot, so build-design-catalog.mjs and
-// devshot-design.cjs are embedded in apps/agent/recipes/studio.sh between
+// devshot-design.cjs are embedded in apps/agent/recipes/studio.sh (and
+// studio-desktop.sh) between
 // marker lines. Edit the source files, run this, commit both; the console test
 // design-catalog-recipe.spec386.test.js fails when the copies drift.
 //
@@ -13,6 +14,10 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const RECIPE = path.join(here, '..', 'studio.sh');
+// Operator 2026-10-31 — studio-desktop is the one image, and it carries the
+// catalog too (its section 2b); both recipes embed the same four files.
+export const DESKTOP_RECIPE = path.join(here, '..', 'studio-desktop.sh');
+export const RECIPES = [RECIPE, DESKTOP_RECIPE];
 export const EMBEDS = [
   { file: 'install-design-items.cjs', start: '# >>> design-catalog: install-design-items.cjs', end: '# <<< design-catalog: install-design-items.cjs', heredoc: 'DEVSHOT_DESIGN_INSTALLER_EOF', target: '/usr/local/lib/devshot-design/install-design-items.cjs' },
   { file: 'design-fonts.cjs', start: '# >>> design-catalog: design-fonts.cjs', end: '# <<< design-catalog: design-fonts.cjs', heredoc: 'DEVSHOT_DESIGN_FONTS_EOF', target: '/usr/local/lib/devshot-design/design-fonts.cjs' },
@@ -51,15 +56,20 @@ export function extractEmbedded(recipeText, embed) {
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   const sources = Object.fromEntries(EMBEDS.map((e) => [e.file, fs.readFileSync(path.join(here, e.file), 'utf8')]));
-  const current = fs.readFileSync(RECIPE, 'utf8');
-  const next = syncRecipe(current, sources);
-  if (process.argv.includes('--check')) {
-    if (next !== current) { process.stderr.write('studio.sh is out of sync with design-catalog/*.{mjs,cjs}; run sync-into-recipe.mjs\n'); process.exit(1); }
-    process.stdout.write('studio.sh embeds are in sync\n');
-  } else if (next !== current) {
-    fs.writeFileSync(RECIPE, next);
-    process.stdout.write('studio.sh updated\n');
-  } else {
-    process.stdout.write('studio.sh already in sync\n');
+  let drift = false;
+  for (const recipe of RECIPES) {
+    const name = path.basename(recipe);
+    const current = fs.readFileSync(recipe, 'utf8');
+    const next = syncRecipe(current, sources);
+    if (process.argv.includes('--check')) {
+      if (next !== current) { process.stderr.write(`${name} is out of sync with design-catalog/*.{mjs,cjs}; run sync-into-recipe.mjs\n`); drift = true; }
+      else process.stdout.write(`${name} embeds are in sync\n`);
+    } else if (next !== current) {
+      fs.writeFileSync(recipe, next);
+      process.stdout.write(`${name} updated\n`);
+    } else {
+      process.stdout.write(`${name} already in sync\n`);
+    }
   }
+  if (drift) process.exit(1);
 }

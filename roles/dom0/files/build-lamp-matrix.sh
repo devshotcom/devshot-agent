@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the LAMP template matrix (spec 058): a backing chain of
 #
-#   devshot-guest-base.qcow2
+#   devshot-guest-studio-desktop.qcow2      (spec 476: the one base image)
 #     └─► devshot-guest-lamp-shared.qcow2     (intermediate: PHP+nginx+mariadb)
 #            ├─► devshot-guest-lamp-wp-6.9.qcow2  (variant: WP 6.9.4)
 #            ├─► devshot-guest-lamp-sw-6.7.qcow2  (variant: Shopware 6.7.10.0)
@@ -55,7 +55,9 @@ LAMP_DIR_RAW="${2:?usage: build-lamp-matrix.sh <build-dir> <recipes-lamp-dir>}"
 mkdir -p "$BUILD_DIR_RAW"
 BUILD_DIR="$(cd "$BUILD_DIR_RAW" && pwd)"
 LAMP_DIR="$(cd "$LAMP_DIR_RAW" && pwd)"
-BASE_QCOW="$BUILD_DIR/devshot-guest-base.qcow2"
+# shellcheck source=template-base.sh
+source "$SCRIPT_DIR/template-base.sh"
+BASE_QCOW="$BUILD_DIR/$TEMPLATE_BASE_QCOW"
 SHARED_QCOW="$BUILD_DIR/devshot-guest-lamp-shared.qcow2"
 CORE_RECIPE="$LAMP_DIR/_core.sh"
 NODE_INSTALLER="$LAMP_DIR/../lib/install-node.sh"
@@ -137,7 +139,7 @@ set -euxo pipefail
 
 OUTPUT_NAME="${OUTPUT_NAME:?inner: missing OUTPUT_NAME}"
 STAGE="${STAGE:?inner: missing STAGE (core|variant)}"
-BASE_TEMPLATE="${BASE_TEMPLATE:-}"
+BASE_TEMPLATE="${BASE_TEMPLATE:?inner: missing BASE_TEMPLATE}"
 
 apt-get update -qq >/dev/null 2>&1
 apt-get install -y -qq qemu-utils e2fsprogs >/dev/null 2>&1
@@ -146,7 +148,8 @@ qemu-img convert -O raw /input/in.qcow2 /tmp/disk.raw
 # Spec 451 — 12 GB, not 6: a baked Shopware VM was 91 % full (537 MB free)
 # before the agent had uploaded one product photo. The qcow2 is compressed and
 # sparse, so the image does not grow; only what a VM writes lands on the host.
-truncate -s 12G /tmp/disk.raw
+# Grow only: truncating below the base's size would cut its filesystem.
+[ $((12 * 1024 * 1024 * 1024)) -le "$(stat -c%s /tmp/disk.raw)" ] || truncate -s 12G /tmp/disk.raw
 e2fsck -fy /tmp/disk.raw 2>/dev/null || true
 resize2fs /tmp/disk.raw 2>/dev/null || true
 
@@ -174,9 +177,9 @@ if [ -d /recipe.d ]; then
 fi
 
 if [ "$STAGE" = "core" ]; then
-  sed -i 's|/alpine/v3\.[0-9]\+|/alpine/v3.23|g' /mnt/etc/apk/repositories || true
+  # The base is the studio-desktop image this release built from current
+  # Alpine packages; an upgrade here would only copy them into the layer.
   chroot /mnt /sbin/apk update >/dev/null
-  chroot /mnt /sbin/apk upgrade --no-cache >/dev/null
 fi
 
 chroot /mnt /bin/sh /tmp/recipe.sh
@@ -197,6 +200,10 @@ fi
 
 sync
 umount /mnt/dev/pts /mnt/proc /mnt/dev /mnt/sys
+# Spec 476 — release the blocks of files the recipe deleted (npm caches,
+# build dirs): they read as zeros again, so the layer stores only what the
+# recipe kept (studio: 1.4 GB -> 1.0 GB, measured on atp7 2026-10-31).
+fstrim -v /mnt
 umount /mnt
 
 FINAL_QCOW="/output/devshot-guest-${OUTPUT_NAME}.qcow2"
@@ -205,21 +212,17 @@ STAGED_QCOW="/output/.devshot-guest-${OUTPUT_NAME}.qcow2.tmp"
 STAGED_MANIFEST="/output/.devshot-guest-${OUTPUT_NAME}.json.tmp"
 rm -f "$STAGED_QCOW" "$STAGED_MANIFEST"
 
-if [ "$STAGE" = "core" ] || [ -z "$BASE_TEMPLATE" ]; then
-  qemu-img convert -f raw -O qcow2 -c -m 8 -W /tmp/disk.raw "$STAGED_QCOW"
-else
-  # Compressed qcow2 with destination backing — see build-lamp-matrix.sh
-  # for the full rationale. cd /output so the relative -B path resolves
-  # both during convert (cluster diff) and later at template-load time
-  # (qemu walking the chain on dom0).
-  (
-    cd /output
-    qemu-img convert -f raw -O qcow2 -c -m 8 -W \
-      -B "devshot-guest-${BASE_TEMPLATE}.qcow2" \
-      -F qcow2 \
-      /tmp/disk.raw "./.devshot-guest-${OUTPUT_NAME}.qcow2.tmp"
-  )
-fi
+# Compressed qcow2 with destination backing: every stage is a layer (the core
+# one on studio-desktop, the variants on lamp-shared). cd /output so the
+# relative -B path resolves both during convert (cluster diff) and later at
+# template-load time (qemu walking the chain on dom0).
+(
+  cd /output
+  qemu-img convert -f raw -O qcow2 -c -m 8 -W \
+    -B "devshot-guest-${BASE_TEMPLATE}.qcow2" \
+    -F qcow2 \
+    /tmp/disk.raw "./.devshot-guest-${OUTPUT_NAME}.qcow2.tmp"
+)
 ls -lh "$STAGED_QCOW"
 
 # ── Manifest sidecar ────────────────────────────────────────────────────
@@ -238,8 +241,7 @@ MEMORY_MB=$(grep -m1 -E '^# *devshot:memory_mb=' /recipe.sh \
   | sed -E 's|^# *devshot:memory_mb=||' || true)
 [ -z "$MEMORY_MB" ] && MEMORY_MB=0
 
-BASE_PATH_FOR_MANIFEST="devshot-guest-base.qcow2"
-[ -n "$BASE_TEMPLATE" ] && BASE_PATH_FOR_MANIFEST="devshot-guest-${BASE_TEMPLATE}.qcow2"
+BASE_PATH_FOR_MANIFEST="devshot-guest-${BASE_TEMPLATE}.qcow2"
 
 BASE_SHA=$(sha256sum /input/in.qcow2 | awk '{print $1}')
 RECIPE_SHA=$(sha256sum /recipe.sh | awk '{print $1}')
@@ -289,7 +291,7 @@ else
   if ! bounded_docker_run lamp-shared --privileged \
     -e STAGE=core \
     -e OUTPUT_NAME=lamp-shared \
-    -e BASE_TEMPLATE="" \
+    -e BASE_TEMPLATE="$TEMPLATE_BASE_NAME" \
     -v "$INNER_SCRIPT:/build.sh:ro" \
     -v "$RUNTIME_VERIFY_SCRIPT:/verify-studio-runtime-prerequisites.sh:ro" \
     -v "$NODE_INSTALLER:/install-node.sh:ro" \
