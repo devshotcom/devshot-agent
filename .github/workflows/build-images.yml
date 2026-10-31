@@ -621,11 +621,14 @@ jobs:
           name: ${{ env.BUILDER_NAME }}
           driver: docker-container
           cleanup: false
-          # Three independent stages at once (kernel, Xen, the guest rootfs
-          # chain); the Dockerfiles halve each compile's -j to fit the RAM.
+          # One stage at a time: the ARM64 runner has 4 CPUs and 3.8 GiB.
+          # Three at once (kernel, Xen, QEMU each sized for half the RAM)
+          # swapped it until the runner lost its connection, twice, on
+          # 2026-10-31. DEVSHOT_BUILD_PARALLELISM=1 gives that one compile
+          # the whole memory for its -j.
           buildkitd-config-inline: |
             [worker.oci]
-              max-parallelism = 3
+              max-parallelism = 1
 
       - name: Reuse exact immutable ARM64 Dom0 image on retry
         id: reuse_dom0_arm64
@@ -651,6 +654,7 @@ jobs:
           context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
           file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-arm
           builder: ${{ env.BUILDER_NAME }}
+          build-args: DEVSHOT_BUILD_PARALLELISM=1
           platforms: linux/arm64
           provenance: false
           push: false
@@ -665,6 +669,7 @@ jobs:
           context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
           file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-arm
           builder: ${{ env.BUILDER_NAME }}
+          build-args: DEVSHOT_BUILD_PARALLELISM=1
           platforms: linux/arm64
           provenance: false
           push: false
@@ -680,6 +685,7 @@ jobs:
           context: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}
           file: ${{ github.workspace }}/${{ env.CHECKOUT_DIR }}/docker/Dockerfile.dom0-arm
           builder: ${{ env.BUILDER_NAME }}
+          build-args: DEVSHOT_BUILD_PARALLELISM=1
           platforms: linux/arm64
           provenance: false
           push: false
