@@ -144,7 +144,12 @@ BASE_TEMPLATE="${BASE_TEMPLATE:?inner: missing BASE_TEMPLATE}"
 apt-get update -qq >/dev/null 2>&1
 apt-get install -y -qq qemu-utils e2fsprogs >/dev/null 2>&1
 
-qemu-img convert -O raw /input/in.qcow2 /tmp/disk.raw
+# Spec 476 — read the parent from /output, where its whole backing chain
+# lives: lamp-shared is a layer on studio-desktop, and a parent mounted alone
+# under /input resolves its relative backing file to /input/, where it
+# is not ("Could not open backing file", release v0.6.1179).
+PARENT_QCOW="/output/devshot-guest-${BASE_TEMPLATE}.qcow2"
+qemu-img convert -O raw "$PARENT_QCOW" /tmp/disk.raw
 # Spec 451 — 12 GB, not 6: a baked Shopware VM was 91 % full (537 MB free)
 # before the agent had uploaded one product photo. The qcow2 is compressed and
 # sparse, so the image does not grow; only what a VM writes lands on the host.
@@ -243,7 +248,7 @@ MEMORY_MB=$(grep -m1 -E '^# *devshot:memory_mb=' /recipe.sh \
 
 BASE_PATH_FOR_MANIFEST="devshot-guest-${BASE_TEMPLATE}.qcow2"
 
-BASE_SHA=$(sha256sum /input/in.qcow2 | awk '{print $1}')
+BASE_SHA=$(sha256sum "$PARENT_QCOW" | awk '{print $1}')
 RECIPE_SHA=$(sha256sum /recipe.sh | awk '{print $1}')
 SIZE=$(stat -c%s "$STAGED_QCOW")
 BAKED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -295,7 +300,6 @@ else
     -v "$INNER_SCRIPT:/build.sh:ro" \
     -v "$RUNTIME_VERIFY_SCRIPT:/verify-studio-runtime-prerequisites.sh:ro" \
     -v "$NODE_INSTALLER:/install-node.sh:ro" \
-    -v "$BASE_QCOW:/input/in.qcow2:ro" \
     -v "$CORE_RECIPE:/recipe.sh:ro" \
     -v "$LAMP_DIR:/recipe.d:ro" \
     -v "$DESKTOP_RECIPE:/desktop-recipe.sh:ro" \
@@ -370,7 +374,6 @@ RECIPE
     -v "$INNER_SCRIPT:/build.sh:ro" \
     -v "$RUNTIME_VERIFY_SCRIPT:/verify-studio-runtime-prerequisites.sh:ro" \
     -v "$NODE_INSTALLER:/install-node.sh:ro" \
-    -v "$SHARED_QCOW:/input/in.qcow2:ro" \
     -v "$variant_recipe:/recipe.sh:ro" \
     -v "$LAMP_DIR:/recipe.d:ro" \
     -v "$DESKTOP_RECIPE:/desktop-recipe.sh:ro" \
