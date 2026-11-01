@@ -52,6 +52,13 @@ DENY = {
     # is a v12+ CLI. v11 install needs LocalConfiguration.php + SQL
     # schema import, not modeled in _app_lib.sh.
     ("typo3", "11"),
+    # TYPO3 12: its free LTS ended; the fixes for the 2026-06 advisories
+    # (PKSA-2yr3-by9d-r1gh, PKSA-q3vc-jr63-rrrj, … all "<12.4.46") ship only
+    # in the paid ELTS, and Packagist ends at 12.4.45. Composer's audit
+    # refuses every 12.4.x for create-project, so release run 41343281246
+    # (v0.6.1184) baked everything but lamp-t3-v12 and lamp-release-verify.py
+    # rejected the bake. TYPO3 13 and 14 stay.
+    ("typo3", "12"),
 }
 
 # ── Tuneables ──────────────────────────────────────────────────────────────

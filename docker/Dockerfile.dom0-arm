@@ -164,6 +164,11 @@ WORKDIR /build
 # Pool guests boot this kernel too. Elastic Studio VMs (agent vm_memory.go)
 # grow through virtio-balloon (QEMU) or Xen balloon + memory hotplug, and the
 # 256 MB chat phase keeps a zram swap (lz4) as headroom.
+# 2026-11-01 — linux-6.1.y since 6.1.167 carries the backport "ext4: convert
+# bd_buddy_page to bd_buddy_folio", which checks only IS_ERR() although 6.1's
+# __filemap_get_folio() answers NULL for a missing folio. A buddy page evicted
+# under memory pressure then oopses in ext4_mb_load_buddy_gfp and the guest
+# agent dies mid-write (Workspace restores on atp7). Treat NULL as an error.
 RUN --mount=type=cache,target=/build/linux,id=linux-src \
     J=$(nproc) && M=$(awk -v p="${DEVSHOT_BUILD_PARALLELISM:-2}" '/MemTotal/{print int($2/786432/p)}' /proc/meminfo) && { [ "${M:-0}" -lt 1 ] && M=1 || true; } && { [ "$J" -gt "$M" ] && J="$M" || true; } && \
     if [ ! -d /build/linux/.git ]; then \
@@ -171,6 +176,7 @@ RUN --mount=type=cache,target=/build/linux,id=linux-src \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /build/linux; \
     fi && \
     cd /build/linux && \
+    sed -i -e 's/IS_ERR(folio)/IS_ERR_OR_NULL(folio)/g' -e 's/PTR_ERR(folio);/folio ? PTR_ERR(folio) : -ENOMEM;/g' fs/ext4/mballoc.c && \
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig && \
     scripts/config \
         --enable CONFIG_XEN \
