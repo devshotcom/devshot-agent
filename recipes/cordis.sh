@@ -530,7 +530,8 @@ install -d cordis
 tar -xzf /home/devshot/cordis-boilerplate.tgz -C cordis --strip-components=1
 rm /home/devshot/cordis-boilerplate.tgz
 cd /var/www/cordis
-node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.name='cordis';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n')"
+# Yakumo requires the package manager used to install and build the scaffold.
+npm pkg set name=cordis "packageManager=npm@$(npm --version)"
 
 install -d external/devshot-agent-bridge/src
 cp /opt/devshot-cordis-agent-bridge/package.json external/devshot-agent-bridge/package.json
