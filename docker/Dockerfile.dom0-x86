@@ -593,6 +593,19 @@ RUN BASE_SHA=$(sha256sum /tmp/devshot-guest-base.qcow2 | awk '{print $1}') && \
     printf '{\n  "name": "studio-desktop",\n  "image": "devshot-guest-studio-desktop.qcow2",\n  "base_path": "/xen/devshot-guest-base.qcow2",\n  "base_sha256": "%s",\n  "recipe_sha256": "",\n  "source": "prebaked",\n  "baked_at": "%s",\n  "bake_id": "ci",\n  "size_bytes": %s,\n  "exit_code": 0,\n  "exposed_ports": [\n    {"port": 5900, "name": "vnc", "proto": "tcp"}\n  ],\n  "memory_mb": 8192,\n  "boot_memory_mb": 512,\n  "disk_gb": 64\n}\n' "$BASE_SHA" "$BAKED" "$SIZE" > /tmp/devshot-guest-studio-desktop.json && \
     rm /tmp/devshot-guest-base.qcow2
 
+# Local development exports only final payloads. Exporting converter stages
+# also unpacks their retained rootfs tar layers into the Docker image store.
+# The build cache still owns the conversion tools and intermediate filesystem.
+FROM scratch AS dev-runner-kernel-artifacts
+COPY --from=kernel-builder /tmp/vmlinuz-dom0 /tmp/vmlinuz-dom0
+
+FROM scratch AS dev-runner-base-artifacts
+COPY --from=domu-converter /tmp/devshot-guest-base.qcow2 /tmp/devshot-guest-base.qcow2
+
+FROM scratch AS dev-runner-desktop-artifacts
+COPY --from=studio-desktop-converter /tmp/devshot-guest-studio-desktop.qcow2 /tmp/devshot-guest-studio-desktop.qcow2
+COPY --from=studio-desktop-converter /tmp/devshot-guest-studio-desktop.json /tmp/devshot-guest-studio-desktop.json
+
 # ─── Stage 4g: Browser template — extends domu-rootfs with kiosk Chromium ──
 # /console/browser used to share the desktop template, which dumped
 # the user on Openbox + tint2 with no auto-launched browser ("ups
