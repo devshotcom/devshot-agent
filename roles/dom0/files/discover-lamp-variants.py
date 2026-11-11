@@ -48,6 +48,14 @@ DENY = {
     # lamp-sw-6.5". A template that cannot be installed without disabling the
     # audit is not one to ship.
     ("shopware", "6.5"),
+    # Shopware 6.7: its latest patch (6.7.16.0) requires mcp/sdk ^0.8.1 and
+    # Composer resolves it against a version the audit refuses ("found
+    # mcp/sdk[v0.8.1] but these ..."), so create-project cannot install it.
+    # Every release that discovered it baked nine variants and died in
+    # lamp-release-verify.py on "current bake is incomplete: missing
+    # lamp-sw-6.7" (v0.6.1207 and v0.6.1209, 2026-11-11). A template that
+    # cannot be installed without disabling the audit is not one to ship.
+    ("shopware", "6.7"),
     # TYPO3 v11 free support ended Oct 2024; `vendor/bin/typo3 setup`
     # is a v12+ CLI. v11 install needs LocalConfiguration.php + SQL
     # schema import, not modeled in _app_lib.sh.

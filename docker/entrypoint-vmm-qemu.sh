@@ -231,5 +231,22 @@ echo "  Data dir:   ${DEVSHOT_DATA_DIR}"
 echo "════════════════════════════════════════════════════════"
 echo ""
 
+# ── ClamAV daemon ──────────────────────────────────────────────────────────
+# The inventory scanner reads a guest's files through a read-only NBD mount.
+# Without clamd every scan reloads the whole signature database and the scan
+# budget runs out, so the pool never counted a VM as ready and every Studio
+# claim failed with "claim_id_invalid" (2026-11-11).
+if command -v clamd >/dev/null 2>&1; then
+  mkdir -p /run/clamav /var/log/clamav
+  chown clamav:clamav /run/clamav /var/log/clamav 2>/dev/null || true
+  sed -i 's/^Example/#Example/' /etc/clamav/clamd.conf 2>/dev/null || true
+  clamd --config-file=/etc/clamav/clamd.conf >/dev/null 2>&1 &
+  for _ in $(seq 1 30); do
+    if [ -S /run/clamav/clamd.ctl ]; then break; fi
+    sleep 1
+  done
+  echo "  ClamAV:     daemon $( [ -S /run/clamav/clamd.ctl ] && echo ready || echo 'not ready' )"
+fi
+
 # ── Launch the Go agent ─────────────────────────────────────────────────────
 exec /opt/devshot/agent
