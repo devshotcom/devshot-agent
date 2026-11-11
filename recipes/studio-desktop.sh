@@ -52,7 +52,21 @@ done
 # curl/jq/unzip/rsync for downloads and archives, bash for the scripts most
 # READMEs assume, build-base + python3 so native npm modules and apk packages
 # with post-install hooks work. PHP, MariaDB, nginx and friends stay OUT: the
-# agent chooses and installs them per project (`apk add`, with sudo).
+# workspace owner installs those through the workspace runtime broker.
+#
+# The native desktop toolchain (rust, cargo, WebKitGTK, GTK) is NOT baked in:
+# it is ~1.5 GB that every desktop project would carry and pay bake time for.
+# A frontier desktop project runs its agent with passwordless sudo in this VM,
+# so the agent installs exactly the stack it needs, on demand.
+#
+# Community carries webkit2gtk and libsoup3; the base image normally enables
+# it, but this recipe must not assume another recipe already did.
+if ! grep -q '^http.*community' /etc/apk/repositories 2>/dev/null; then
+    main_line=$(grep -m1 '^http.*main$' /etc/apk/repositories 2>/dev/null || true)
+    if [ -n "$main_line" ]; then
+        echo "$main_line" | sed 's|/main$|/community|' >> /etc/apk/repositories
+    fi
+fi
 apk update || (sleep 5 && apk update)
 apk add --no-cache \
     curl jq unzip rsync bash \
