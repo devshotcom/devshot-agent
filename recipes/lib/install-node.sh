@@ -41,9 +41,14 @@ fetch() {
   curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 "$@"
 }
 
-# The newest release of the line. index.json lists releases newest first.
+# Every release of the line, newest first. index.json lists releases newest
+# first; the musl build of the newest one is not always published yet, so the
+# bake must be able to step back to the newest release that actually has one
+# (2026-11-11: the newest v24 had no musl tarball yet and the bake died on
+# a 404).
 index=$(fetch "$INDEX_URL" 2>/dev/null || true)
-VERSION=$(printf '%s' "$index" | tr '{' '\n' | grep -o "\"version\":\"v${MAJOR}\.[0-9]*\.[0-9]*\"" | head -1 | cut -d'"' -f4)
+VERSIONS=$(printf '%s' "$index" | tr '{' '\n' | grep -o "\"version\":\"v${MAJOR}\.[0-9]*\.[0-9]*\"" | cut -d'"' -f4 | awk '!seen[$0]++')
+VERSION=$(printf '%s' "$VERSIONS" | head -1)
 if [ -z "$VERSION" ]; then
   if command -v node >/dev/null 2>&1; then
     echo "WARN: nodejs.org unreachable — keeping $(node -v) from apk; the next networked rebake installs the current v${MAJOR} release" >&2
@@ -57,15 +62,38 @@ if [ "$(/usr/local/bin/node -v 2>/dev/null || true)" = "$VERSION" ]; then
   echo "node $VERSION already installed"
 else
   apk add --no-cache libstdc++ libgcc ca-certificates curl tar >/dev/null
-  NAME="node-${VERSION}-linux-${ARCH}-musl"
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
-  fetch -o "$work/SHASUMS256.txt" "$DIST_URL/$VERSION/SHASUMS256.txt"
-  fetch -o "$work/$NAME.tar.gz" "$DIST_URL/$VERSION/$NAME.tar.gz"
-  expected=$(awk -v f="$NAME.tar.gz" '$2 == f { print $1 }' "$work/SHASUMS256.txt")
-  [ -n "$expected" ] || { echo "ERROR: $NAME.tar.gz is not listed in SHASUMS256.txt" >&2; exit 1; }
-  actual=$(sha256sum "$work/$NAME.tar.gz" | cut -d' ' -f1)
-  [ "$actual" = "$expected" ] || { echo "ERROR: checksum mismatch for $NAME.tar.gz" >&2; exit 1; }
+  installed=""
+  for candidate in $VERSIONS; do
+    NAME="node-${candidate}-linux-${ARCH}-musl"
+    if ! fetch -o "$work/SHASUMS256.txt" "$DIST_URL/$candidate/SHASUMS256.txt"; then
+      echo "WARN: no SHASUMS256 for node $candidate; trying the next release" >&2
+      continue
+    fi
+    expected=$(awk -v f="$NAME.tar.gz" '$2 == f { print $1 }' "$work/SHASUMS256.txt")
+    if [ -z "$expected" ]; then
+      echo "WARN: node $candidate has no musl build for ${ARCH}; trying the next release" >&2
+      continue
+    fi
+    if ! fetch -o "$work/$NAME.tar.gz" "$DIST_URL/$candidate/$NAME.tar.gz"; then
+      echo "WARN: node $candidate tarball is not downloadable; trying the next release" >&2
+      continue
+    fi
+    actual=$(sha256sum "$work/$NAME.tar.gz" | cut -d' ' -f1)
+    if [ "$actual" != "$expected" ]; then
+      echo "ERROR: checksum mismatch for $NAME.tar.gz" >&2
+      exit 1
+    fi
+    VERSION="$candidate"
+    installed=1
+    break
+  done
+  if [ -z "$installed" ]; then
+    echo "ERROR: no musl build of Node ${MAJOR} could be downloaded" >&2
+    exit 1
+  fi
+  NAME="node-${VERSION}-linux-${ARCH}-musl"
 
   # Drop the apk runtime first: npm depends on nodejs, and leaving either in
   # place lets a later `apk upgrade` put the old binary back on PATH.
