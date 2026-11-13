@@ -1789,20 +1789,40 @@ done
 # real window) the terminal and the app's port are enough, and a website
 # build never pays for Xvnc, Openbox and a compositor. desktop.sh enabled the
 # service for the public desktop demo; this image takes it out of the
-# runlevel. Every devshot-desktop action starts it first when it is off
-# (go/desktop_start.go), and the agent's shell can run `devshot-desktop
-# start`. The agent runs as devshot, and the claim drops its general sudo
-# rule on other stacks, so exactly this one command gets its own rule.
-rc-update del devshot-desktop default 2>/dev/null || true
+# runlevel. The desktop and agent entry points use the same launcher.
+if [ -L /etc/runlevels/default/devshot-desktop ]; then
+  rc-update del devshot-desktop default
+fi
+test ! -L /etc/runlevels/default/devshot-desktop
 cat > /etc/sudoers.d/devshot-desktop-start <<'SUDOERS'
 devshot ALL=(root) NOPASSWD: /usr/local/bin/start-desktop -d
 SUDOERS
 chmod 0440 /etc/sudoers.d/devshot-desktop-start
-# The desktop needs 2048 MB: start-desktop (root through the rule above) asks
-# dom0 for it before Xvnc starts, so the RAM is there first. On a host that
-# does not resize this returns at once.
+# Request 2 GiB before touching Xvnc or Openbox. The guest memory controller
+# waits for dom0 to grant the reservation on hosts with elastic memory.
 if ! grep -q 'devshot-agent-memory' /usr/local/bin/start-desktop; then
-  sed -i '1a /opt/devshot/agent memory request 2048 desktop >/dev/null 2>\&1 || true # devshot-agent-memory' /usr/local/bin/start-desktop
+  desktop_launcher=$(mktemp)
+  {
+    head -n 1 /usr/local/bin/start-desktop
+    cat <<'DESKTOP_ADMISSION'
+if [ "$(readlink /proc/self/ns/net)" != "$(readlink /proc/1/ns/net)" ]; then
+  exec nsenter -t 1 -n -- "$0" "$@"
+fi
+# The shared desktop outlives its caller's project and must not pin its mount.
+cd / || exit 1
+workspace_group=$(cut -d: -f3 /proc/$$/cgroup)
+case "$workspace_group" in
+  /devshot-workspace-*/*)
+    owner_group="/sys/fs/cgroup${workspace_group%/*}/owner"
+    mkdir -p "$owner_group" && echo "$$" > "$owner_group/cgroup.procs" || exit 1
+    ;;
+esac
+/opt/devshot/agent memory request 2048 desktop >/dev/null || exit 75 # devshot-agent-memory
+DESKTOP_ADMISSION
+    tail -n +2 /usr/local/bin/start-desktop
+  } > "$desktop_launcher"
+  install -m 0755 "$desktop_launcher" /usr/local/bin/start-desktop
+  rm "$desktop_launcher"
 fi
 
 # ── 4c. A machine that boots with 512 MB ─────────────────────────────────
