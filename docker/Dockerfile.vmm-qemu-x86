@@ -11,15 +11,6 @@ FROM --platform=${DEVSHOT_QEMU_PLATFORM} ${BASE_IMAGE} AS artifacts
 
 FROM --platform=${DEVSHOT_QEMU_PLATFORM} debian:bookworm-slim
 
-# The KVM rolling digest is the family commit marker. Keep it cryptographically
-# source-unique even when all copied runtime payloads happen to be identical.
-ARG SOURCE_SHA
-RUN printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
-ARG IMAGE_FAMILY_SCHEMA=2
-RUN test "$IMAGE_FAMILY_SCHEMA" = 2 || test "$IMAGE_FAMILY_SCHEMA" = 3
-LABEL org.opencontainers.image.revision="$SOURCE_SHA" \
-      io.devshot.image-family.schema="$IMAGE_FAMILY_SCHEMA"
-
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   qemu-system-x86 \
   qemu-utils \
@@ -46,6 +37,10 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
   clamav-freshclam \
   yara \
   && rm -rf /var/lib/apt/lists/*
+
+# Keep the database independent of the release-specific binaries and disks.
+RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav /run/clamav && \
+  freshclam --stdout || echo "freshclam failed during image build (non-fatal)"
 
 COPY --from=artifacts /xen/boot/Image-domu /xen/boot/Image-domu
 COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2
@@ -100,13 +95,14 @@ RUN chmod +x /opt/devshot/entrypoint.sh /opt/devshot/load-credentials.sh /opt/de
   systemctl enable devshot-host-watchdog.timer && \
   systemctl mask dnsmasq.service
 
-# The inventory scanner reads a guest's files through a read-only NBD mount.
-# Without a running clamd every scan reloads the 112 MB signature database and
-# the scan budget runs out, so the pool never counted a VM as ready and every
-# Studio claim failed with "claim_id_invalid" (2026-11-11). clamd keeps the
-# database loaded once.
-RUN mkdir -p /xen/qemu /xen/guests /tmp/xenstore-dom0 /var/run/netns /var/lib/clamav /run/clamav && \
-  freshclam --stdout || echo "freshclam failed during image build (non-fatal)"
+# The rolling digest is the family commit marker. Add its source identity after
+# the reusable runtime layers so a new SHA does not invalidate their cache.
+ARG SOURCE_SHA
+RUN printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+ARG IMAGE_FAMILY_SCHEMA=2
+RUN test "$IMAGE_FAMILY_SCHEMA" = 2 || test "$IMAGE_FAMILY_SCHEMA" = 3
+LABEL org.opencontainers.image.revision="$SOURCE_SHA" \
+      io.devshot.image-family.schema="$IMAGE_FAMILY_SCHEMA"
 
 USER root
 ENV container=docker
