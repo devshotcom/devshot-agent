@@ -3,9 +3,8 @@
 #
 #   curl -fsSL https://devshot.com/install.sh | sh
 #
-# This is the Tailscale-style entry point: it makes Docker available,
-# drops a `devshot` CLI into /usr/local/bin, and exits. It does NOT
-# register the host with the control plane — that's a separate step:
+# The installer prepares Docker and installs the `devshot` CLI in
+# /usr/local/bin. Run `devshot up` to register the host with the control plane.
 #
 #   sudo devshot up --auth-key=ds_<your-orchestrator-key>
 #
