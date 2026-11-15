@@ -81,6 +81,11 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
   yara \
   && rm -rf /var/lib/apt/lists/*
 
+# guestfish boots its appliance with this kernel; keep it where the host's
+# /lib/modules bind cannot hide it (guestfs-kernel.sh).
+COPY docker/guestfs-kernel.sh /tmp/guestfs-kernel.sh
+RUN sh /tmp/guestfs-kernel.sh && rm /tmp/guestfs-kernel.sh
+
 # Copy pre-built artifacts from the Xen image.
 COPY --from=artifacts /xen/boot/Image-domu /xen/boot/Image-domu
 COPY --from=artifacts /xen/devshot-guest-base.qcow2 /xen/devshot-guest-base.qcow2

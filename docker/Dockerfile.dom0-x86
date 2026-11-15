@@ -302,6 +302,10 @@ RUN chroot /rootfs bash -c ' \
         clamav clamav-daemon clamav-freshclam yara \
     && rm -rf /var/lib/apt/lists/*'
 
+# The rootfs keeps the appliance kernel in the same place (guestfs-kernel.sh).
+COPY docker/guestfs-kernel.sh /rootfs/tmp/guestfs-kernel.sh
+RUN chroot /rootfs sh /tmp/guestfs-kernel.sh && rm /rootfs/tmp/guestfs-kernel.sh
+
 COPY --from=qemu-xen-builder /tmp/qemu-system-x86_64-xen /rootfs/usr/bin/qemu-system-x86_64
 RUN chmod +x /rootfs/usr/bin/qemu-system-x86_64
 
@@ -722,6 +726,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     socat netcat-openbsd tmux libguestfs-tools linux-image-amd64 \
     curl ca-certificates bash tini openssl apparmor-utils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# guestfish boots its appliance with this kernel; keep it where the host's
+# /lib/modules bind cannot hide it (guestfs-kernel.sh).
+COPY docker/guestfs-kernel.sh /tmp/guestfs-kernel.sh
+RUN sh /tmp/guestfs-kernel.sh && rm /tmp/guestfs-kernel.sh
 
 # Xen hypervisor + kernel + rootfs (from build stages)
 RUN mkdir -p /xen/boot /xen/configs /xen/work /xen/guests /etc/xen/guests /var/lib/xen/guests
