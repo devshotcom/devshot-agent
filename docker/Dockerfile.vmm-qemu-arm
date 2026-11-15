@@ -55,6 +55,9 @@ LABEL org.opencontainers.image.revision="$SOURCE_SHA" \
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   qemu-system-arm \
   qemu-utils \
+  libguestfs-tools \
+  linux-image-arm64 \
+  cpio \
   systemd \
   systemd-sysv \
   dbus \

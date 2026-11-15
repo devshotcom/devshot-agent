@@ -183,6 +183,11 @@ if [ "$DNS_DISABLE" != "1" ]; then
   for u in "${_DNS_UPS[@]}"; do
     [ -n "$u" ] && DNSMASQ_ARGS+=("--server=$u")
   done
+  if [ "${DEVSHOT_DEV_RUNTIME:-}" = "docker-runner" ]; then
+    # Docker's embedded resolver tracks the Console container even when DDEV
+    # recreates it. Keep this internal name away from public upstreams.
+    DNSMASQ_ARGS+=(--server=/ddev-devshot-web/127.0.0.11 --max-cache-ttl=5 --max-ttl=5 --no-negcache)
+  fi
   if [ "$DNS_LOG" = "1" ]; then
     DNSMASQ_ARGS+=(--log-queries --log-facility=-)
   fi

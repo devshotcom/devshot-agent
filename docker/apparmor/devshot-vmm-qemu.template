@@ -53,6 +53,7 @@ profile devshot-vmm-qemu-@{VM_NAME} flags=(chroot_relative) {
   # separately as `k`.
   /run/devshot/ rw,
   /run/devshot/pid rwk,
+  /run/devshot/studio-live-backup.qcow2 rwk,
   # QEMU's virtio-9p local backend stats the exact FileXenstore directory
   # before it can expose the share. AppArmor directory mediation requires a
   # trailing-slash rule; the recursive child rule alone does not grant this
