@@ -3,5 +3,5 @@
   "repository": "devshotcom/devshot",
   "release_tag": "v0.6.1224",
   "source_sha": "b972688c12711d7aa4838b5d846c5daccca9379b",
-  "release_mode": "regular"
+  "release_mode": "full"
 }
