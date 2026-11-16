@@ -60,7 +60,7 @@ echo 'options single-request-reopen' >> /etc/resolv.conf 2>/dev/null || true
 echo 'nameserver 1.1.1.1'              >> /etc/resolv.conf 2>/dev/null || true
 apk update || (sleep 5 && apk update)
 apk add --no-cache \
-    ca-certificates wget git sudo \
+    ca-certificates wget git sudo bash \
     tigervnc \
     openbox tint2 picom \
     pcmanfm xterm \
