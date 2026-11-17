@@ -12,6 +12,8 @@ PassEnvironment=DEVSHOT_SHELL_ONLY_ALLOW_HOSTS DEVSHOT_TLS_SKIP DEVSHOT_STRICT_A
 # Guest DNS forwarder knobs (entrypoint-vmm-qemu.sh); without this line the
 # documented variables never reach the entrypoint under systemd.
 PassEnvironment=DEVSHOT_DNS_UPSTREAM DEVSHOT_DNS_LOG DEVSHOT_DNS_DISABLE
+# Internal addresses guests may reach on web ports (nftables.go vmInternalEgressRules).
+PassEnvironment=VM_EGRESS_ALLOW_CIDRS
 PassEnvironment=LAMP_SYNC_INTERVAL LAMP_SYNC_DOWNLOAD_TIMEOUT
 PassEnvironment=DEVSHOT_DEV_RUNTIME DEVSHOT_TEMPLATE_SOURCE
 PassEnvironment=GUESTS_DIR CONFIGS_DIR DEVSHOT_DATA_DIR BASE_IMAGE KERNEL RAMDISK
