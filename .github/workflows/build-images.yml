@@ -552,7 +552,9 @@ jobs:
     runs-on:
       group: devshot-agent-builders
       labels: [self-hosted, Linux, ARM64, devshot-arm64]
-    timeout-minutes: 720
+    # A cold native kernel build was still compiling drivers at the old
+    # 12-hour cutoff. Allow time to validate and publish the finished image.
+    timeout-minutes: 1080
     env:
       CHECKOUT_DIR: source-${{ github.run_id }}-${{ github.run_attempt }}-arm64-dom0
       BUILDER_NAME: devshot-build-${{ github.run_id }}-${{ github.run_attempt }}-dom0
