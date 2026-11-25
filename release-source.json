@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "devshotcom/devshot",
-  "release_tag": "v0.6.1255",
-  "source_sha": "c843635b04b750b2f6e7f328e5c83c5d339e69d4",
-  "release_mode": "regular"
+  "release_tag": "backend-v0.6.1256",
+  "source_sha": "3b3a8069d6d87065fb8aaa11049ea983eb32c141",
+  "release_mode": "full"
 }
