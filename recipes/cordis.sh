@@ -22,6 +22,9 @@ apk add --no-cache \
 # from nodejs.org (see recipes/lib/install-node.sh).
 /usr/local/libexec/devshot/install-node.sh
 
+# The upstream scaffold ships a Yarn lockfile with its tested plugin versions.
+npm install --global --prefix /usr/local --no-audit --no-fund @yarnpkg/cli-dist@4.19.0
+
 # Runtime tools and the supervised services run as the unprivileged devshot user.
 install -d -m 0750 /etc/sudoers.d
 printf 'devshot ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/devshot
@@ -530,8 +533,8 @@ install -d cordis
 tar -xzf /home/devshot/cordis-boilerplate.tgz -C cordis --strip-components=1
 rm /home/devshot/cordis-boilerplate.tgz
 cd /var/www/cordis
-# Yakumo requires the package manager used to install and build the scaffold.
-npm pkg set name=cordis "packageManager=npm@$(npm --version)"
+# Yakumo reads packageManager when building the scaffold.
+npm pkg set "packageManager=yarn@$(yarn --version)"
 
 install -d external/devshot-agent-bridge/src
 cp /opt/devshot-cordis-agent-bridge/package.json external/devshot-agent-bridge/package.json
@@ -548,16 +551,12 @@ if ! grep -q '^[[:space:]]*host:[[:space:]]*0\.0\.0\.0[[:space:]]*$' app.yml; th
 fi
 
 printf '\n# DevShot platform files (regenerated at boot)\n.devshot/\nexternal/devshot-agent-bridge/\n' >> .gitignore
-npm install --no-audit --no-fund
-npm run build
+# Register the two local DevShot plugins while retaining upstream's locked graph.
+yarn install
+yarn run build
 
 test -x node_modules/.bin/cordis || {
   echo 'FATAL: Cordis CLI missing after bake' >&2
-  exit 1
-}
-npm ls --depth=0 >/dev/null 2>&1 || {
-  echo 'FATAL: npm reports unsatisfied Cordis dependencies' >&2
-  npm ls --depth=0 >&2
   exit 1
 }
 BUILDCORDIS
@@ -590,6 +589,8 @@ if [ ! -x node_modules/.bin/cordis ]; then
   echo '[boot] Cordis dependencies missing; restoring them' >> "$LOG"
   if [ -f package-lock.json ]; then
     npm ci --prefer-offline --no-audit --no-fund >> "$LOG" 2>&1
+  elif [ -f yarn.lock ]; then
+    yarn install --immutable >> "$LOG" 2>&1
   else
     npm install --prefer-offline --no-audit --no-fund >> "$LOG" 2>&1
   fi
@@ -741,7 +742,7 @@ chown devshot:devshot /home/devshot/.openvscode-server/data/User/settings.json
 
 # /tmp/xenstore is a live QGA mount during image baking; never sweep /tmp as a
 # glob. Every recipe-owned temporary file was removed at its point of use.
-rm -rf /home/devshot/.npm /home/devshot/.cache /root/.npm /var/cache/apk/*
+rm -rf /home/devshot/.npm /home/devshot/.yarn/berry/cache /home/devshot/.cache /root/.npm /var/cache/apk/*
 
 echo "=== Cordis recipe complete ==="
 node --version
