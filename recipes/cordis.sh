@@ -516,12 +516,16 @@ fi
 ENSUREOUTPUT
 chmod 0755 /usr/local/libexec/devshot/ensure-cordis-output
 
+# The bake chroot's /tmp belongs to root. Yarn and tsx create temporary files
+# as devshot, both during the bake and when the runtime starts.
+install -d -m 0700 -o devshot -g devshot /var/tmp/devshot-cordis
 # Build the official Cordis scaffold as the same user that later edits and runs it.
 install -d -o devshot -g devshot /var/www
 cat > /tmp/devshot-build-cordis.sh <<'BUILDCORDIS'
 #!/bin/sh
 set -eux
 export HOME=/home/devshot
+export TMPDIR=/var/tmp/devshot-cordis
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 cd /var/www
@@ -571,6 +575,7 @@ cat > /usr/local/bin/start-cordis <<'LAUNCHER'
 set -eu
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export HOME=/home/devshot
+export TMPDIR=/var/tmp/devshot-cordis
 cd /var/www/cordis
 LOG="${LOG:-/var/log/cordis.log}"
 
